@@ -273,13 +273,19 @@ class PlaybackController(
             mediaItemId = target.mediaItemId,
             seasonNumber = target.seasonNumber,
             episodeNumber = target.episodeNumber,
-            // 两种情况不报 universal：
-            //  · 限了画质上限——报了服务端会直通原文件，上限形同虚设；
-            //  · 片源是原盘——本机引擎读不了盘内结构（见 DeviceCapability.probe），
-            //    报了会拿到读不了的原始字节，不报则服务端要么明确拒绝、要么拼成 HLS。
+            // 限了画质上限就不报 universal：报了服务端会直通原文件，上限形同虚设。
+            //
+            // 但**原盘恰恰必须报 universal**：服务端的 ISO 分支只在 universal 时才把
+            // 原字节推给客户端（decide.py：capability.universal → tier 0 + disc="image"），
+            // 否则直接拒绝——「服务端读不了光盘镜像（ISO）的盘内结构，没法为这个播放器
+            // 换封装或转码」。这里原来把 discSource 也算进"不报"的一侧（那是只有 Exo
+            // 内核、读不了盘内结构时的判断），结果 ISO 一播就被服务端挡下。
+            // 盘内结构本来就是我们在本机读（IsoBridge + UDF over HTTP），所以这条申报
+            // 与真实能力一致；MpvNative 不可用时（没带预编译库的构建）照旧不报，
+            // 让服务端把原因说清楚，而不是发来一份注定放不了的原字节。
             capability = DeviceCapability.probe(
                 appContext,
-                universal = qualityCapHeight == null && !target.discSource,
+                universal = (target.discSource && MpvNative.available) || qualityCapHeight == null,
             ),
             failedTiers = failedTiers.toList(),
             maxHeight = qualityCapHeight,
