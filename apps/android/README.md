@@ -51,8 +51,12 @@ app/src/main/cpp/      mpv_bridge(libmpv dlopen)、iso_native(UDF over HTTP Rang
 - **播放链路(双内核)**:`POST /playback/sessions` 协商 → ExoPlayer 直连/HLS 或 MPV 全量直连 →
   start + 10s progress 上报(互斥串行)→ 15s 会话心跳(404 原位重开)→ 退出 stop + 关会话;
   capability 按设备 MediaCodec 实测上报;consent(软件转码)走 `PUT /playback/policy` 后原请求重发
-- **MPV 万能内核(M1b)**:libmp2.so(lanplayer 验证过的 libmpv 全量版,静态编入
-  libass/fontconfig/ffmpeg)+ JNI 桥(`cpp/mpv_bridge.cpp`,dlopen 方案)+ CMake 原生构建;
+- **MPV 万能内核(M1b)**:libmp2.so(lanplayer 验证过的 libmpv 构建)+ JNI 桥
+  (`cpp/mpv_bridge.cpp`,dlopen 方案)+ CMake 原生构建。它是**共享 FFmpeg 的构建**:
+  `readelf -d libmp2.so` 的 NEEDED 里列着 libavcodec / libavformat / libavfilter /
+  libavutil / libswscale / libswresample / libavdevice / libc++_shared——这几个必须
+  和它一起放进 `jniLibs/arm64-v8a/`,少一个 dlopen 就失败(动态链接器解析 NEEDED 时不
+  看是否真的用到);
   VC-1/MPEG-2/TrueHD/PGS 本地全解,ASS 特效字幕内核直渲;Surface 生命周期契约
   (wid=全局引用 / android-surface-size / vo=null→detach)逐条照抄 lanplayer 实证版本;
   内核选项配方(缓存落盘、stream-lavf-o 重连组、HDR tone-map、CVE 黑名单)全部内置
