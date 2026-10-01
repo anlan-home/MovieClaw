@@ -3,13 +3,13 @@ package io.movieclaw.android.core.playback
 import android.util.Log
 
 /**
- * ISO 原盘直连（对应 `cpp/iso_native.cpp`，源头是 lanplayer 同一套实现）。
+ * ISO 原盘直连（对应 `cpp/iso_native.cpp`）。
  *
  * 服务端对光盘镜像只按 Range 供原字节（`disc-direct-play.md`），盘内结构由播放器在本机读。
  * 这里做四件事：远端 ISO 按 HTTP Range 读（带预读窗口）→ libudfread 打开 UDF 卷 →
  * 扫 `BDMV/STREAM` 找正片 m2ts → 用本机 127.0.0.1 服务把它以 Range/206 暴露成
  * `http://127.0.0.1:PORT/stream.m2ts`。解码交给 mpv（它是唯一能放这种流的引擎，
- * 与 lanplayer 的 `isIsoProxyStreamUrl` 判断一致）。
+ * 与内核那边的原盘代理判断一致）。
  *
  * 用法：`open(isoUrl)?.let { 用返回的本地地址起播 }`；换片/退出时 `close()`。
  */

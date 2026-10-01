@@ -70,14 +70,14 @@ app/src/main/cpp/      mpv_bridge(libmpv dlopen)、iso_native(UDF over HTTP Rang
 - **播放链路(双内核)**:`POST /playback/sessions` 协商 → ExoPlayer 直连/HLS 或 MPV 全量直连 →
   start + 10s progress 上报(互斥串行)→ 15s 会话心跳(404 原位重开)→ 退出 stop + 关会话;
   capability 按设备 MediaCodec 实测上报;consent(软件转码)走 `PUT /playback/policy` 后原请求重发
-- **MPV 万能内核(M1b)**:libmp2.so(lanplayer 验证过的 libmpv 构建)+ JNI 桥
+- **MPV 万能内核(M1b)**:libmp2.so(libmpv 构建,已在真机验证过)+ JNI 桥
   (`cpp/mpv_bridge.cpp`,dlopen 方案)+ CMake 原生构建。它是**共享 FFmpeg 的构建**:
   `readelf -d libmp2.so` 的 NEEDED 里列着 libavcodec / libavformat / libavfilter /
   libavutil / libswscale / libswresample / libavdevice / libc++_shared——这几个必须
   和它一起放进 `jniLibs/arm64-v8a/`,少一个 dlopen 就失败(动态链接器解析 NEEDED 时不
   看是否真的用到);
   VC-1/MPEG-2/TrueHD/PGS 本地全解,ASS 特效字幕内核直渲;Surface 生命周期契约
-  (wid=全局引用 / android-surface-size / vo=null→detach)逐条照抄 lanplayer 实证版本;
+  (wid=全局引用 / android-surface-size / vo=null→detach)逐条照抄已验证的契约;
   内核选项配方(缓存落盘、stream-lavf-o 重连组、HDR tone-map、CVE 黑名单)全部内置
 - **引擎策略**:默认 Exo(省电);直连解码失败自动降级 MPV(仅直连场景,HLS 不切);
   播放中手动切换只迁移 position/playing/speed;右上角 EXO/MPV 徽标可点
@@ -220,7 +220,7 @@ app/src/main/java/io/movieclaw/android/
 ## 里程碑
 
 - **M0**(本阶段):地基 + 登录 + 浏览最小闭环
-- **M1**:媒体库条目/分集 + 播放器全链路(Exo + MPV 双内核,资产来自 LAN Player,见设计方案 §6)
+- **M1**:媒体库条目/分集 + 播放器全链路(Exo + MPV 双内核)
 - **M2**:发现板块 + 搜索(站点 SSE)+ 订阅 + 活动(jobs SSE)+ 通知
 - **M3**:Reels + Agent + 访客分享 + 设置 18 节 + 多账号
 - **M4**:性能打磨、QoE 完善、发布
@@ -228,4 +228,4 @@ app/src/main/java/io/movieclaw/android/
 ## 服务端联调
 
 App 与 `movieclaw/movieclaw` Docker 容器直连(默认 `http://<NAS_IP>:3000`);
-真机与服务器需在同一局域网。过渡期也可用 LAN Player 经 Jellyfin 兼容层直连 MovieClaw 验证播放链路。
+真机与服务器需在同一局域网。过渡期也可用任意 Jellyfin 兼容客户端直连 MovieClaw 验证播放链路。

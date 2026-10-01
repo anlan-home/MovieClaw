@@ -11,8 +11,8 @@
 //   结束偏移 + "/" + (总长 或 "*")
 // "bytes */TOTAL"（416 响应）没有可用起始偏移 → 返回 false。
 
-#ifndef LANPLAYER_ISO_HTTP_RANGE_H
-#define LANPLAYER_ISO_HTTP_RANGE_H
+#ifndef MOVIECLAW_ISO_HTTP_RANGE_H
+#define MOVIECLAW_ISO_HTTP_RANGE_H
 
 #include <cstdint>
 #include <cstdlib>
@@ -54,4 +54,4 @@ inline bool parseContentRange(const char *value, ContentRange *out) {
     return true;
 }
 
-#endif  // LANPLAYER_ISO_HTTP_RANGE_H
+#endif  // MOVIECLAW_ISO_HTTP_RANGE_H

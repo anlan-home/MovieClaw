@@ -1,4 +1,4 @@
-// lanplayer_mpv.cpp — 定制 libmpv 的 JNI 桥
+// mpv_bridge.cpp — 定制 libmpv 的 JNI 桥
 //
 // 编译开关 HAS_MPV：链接预编译的 libmpv.so（我们构建的版本，静态含
 // libass/fontconfig/ffmpeg）。未启用时提供桩实现，构建不失败。

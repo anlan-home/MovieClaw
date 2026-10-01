@@ -22,7 +22,7 @@ import kotlinx.serialization.json.jsonPrimitive
  * MPV 万能内核(AetherEngine 的 Android 对位):
  *   libmpv(vo=gpu-next + gpu-context=android)直渲 SurfaceView,不经过任何纹理管线;
  *   VC-1/MPEG-2/TrueHD/PGS 本地全解,ASS 特效字幕由内核内置 libass 渲染进视频。
- * Surface 契约与 mpv-android 官方一致(照抄 lanplayer 实证版本):
+ * Surface 契约与 mpv-android 官方一致(按已验证的版本实现):
  *   attach = 全局引用 + wid;detach = wid=0 → vo=null;尺寸唯一入口 = android-surface-size。
  */
 class MpvEngine(private val context: Context) : PlayerEngine {
@@ -71,7 +71,7 @@ class MpvEngine(private val context: Context) : PlayerEngine {
         if (handle != 0L) MpvNative.nativeSetProperty(handle, name, value)
     }
 
-    /** 内核选项配方:全部来自 lanplayer 真机实证(每条理由见设计方案 §6.2) */
+    /** 内核选项配方:全部来自真机实证(每条理由见设计方案 §6.2) */
     private fun applyCoreOptions() {
         setProperty("vo", "gpu-next")
         setProperty("gpu-context", "android")

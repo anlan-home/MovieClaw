@@ -65,7 +65,7 @@ class PlaybackController(
     private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val engines = mutableMapOf<EngineKind, PlayerEngine>()
 
-    // 默认 **Exo**（与 lanplayer 一致）：硬解、省电；只有 Exo 解不了的容器（ISO/蓝光原盘等）
+    // 默认 **Exo**：硬解、省电；只有 Exo 解不了的容器（ISO/蓝光原盘等）
     // 才切到 mpv 内核。mpv 同时承担解码失败兜底。
     private val _engineKind = MutableStateFlow(EngineKind.EXO)
     val engineKind: StateFlow<EngineKind> = _engineKind.asStateFlow()
@@ -214,7 +214,7 @@ class PlaybackController(
         mainScope.launch { switchEngine(EngineKind.MPV) }
     }
 
-    /** 播放中切内核:只迁移 position / playing / speed(lanplayer 契约);轨道重挂在 M1c 轨道管线接管 */
+    /** 播放中切内核:只迁移 position / playing / speed(内核切换契约);轨道重挂在 M1c 轨道管线接管 */
     /**
      * 起播前选内核：此时还没 open 过任何东西，只改状态、不动播放器。
      *
@@ -395,7 +395,7 @@ class PlaybackController(
         val startPosition = if (fileTimeline) view.startMs else 0L
         // 光盘镜像（ISO）：本机读 UDF 卷、找正片 m2ts、用本地服务暴露成普通流，
         // 再把**本地地址**交给 mpv（Exo 与远端 mpv 都读不了 ISO 原始字节）。
-        // 与 lanplayer 的 isIsoProxyStreamUrl 同路：拿到 /stream.m2ts 就走 mpv。
+        // 与内核那边的原盘代理判断同路：拿到 /stream.m2ts 就走 mpv。
         val playUrl = isoLocalUrl ?: url
         android.util.Log.i(
             "McPlayer",
@@ -417,9 +417,9 @@ class PlaybackController(
             ?: target.preferredAudio
             ?: view.watch?.audioTrack
         _selectedSubtitleRef.value = target.preferredSubtitle ?: view.watch?.subtitleTrack
-        // 切核策略照搬 lanplayer 的 auto：网络流/HLS 走 Exo（硬解最优）；
+        // 切核策略照搬已验证的 auto：网络流/HLS 走 Exo（硬解最优）；
         // **原盘代理流（.m2ts/.iso/bdmv）与 HDR 内容切 mpv**（格式兼容 + tone-mapping）。
-        // 真机实证（lanplayer 2026-09-27）：Exo 播原盘 m2ts 会白等 5 秒才失败回退。
+        // 真机实证（2026-09-27）：Exo 播原盘 m2ts 会白等 5 秒才失败回退。
         if (MpvNative.available) {
             val raw = (view.streamUrl ?: view.masterUrl ?: "").lowercase()
             // 原盘判定**不能挂 timeline=file**：直出的原盘没有 timeline 字段，

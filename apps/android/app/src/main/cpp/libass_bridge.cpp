@@ -43,7 +43,7 @@ typedef void (*fn_free_track)(ASS_Track *);
 typedef ASS_Image *(*fn_render_frame)(ASS_Renderer *, ASS_Track *, long long, int *);
 
 /* ---- 样式覆盖用的结构体：字段顺序照抄 libass 的 ass_types.h（含 ABI 占位字段），
-   手写容易错位导致内存踩坏，所以直接从 lanplayer 的头文件抄过来 ---- */
+   手写容易错位导致内存踩坏，所以直接照抄一份已验证的头文件定义 ---- */
 typedef struct ass_style {
     char *Name;
     char *FontName;
@@ -179,7 +179,7 @@ Java_io_movieclaw_android_core_playback_LibassBridge_nativeInit(
     }
     LOGI("默认字体: %s", picked ? picked : "(未找到，交给 fontconfig)");
     p_set_fonts(g_renderer, picked, "sans-serif", 1, nullptr, 1);
-    // 与 lanplayer 对齐的三处：storage 尺寸（影响定位/缩放）、轻提示（字形更利落）、不使用边距
+    // 与已验证实现对齐的三处：storage 尺寸（影响定位/缩放）、轻提示（字形更利落）、不使用边距
     if (p_set_storage_size) p_set_storage_size(g_renderer, w, h);
     if (p_set_hinting) p_set_hinting(g_renderer, 1);      // ASS_HINTING_LIGHT
     if (p_set_use_margins) p_set_use_margins(g_renderer, 0);
