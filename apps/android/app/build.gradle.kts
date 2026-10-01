@@ -1,3 +1,14 @@
+import java.net.URI
+import java.security.MessageDigest
+import java.util.zip.ZipInputStream
+import org.gradle.api.DefaultTask
+import org.gradle.api.provider.Property
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.TaskAction
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -45,6 +56,119 @@ android {
     packaging {
         resources.excludes += setOf("META-INF/{AL2.0,LGPL2.1}", "META-INF/LICENSE.md", "META-INF/LICENSE-notice.md")
     }
+}
+
+// ---------------------------------------------------------------------------
+// 预编译原生库（FFmpeg / mpv / libass 的 arm64-v8a 产物）
+//
+// 它们体积大、又是第三方二进制（分发另有许可要求），所以不入库，放在 Release 附件里。
+// 缺了它们照样能编出可用的 APK（纯 Exo 内核），所以**不阻塞构建**：
+//   · 想要全功能包：构建时自动下载一次（约 38MB）→ 校验 sha256 → 解压到 jniLibs
+//   · 离线 / 下载失败：打一行提示后继续，出的是仅 Exo 内核的包
+//
+// 任务写成一个**类**而不是 script 里的闭包：执行期闭包会捕获脚本对象，
+// 配置缓存（org.gradle.configuration-cache=true）会直接拒绝序列化它们。
+// ---------------------------------------------------------------------------
+
+/**
+ * 下载并解压 arm64-v8a 预编译原生库。
+ *
+ * 所有输入都是 Gradle 托管的属性（`Property` / `DirectoryProperty`），
+ * 任务动作里只碰 JDK API —— 这样才与配置缓存兼容。
+ */
+abstract class DownloadNativeLibsTask : DefaultTask() {
+
+    @get:Input
+    abstract val zipUrl: Property<String>
+
+    @get:Input
+    abstract val zipSha256: Property<String>
+
+    /** 产物落点：jniLibs 是 AGP 的约定目录 */
+    @get:OutputDirectory
+    abstract val targetDir: DirectoryProperty
+
+    /** 下载中转目录 */
+    @get:Internal
+    abstract val workDir: DirectoryProperty
+
+    @TaskAction
+    fun download() {
+        val dir = targetDir.get().asFile
+        if (File(dir, "libmp2.so").exists()) {
+            logger.lifecycle("预编译原生库已就位：${dir.path}（要重下先删掉这个目录）")
+            return
+        }
+        dir.mkdirs()
+        val tmp = workDir.get().asFile.also { it.mkdirs() }
+        val zip = File(tmp, "native-libs.zip")
+        try {
+            logger.lifecycle("下载预编译原生库（约 38MB，仅首次）…")
+            URI(zipUrl.get()).toURL().openStream().use { input ->
+                zip.outputStream().use { output -> input.copyTo(output) }
+            }
+            val actual = MessageDigest.getInstance("SHA-256")
+                .digest(zip.readBytes())
+                .joinToString("") { "%02x".format(it) }
+            if (!actual.equals(zipSha256.get(), ignoreCase = true)) {
+                throw GradleException(
+                    "预编译原生库校验失败：期望 ${zipSha256.get()}，实际 $actual。已丢弃下载内容，" +
+                        "请重试或改 gradle.properties 里的 nativeLibsUrl / nativeLibsSha256。",
+                )
+            }
+            // 包结构：arm64-v8a/*.so（NOTICE.md 在包根）→ 只取 so，平铺进 jniLibs。
+            // 条目名可能带反斜杠（PowerShell 的 Compress-Archive 就是这样），统一按 / 判定。
+            var count = 0
+            ZipInputStream(zip.inputStream().buffered()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    val name = entry.name.replace('\\', '/')
+                    if (!entry.isDirectory && name.startsWith("arm64-v8a/") && name.endsWith(".so")) {
+                        File(dir, name.substringAfterLast('/')).outputStream().use { out ->
+                            zis.copyTo(out)
+                        }
+                        count++
+                    }
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+            logger.lifecycle("原生库就位：$count 个 .so → ${dir.path}")
+        } catch (e: Exception) {
+            // 拉不到就拉倒：没有这些库也能编出可用的 Exo 内核包，不能让它挡住构建
+            logger.lifecycle(
+                "预编译原生库下载失败（${e.message}）。本次构建为**仅 Exo 内核**的 APK：" +
+                    "没有 ISO / BDMV 原盘直读与 MPV 软解、HDR、ASS 特效字幕。联网后重跑即会重试。",
+            )
+        } finally {
+            zip.delete()
+        }
+    }
+}
+
+/**
+ * 发布附件地址与校验和（换版本改 gradle.properties 里那两行）。
+ * 这里全部落成 `File` / 字符串常量，供任务在配置期读取。
+ */
+val nativeLibsUrl: String = (findProperty("nativeLibsUrl") as String?)
+    ?: "https://github.com/anlan-home/MovieClaw/releases/download/android-native-libs/movieclaw-android-native-arm64-v8a.zip"
+val nativeLibsSha256: String = (findProperty("nativeLibsSha256") as String?)
+    ?: "c64766c609d6e8b1096385e0fdac46ba810e06a30b81176d809ad96ff7277f72"
+
+/** 跳过自动下载（离线打包用 -PskipNativeLibsDownload=true） */
+val skipNativeLibsDownload = (findProperty("skipNativeLibsDownload") as String?) == "true"
+
+val downloadNativeLibs = tasks.register<DownloadNativeLibsTask>("downloadNativeLibs") {
+    group = "build"
+    description = "下载并解压 arm64-v8a 预编译原生库（FFmpeg / mpv / libass）"
+    zipUrl.set(nativeLibsUrl)
+    zipSha256.set(nativeLibsSha256)
+    targetDir.set(layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a"))
+    workDir.set(layout.buildDirectory.dir("tmp/nativeLibs"))
+}
+
+if (!skipNativeLibsDownload) {
+    tasks.named("preBuild") { dependsOn(downloadNativeLibs) }
 }
 
 kotlin {
