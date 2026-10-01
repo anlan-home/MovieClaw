@@ -13,14 +13,33 @@ echo "sdk.dir=<你的 Android SDK 路径>" > local.properties   # 或设 ANDROID
 ```
 
 - 需要 JDK 17、Android SDK(compileSdk 36 / minSdk 26)、NDK 28.2(构建 ISO 直读那部分 JNI)。
-- **预编译依赖不在仓库里**(`app/src/main/jniLibs/arm64-v8a/` 下的 FFmpeg / mpv / libass
-  等三方产物,入库前约 116MB、进 APK 约 33MB):一是体积,二是这些二进制分发的许可
-  要求与源码不同。**缺了它们照样能编出可安装、可运行的完整 APK**——CMake 不链接这些库
-  (`libmp2.so` 是运行时 dlopen),缺库时 `MpvNative.available` 为 false,应用干净地
-  只用 Exo 内核。区别只在播放能力:ISO / BDMV 原盘直读、VC-1/MPEG-2/TrueHD/PGS 软解、
-  HDR 与 ASS 特效字幕的 MPV 路径不可用。
-  想要全功能构建:自行编译 mpv + FFmpeg 的 arm64 产物,或用同作者 lanplayer 工程里
-  那份已编译版本(`libmp2.so` 即 libmpv 全量版),放进 `app/src/main/jniLibs/arm64-v8a/`。
+- **预编译原生库会在首次构建时自动下载**(约 38MB,来自 Releases 的 `android-native-libs`):
+  构建脚本先校验 sha256 再解压到 `app/src/main/jniLibs/arm64-v8a/`,只下一次。
+  地址与校验和在 `gradle.properties` 的 `nativeLibsUrl` / `nativeLibsSha256`,换版本改这两行;
+  离线或下载失败**不会中断构建**,只是产出一个仅 Exo 内核的包(提示会写在构建日志里)。
+  想显式跳过:`./gradlew :app:assembleDebug -PskipNativeLibsDownload=true`。
+### 预编译依赖(FFmpeg / mpv / libass)
+
+`app/src/main/jniLibs/arm64-v8a/` 下的 10 个 `.so` 是第三方二进制(入库前约 116MB、
+strip 进 APK 后约 33MB),**不入库**,作为 [Release 附件](https://github.com/anlan-home/MovieClaw/releases/tag/android-native-libs) 提供:
+
+| 文件 | 作用 |
+| --- | --- |
+| `libmp2.so` | mpv 内核(libmpv 接口),应用运行时 `dlopen` 它 |
+| `libavcodec` `libavformat` `libavfilter` `libavutil` `libswscale` `libswresample` `libavdevice` | FFmpeg 共享库,`libmp2.so` 的 `NEEDED` 依赖 |
+| `libc++_shared.so` | C++ 运行库(mpv / FFmpeg 需要;本项目的 JNI 库不依赖它) |
+| `libass.so` | 字幕渲染;仅供已废弃的 `cpp/libass_bridge.cpp`,可不带 |
+
+**少任何一个 `libmp2.so` 的 NEEDED 都会让 dlopen 失败**——动态链接器解析依赖时不看
+上游是否真的用到它,所以不能按需裁剪。
+
+缺这些库时**照样能编出可安装、可运行的 APK**(CMake 不链接它们,`libmp2.so` 是运行时
+dlopen;缺库时 `MpvNative.available` 为 false,应用干净地只用 Exo 内核),区别只在
+播放能力:ISO / BDMV 原盘直读、VC-1/MPEG-2/TrueHD/PGS 软解、HDR 与 ASS 特效字幕
+的 MPV 路径不可用。构建脚本会在首次构建时自动拉这个附件,拉不到就退回 Exo 内核包。
+
+二进制再分发注意许可:mpv GPL-2.0+、FFmpeg LGPL-2.1+ 或 GPL-2.0+(视构建开关)、
+libass ISC、libc++ Apache-2.0 with LLVM exception;附件里的 `NOTICE.md` 有逐项来源。
 
 ## 代码结构
 
