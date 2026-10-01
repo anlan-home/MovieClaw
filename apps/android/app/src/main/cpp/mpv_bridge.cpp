@@ -123,6 +123,19 @@ static bool attach_surface(JNIEnv *env, mpv_handle *mpv, jobject surface) {
 }
 #endif
 
+/**
+ * libmp2.so 到底在不在。
+ *
+ * Kotlin 侧的 `MpvNative.available` 原本只看「我们自己的 JNI 库加载成功没有」——
+ * 那个库永远随源码一起编出来,所以**没有 libmp2.so 它也是 true**：引擎菜单会给出
+ * 一个点了就黑屏的 MPV 选项(不报错、不回退,最难查的那种)。这里把 dlopen 的真实
+ * 结果报上去,让上层在缺库时干净地只用 Exo。
+ */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeMpvAvailable(JNIEnv *, jclass) {
+    return load_mpv_symbols() ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeCreate(JNIEnv *env, jclass,
                                           jobject surface) {

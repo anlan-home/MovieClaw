@@ -14,9 +14,13 @@ echo "sdk.dir=<你的 Android SDK 路径>" > local.properties   # 或设 ANDROID
 
 - 需要 JDK 17、Android SDK(compileSdk 36 / minSdk 26)、NDK 28.2(构建 ISO 直读那部分 JNI)。
 - **预编译依赖不在仓库里**(`app/src/main/jniLibs/arm64-v8a/` 下的 FFmpeg / mpv / libass
-  等约 116MB 三方产物):一是体积,二是这些二进制分发的许可要求与源码不同。缺了它们
-  编译会失败,但只读代码 / 评审不受影响。获取方式:自行构建 mpv + FFmpeg 的 arm64 产物,
-  或使用同作者的 lanplayer 工程里那份已编译版本(`libmp2.so` 即 libmpv 全量版)。
+  等三方产物,入库前约 116MB、进 APK 约 33MB):一是体积,二是这些二进制分发的许可
+  要求与源码不同。**缺了它们照样能编出可安装、可运行的完整 APK**——CMake 不链接这些库
+  (`libmp2.so` 是运行时 dlopen),缺库时 `MpvNative.available` 为 false,应用干净地
+  只用 Exo 内核。区别只在播放能力:ISO / BDMV 原盘直读、VC-1/MPEG-2/TrueHD/PGS 软解、
+  HDR 与 ASS 特效字幕的 MPV 路径不可用。
+  想要全功能构建:自行编译 mpv + FFmpeg 的 arm64 产物,或用同作者 lanplayer 工程里
+  那份已编译版本(`libmp2.so` 即 libmpv 全量版),放进 `app/src/main/jniLibs/arm64-v8a/`。
 
 ## 代码结构
 
