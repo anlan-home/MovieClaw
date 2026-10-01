@@ -13,8 +13,8 @@
 // 线程模型：本类**不含锁**。调用方（iso_native.cpp）在外层持有互斥量，
 // 并把"抓取中"的等待交给条件变量 —— 见 test 8：抓取中的块不应被重复报缺。
 
-#ifndef LANPLAYER_ISO_READAHEAD_H
-#define LANPLAYER_ISO_READAHEAD_H
+#ifndef MOVIECLAW_ISO_READAHEAD_H
+#define MOVIECLAW_ISO_READAHEAD_H
 
 #include <cstddef>
 #include <cstdint>
@@ -163,4 +163,4 @@ private:
     Slot slots_arr_[kMaxSlots];
 };
 
-#endif  // LANPLAYER_ISO_READAHEAD_H
+#endif  // MOVIECLAW_ISO_READAHEAD_H

@@ -1,15 +1,15 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(movieclaw_native LANGUAGES C CXX)
 
-# MPV JNI 桥:HAS_MPV 启用后按 lanplayer 验证过的 dlopen 方案加载 libmp2.so
+# MPV JNI 桥:HAS_MPV 启用后按已验证的 dlopen 方案加载 libmp2.so
 # (libmpv 全量版,静态编入 libass/fontconfig/ffmpeg;符号经 dlsym 解析,
-#  不与其余库的 DT_NEEDED 冲突)。源头:lanplayer cpp/lanplayer_mpv.cpp。
+#  不与其余库的 DT_NEEDED 冲突)。
 add_library(movieclaw_jni SHARED
     mpv_bridge.cpp
     libass_bridge.cpp
     # ISO 原盘直连:自定义块读取把 libudfread 的 UDF 卷读翻译成对远端 ISO 的 HTTP Range,
     # 再把 BDMV/STREAM 的正片 m2ts 用本机 127.0.0.1 服务暴露给 mpv。
-    # 源头:lanplayer 的 cpp/iso_native.cpp + 其 vendored libudfread(纯 C,零依赖,源码直编)。
+    # 配套 vendored libudfread(纯 C,零依赖,源码直编)。
     iso_native.cpp
     libudfread/udfread.c
     libudfread/udf_volume.c

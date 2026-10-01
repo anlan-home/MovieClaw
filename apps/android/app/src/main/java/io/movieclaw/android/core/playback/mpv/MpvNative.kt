@@ -4,7 +4,7 @@ import android.view.Surface
 
 /**
  * MPV JNI 桥(libmovieclaw_jni,源码 cpp/mpv_bridge.cpp)。
- * libmp2.so 为 lanplayer 验证过的 libmpv 全量构建(静态编入 libass/fontconfig/ffmpeg),
+ * libmp2.so 为已验证的 libmpv 构建(共享 FFmpeg,清单见 README「预编译依赖」),
  * 经 dlopen 加载、dlsym 解析符号。加载失败置 available=false,上层回退 Exo 而非闪退。
  *
  * `available` 取的是 **libmp2.so 的 dlopen 结果**,不只是我们自己的 JNI 库加载成功:
