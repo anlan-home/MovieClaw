@@ -77,13 +77,67 @@ fun ingestOwnsTaskState(task: DownloadTask, ingestJob: JobView?): Boolean {
 fun JobView.isSystemCancelled(): Boolean =
     status == "cancelled" && cancelRequestedBy?.startsWith("system:") == true
 
-/** 已完成任务的动作名，照网页 `COMPLETED_JOB_ACTIONS` 搬 */
+/**
+ * 任务的三张文案表（网页 `JOB_TYPE_LABELS` / `JOB_STATUS_LABELS` / `ACTIVE_JOB_ACTIONS`
+ * 与 iOS `TaskCenter` 的同名表，逐条照抄）。**全站唯一一份**：进行中的卡片、需要处理的
+ * 卡片、历史标题都从这里取——以前三处各写各的，`library.skip_segments` 这种原始键就
+ * 从没补过的表里漏到了界面上（用户看到的正是它）。
+ */
+internal fun jobTypeLabel(jobType: String): String = when (jobType) {
+    "subtitle.generate" -> "生成 AI 字幕"
+    "library.scan" -> "扫描媒体库"
+    "library.metadata.refresh" -> "刷新媒体库元数据"
+    "media.metadata.refresh" -> "刷新条目元数据"
+    "library.chapter_images" -> "生成章节"
+    "library.skip_segments", "media.skip_segments" -> "识别片头片尾"
+    "library.organize" -> "整理媒体库文件"
+    "library.transfer" -> "转移媒体库条目"
+    "library.ingest" -> "自动整理入库"
+    // 认不出就给原始键（服务端加了新类型时至少不空白）
+    else -> jobType
+}
+
+/** 状态的展示词（iOS `TaskCenter.jobStatusLabels`） */
+internal fun jobStatusLabel(status: String): String = when (status) {
+    "queued" -> "排队中"
+    "running" -> "进行中"
+    "retry_wait" -> "等待重试"
+    "cancelling" -> "正在取消"
+    "waiting" -> "等待前置任务"
+    "blocked" -> "需要处理"
+    "succeeded" -> "已完成"
+    "failed" -> "未完成"
+    "cancelled" -> "已取消"
+    else -> status
+}
+
+/** 进行中的动作词（iOS `TaskCenter.activeJobStatus` / 网页 `activeJobStatus`） */
+internal fun activeJobStatus(job: JobView): String = if (job.status == "running") {
+    when (job.jobType) {
+        "subtitle.generate" -> "正在生成字幕"
+        "library.scan" -> "正在扫描"
+        "library.metadata.refresh" -> "正在刷新媒体库元数据"
+        "media.metadata.refresh" -> "正在刷新元数据"
+        "library.chapter_images" -> "正在生成章节"
+        "library.skip_segments", "media.skip_segments" -> "正在识别片头片尾"
+        "library.organize" -> "正在整理文件"
+        "library.transfer" -> "正在转移文件"
+        "library.ingest" -> "正在入库"
+        else -> "正在处理"
+    }
+} else {
+    jobStatusLabel(job.status)
+}
+
+/** 已完成任务的动作名，照网页 `COMPLETED_JOB_ACTIONS`（含「片头片尾识别」两项） */
 private val COMPLETED_JOB_ACTIONS = mapOf(
     "subtitle.generate" to "字幕生成",
     "library.scan" to "扫描",
     "library.metadata.refresh" to "元数据刷新",
     "media.metadata.refresh" to "元数据刷新",
     "library.chapter_images" to "章节生成",
+    "library.skip_segments" to "片头片尾识别",
+    "media.skip_segments" to "片头片尾识别",
     "library.organize" to "文件整理",
     "library.transfer" to "文件转移",
     "library.ingest" to "入库",
@@ -117,7 +171,7 @@ fun historicalJobTitle(job: JobView): String {
         "failed" -> "未完成"
         else -> "完成"
     }
-    return if (identity != null && action != null) "$identity$action$result" else "${identity ?: job.jobType}$result"
+    return if (identity != null && action != null) "$identity$action$result" else "${identity ?: jobTypeLabel(job.jobType)}$result"
 }
 
 /** 网页 `historicalJobSummary` */

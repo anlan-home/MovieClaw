@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -23,6 +24,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.rounded.UnfoldMore
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
@@ -44,6 +48,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -321,6 +326,9 @@ fun ItemDetailScreen(
                 if (s.value.item.kind == "tv" && s.value.episodes.isNotEmpty()) {
                     SeasonSection(
                         seasons = s.value.item.seasons,
+                        // 库里实有的季（台账文件的季号集合）：季选择器里给没有的季标「未入库」，
+                        // 与网页/iOS 同口径——元数据的季和实有的季混在一起，不标出来会以为本地存了那么多季
+                        ownedSeasons = s.value.item.files.map { it.seasonNumber }.toSet(),
                         selected = selectedSeason,
                         episodes = s.value.episodes,
                         onSelect = vm::selectSeason,
@@ -448,13 +456,37 @@ private fun Hero(
         }
 
         Column(Modifier.padding(horizontal = McMetrics.pagePadding).offset(y = (-124).dp)) {
-            Text(
-                detail.title,
-                style = McType.title.copy(lineHeight = 36.sp),
-                color = TextPrimary,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-            )
+            // 片名 Logo（网页/iOS 同款，iOS titleArt）：区高固定 96dp——加载前后下面的
+            // 元信息/类型行不跳；本地资产存的是给电视端用的原图；**加载失败或没有
+            // Logo 都回退文字片名**（RemoteImage 的 fallback 正是失败回落）
+            Box(Modifier.fillMaxWidth().height(96.dp), contentAlignment = Alignment.BottomStart) {
+                if (detail.logoUrl.isNullOrBlank()) {
+                    Text(
+                        detail.title,
+                        style = McType.title.copy(lineHeight = 36.sp),
+                        color = TextPrimary,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else {
+                    RemoteImage(
+                        url = detail.logoUrl,
+                        origin = origin,
+                        contentScale = ContentScale.Fit,
+                        contentDescription = detail.title,
+                        modifier = Modifier.fillMaxHeight(),
+                        fallback = {
+                            Text(
+                                detail.title,
+                                style = McType.title.copy(lineHeight = 36.sp),
+                                color = TextPrimary,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                    )
+                }
+            }
             Spacer(Modifier.height(10.dp))
             Text(
                 metaLine(detail),
@@ -905,9 +937,19 @@ private fun CastSection(detail: LibraryItemDetailView, origin: String?) {
     }
 }
 
+/**
+ * 分集区（网页 `SeasonEpisodesSection` / iOS `SeasonEpisodesSection`）：
+ * **季选择器 + 一季一屏的横滚卡**，外加「在库 X / Y 集」计数。
+ *
+ * 集数多时两端都是这么解决的：**先按季收窄**（一次只铺一季的卡），其次把当前那一集
+ * 自动滚到可见处（深链/续播进来一眼就看到自己追到哪，不用手动滑几十屏）。
+ * 季选择器用下拉菜单而不是一排 chips：季多的剧（十几季很常见）chip 一行放不下，
+ * 而这行不滚动——后排的季就点不到了；下拉菜单是可滚的，且能标「未入库」。
+ */
 @Composable
 private fun SeasonSection(
     seasons: List<Int>,
+    ownedSeasons: Set<Int>,
     selected: Int?,
     episodes: Map<Int, List<EpisodeView>>,
     onSelect: (Int) -> Unit,
@@ -917,25 +959,73 @@ private fun SeasonSection(
     itemId: Long,
     itemTitle: String,
 ) {
+    val seasonLabel = { season: Int ->
+        val name = if (season == 0) "特别篇" else "第 $season 季"
+        if (season in ownedSeasons) name else "$name · 未入库"
+    }
     Column(Modifier.padding(vertical = 6.dp)) {
-        Text("分集", style = McType.title3, modifier = Modifier.padding(horizontal = 16.dp))
-        Spacer(Modifier.height(8.dp))
         Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         ) {
-            seasons.sorted().forEach { season ->
-                FilterChip(
-                    selected = season == selected,
-                    onClick = { onSelect(season) },
-                    label = { Text("第 $season 季") },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = Accent.copy(alpha = 0.2f),
-                        selectedLabelColor = Accent,
-                    ),
+            Text("分集", style = McType.title3)
+            Spacer(Modifier.width(10.dp))
+            var seasonMenu by remember { mutableStateOf(false) }
+            Box {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(GlassCapsule)
+                        .border(1.dp, LineSoft, RoundedCornerShape(999.dp))
+                        .clickable { seasonMenu = true }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    Text(
+                        selected?.let(seasonLabel) ?: "选择季",
+                        style = McType.subSemibold,
+                        color = TextPrimary,
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        Icons.Rounded.UnfoldMore,
+                        contentDescription = null,
+                        tint = TextMuted,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+                androidx.compose.material3.DropdownMenu(
+                    expanded = seasonMenu,
+                    onDismissRequest = { seasonMenu = false },
+                    containerColor = Color(0xFF1E212B),
+                    modifier = Modifier.heightIn(max = 340.dp),
+                ) {
+                    seasons.sorted().forEach { season ->
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = {
+                                Text(
+                                    seasonLabel(season),
+                                    style = McType.sub,
+                                    color = if (season == selected) Accent else TextPrimary,
+                                )
+                            },
+                            onClick = { seasonMenu = false; onSelect(season) },
+                        )
+                    }
+                }
+            }
+            // 「在库 X / Y 集」（网页/iOS 都有这一行）：一眼看出这一季收了多少
+            val seasonEpisodes = episodes[selected].orEmpty()
+            if (seasonEpisodes.isNotEmpty()) {
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "在库 ${seasonEpisodes.count { it.owned }} / ${seasonEpisodes.size} 集",
+                    style = McType.sub,
+                    color = TextFaint,
                 )
             }
         }
+
         // 分集横滚卡：一季一屏，点一集只切换选中（网页行为——播放是详情页那颗播放键）
         val list = episodes[selected] ?: emptyList()
         var picked by remember(selected) {
@@ -943,7 +1033,15 @@ private fun SeasonSection(
                 ?.episodeNumber ?: list.firstOrNull()?.episodeNumber)
         }
         Spacer(Modifier.height(8.dp))
+        val strip = rememberLazyListState()
+        // 进页/换季时把选中那一集滚到可见处（续播进来的那一集常常在列表深处，
+        // 不滚的话得手动滑几十屏；网页/iOS 同样会滚到当前集）
+        LaunchedEffect(selected, list.size, picked) {
+            val index = list.indexOfFirst { it.episodeNumber == picked }
+            if (index > 0) strip.animateScrollToItem((index - 1).coerceAtLeast(0))
+        }
         LazyRow(
+            state = strip,
             contentPadding = PaddingValues(horizontal = McMetrics.pagePadding),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxWidth(),

@@ -31,6 +31,7 @@ import io.movieclaw.android.feature.settings.NetworkSettingsScreen
 import io.movieclaw.android.feature.settings.MembersSettingsScreen
 import io.movieclaw.android.feature.player.PlayerScreen
 import io.movieclaw.android.feature.root.MainTabScreen
+import io.movieclaw.android.feature.search.SearchMode
 import io.movieclaw.android.feature.search.SearchScreen
 import io.movieclaw.android.feature.subscriptions.SubscribeScreen
 import io.movieclaw.android.feature.subscriptions.SubscriptionDetailScreen
@@ -38,7 +39,6 @@ import javax.inject.Inject
 import io.movieclaw.android.feature.library.FavoritesScreen
 import io.movieclaw.android.feature.library.CollectionsScreen
 import io.movieclaw.android.feature.library.LibraryManageScreen
-import io.movieclaw.android.feature.discover.FilteredResultsScreen
 import io.movieclaw.android.feature.discover.PersonScreen
 
 @HiltViewModel
@@ -90,7 +90,10 @@ fun AppNav() {
                     navVm.open(target)
                     navController.navigate("player")
                 },
-                onOpenSearch = { navController.navigate("search") },
+                // 放大镜：按来源页签预选搜索分区（tab 参数；null = 沿用上次停留的分区）
+                onOpenSearch = { tab ->
+                    navController.navigate(if (tab == null) "search" else "search?tab=$tab")
+                },
                 onOpenNotices = { navController.navigate("notices") },
                 onOpenSubscription = { id -> navController.navigate("subscription/$id") },
                 onOpenTitle = { ref -> navController.navigate("title?ref=${Uri.encode(ref)}") },
@@ -101,8 +104,13 @@ fun AppNav() {
                     io.movieclaw.android.feature.subscriptions.SubscribeSheetHost.open(ref, seed)
                 },
                 onOpenManage = { navController.navigate("libraryManage") },
+                // 「我的」页：账户卡进个人信息、提醒组的更新行进「更新与维护」、
+                // 最近会话的「新会话」与点某条会话
+                onOpenProfile = { navController.navigate("settings/PROFILE") },
+                onOpenUpdate = { navController.navigate("settings/MAINTENANCE") },
+                onOpenNewSession = { navController.navigate("agentNew") },
                 onOpenFavorites = { navController.navigate("favorites") },
-                onOpenFiltered = { navController.navigate("filtered") },
+                onOpenCollections = { navController.navigate("collections") },
                 subscriptions = subscriptions,
                 onOpenAgent = { navController.navigate("agent") },
                 // 活动页「交给 AI 分析」：工单已作为首条消息提交，直接进那个会话
@@ -110,9 +118,12 @@ fun AppNav() {
                 onOpenActivityDetail = { view -> navController.navigate("activityDetail/$view") },
                 onOpenSettings = { navController.navigate("settings") },
                 onOpenAccounts = { navController.navigate("accounts") },
+                onOpenKind = { kind -> navController.navigate("kind/$kind") },
+                onOpenSubsWall = { kind -> navController.navigate("subsWall/$kind") },
             )
         }
         composable("agent") {
+            if (!adminOnly(navController)) return@composable
             AgentSessionsScreen(
                 onBack = { navController.popBackStack() },
                 onOpenSession = { id -> navController.navigate("agentConversation/$id") },
@@ -120,6 +131,7 @@ fun AppNav() {
             )
         }
         composable("agentNew") {
+            if (!adminOnly(navController)) return@composable
             AgentNewSessionScreen(
                 onBack = { navController.popBackStack() },
                 onCreated = { id ->
@@ -130,6 +142,7 @@ fun AppNav() {
             )
         }
         composable("agentConversation/{sessionId}") {
+            if (!adminOnly(navController)) return@composable
             AgentConversationScreen(onBack = { navController.popBackStack() })
         }
         composable("title?ref={ref}") { entry ->
@@ -137,6 +150,8 @@ fun AppNav() {
                 titleRef = entry.arguments?.getString("ref").orEmpty(),
                 onBack = { navController.popBackStack() },
                 onOpenTitle = { ref -> navController.navigate("title?ref=${Uri.encode(ref)}") },
+                // 「搜索资源」带片名进搜索页（tab 缺省 = 资源分区，与网页 /search?q= 同口径）
+                onSearch = { keyword -> navController.navigate("search?q=${Uri.encode(keyword)}") },
                 onSubscribe = { ref ->
                     io.movieclaw.android.feature.subscriptions.SubscribeSheetHost.open(ref)
                 },
@@ -167,15 +182,26 @@ fun AppNav() {
             )
         }
         composable("libraryManage") { entry ->
+            if (!adminOnly(navController)) return@composable
             LibraryManageScreen(
                 onBack = { navController.popBackStack() },
                 onOpenLibrary = { id, name -> navController.navigate("library/$id?name=${Uri.encode(name)}") },
             )
         }
-        composable("filtered") { entry ->
-            FilteredResultsScreen(
+        // 按类型的跨库墙（首页「全部电影」行点「查看全部」进来）
+        composable("kind/{kind}") { entry ->
+            io.movieclaw.android.feature.library.KindWallScreen(
                 onBack = { navController.popBackStack() },
-                onOpenTitle = { ref -> navController.navigate("title?ref=${Uri.encode(ref)}") },
+                onOpenItem = { libraryId, itemId ->
+                    if (libraryId > 0) navController.navigate("item/$libraryId/$itemId")
+                },
+            )
+        }
+        // 订阅海报墙（订阅首页「剧集/电影订阅 ›」与「查看全部」进来）
+        composable("subsWall/{kind}") { entry ->
+            io.movieclaw.android.feature.subscriptions.SubscriptionWallScreen(
+                onBack = { navController.popBackStack() },
+                onOpenSubscription = { id -> navController.navigate("subscription/$id") },
             )
         }
         composable("person/{tmdbPersonId}") { entry ->
@@ -184,8 +210,28 @@ fun AppNav() {
                 onOpenTitle = { ref -> navController.navigate("title?ref=${Uri.encode(ref)}") },
             )
         }
-        composable("search") {
+        // 搜索页带 q/tab 深链：标题详情「搜索资源」带词进来，tab 缺省 = 资源分区
+        // （与网页 /search?q= 同语义：URL 里只有 q 时不带 tab，落在站点资源）。
+        // 订阅详情「手动选种」用 forSub/forSubTitle 进手动选种模式（网页 /search?for_sub=）
+        composable(
+            "search?q={q}&tab={tab}&forSub={forSub}&forSubTitle={forSubTitle}",
+            arguments = listOf(
+                androidx.navigation.navArgument("q") { defaultValue = "" },
+                androidx.navigation.navArgument("tab") { defaultValue = "" },
+                androidx.navigation.navArgument("forSub") { defaultValue = "" },
+                androidx.navigation.navArgument("forSubTitle") { defaultValue = "" },
+            ),
+        ) { entry ->
             SearchScreen(
+                initialKeyword = entry.arguments?.getString("q").orEmpty(),
+                initialMode = when (entry.arguments?.getString("tab")) {
+                    "media" -> SearchMode.TITLES
+                    "torrent" -> SearchMode.TORRENTS
+                    "library" -> SearchMode.LIBRARY
+                    else -> null
+                },
+                forSubscriptionId = entry.arguments?.getString("forSub")?.toLongOrNull(),
+                forSubscriptionTitle = entry.arguments?.getString("forSubTitle").orEmpty(),
                 onBack = { navController.popBackStack() },
                 onOpenLibraryItem = { libraryId, itemId ->
                     if (libraryId > 0) navController.navigate("item/$libraryId/$itemId")
@@ -197,15 +243,25 @@ fun AppNav() {
             )
         }
         // 订阅弹层不再是一个导航目标：它由 `SubscribeSheetHost` 在**当前页面之上**渲染
-        // （导航过去会让原页面离开组合，弹层的遮罩就压在一片空黑上——用户报的"整页变黑"）
+        // （导航过去会让原页面离开组合，弹层的遮罩就压在一片空黑上——用户报的"整页变黑"）。
+        // 「手动选种」带 forSub 进搜索页：那一页搜出的种子都投给这条订阅。
         composable("subscription/{subscriptionId}") {
-            SubscriptionDetailScreen(onBack = { navController.popBackStack() })
+            val subId = it.arguments?.getString("subscriptionId")?.toLongOrNull()
+            SubscriptionDetailScreen(
+                onBack = { navController.popBackStack() },
+                onOpenSearch = { title ->
+                    navController.navigate(
+                        "search?forSub=${subId ?: -1L}&forSubTitle=${Uri.encode(title)}"
+                    )
+                },
+            )
         }
         composable("notices") {
             NoticeCenterScreen(onBack = { navController.popBackStack() })
         }
         // 活动二级页（网页 /activity?view=）：进行中 / 已结束 / 最近播放 / 观看统计
         composable("activityDetail/{view}") { entry ->
+            if (!adminOnly(navController)) return@composable
             io.movieclaw.android.feature.activity.ActivityDetailScreen(
                 view = entry.arguments?.getString("view").orEmpty(),
                 onBack = { navController.popBackStack() },
@@ -233,9 +289,18 @@ fun AppNav() {
             val section = entry.arguments?.getString("section")
                 ?.let { name -> io.movieclaw.android.feature.settings.SettingsSection.entries.firstOrNull { it.name == name } }
                 ?: return@composable
+            // 直链守卫：成员深链到超管分区不给开（同 Web accessiblePathFor 的改道）
+            val settingsVm: io.movieclaw.android.feature.settings.SettingsViewModel = hiltViewModel()
+            if (!settingsVm.canOpen(section)) {
+                androidx.compose.runtime.LaunchedEffect(Unit) { navController.popBackStack() }
+                return@composable
+            }
             when (section) {
                 io.movieclaw.android.feature.settings.SettingsSection.PROFILE ->
-                    ProfileSettingsScreen(onBack = { navController.popBackStack() })
+                    ProfileSettingsScreen(
+                        onBack = { navController.popBackStack() },
+                        onOpenAccounts = { navController.navigate("accounts") },
+                    )
                 io.movieclaw.android.feature.settings.SettingsSection.DEVICES ->
                     DevicesSettingsScreen(onBack = { navController.popBackStack() })
                 io.movieclaw.android.feature.settings.SettingsSection.PLAYBACK ->
@@ -289,4 +354,19 @@ fun AppNav() {
 @dagger.hilt.InstallIn(dagger.hilt.components.SingletonComponent::class)
 interface SubscriptionIndexEntry {
     fun subscriptionIndex(): io.movieclaw.android.feature.subscriptions.SubscriptionIndex
+}
+
+/**
+ * 超管专属路由的守卫：成员手输 / 残留返回栈进来时退回上一页（同 Web `accessiblePathFor`、
+ * iOS `Permissions.allows`）。返回 false 时调用方 `return@composable`，一帧内容都不渲染。
+ */
+@Composable
+private fun adminOnly(navController: androidx.navigation.NavHostController): Boolean {
+    val allowed = io.movieclaw.android.core.session.LocalPermissions.current.isAdmin
+    if (!allowed) {
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            runCatching { navController.popBackStack() }
+        }
+    }
+    return allowed
 }

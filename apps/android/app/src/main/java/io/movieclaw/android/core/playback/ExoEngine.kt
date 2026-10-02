@@ -31,6 +31,13 @@ class ExoEngine(context: Context) : PlayerEngine {
     /** 解码类错误回调:直连失败时 PlaybackController 据此自动切 MPV(网络错误不切) */
     var onDecodeError: ((Long) -> Unit)? = null
 
+    /**
+     * 起播要落的那条音轨（`embedded:N`）。轨道要等 prepare 之后才有，
+     * 所以这里存着，在 `onTracksChanged` 里落一次就清掉——**只落一次**：
+     * 之后用户自己换轨（`selectAudioIndex`）不再被它拉回去。
+     */
+    private var pendingInitialAudioRef: String? = null
+
     /** 真实吞吐采样:数据源每传一段字节就记一次(降质建议的「实测带宽」来源) */
     private val transferMeter = TransferMeter()
 
@@ -46,6 +53,22 @@ class ExoEngine(context: Context) : PlayerEngine {
 
     init {
         player.addListener(object : Player.Listener {
+            /**
+             * 轨道解析出来之后把**计划里的那条音轨**落下（iOS `selectInitialAudio` 的对应物）。
+             * 只在与当前选中不同时才动，且只做一次：容器标注的默认轨恰好就是计划那条时
+             * 不必多此一举，用户之后的手动换轨也不会被拉回去。
+             */
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                val want = pendingInitialAudioRef?.removePrefix("embedded:")?.toIntOrNull()
+                    ?: run { pendingInitialAudioRef = null; return }   // 不是内封序号式引用：不必落轨
+                val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+                if (groups.isEmpty()) return          // 还没解析出音轨：等下一次回调
+                pendingInitialAudioRef = null
+                if (groups.getOrNull(want)?.isSelected == true) return   // 本来就放这条
+                android.util.Log.i("McPlayer", "起播落轨: 音轨 embedded:$want（容器默认不是它）")
+                selectAudioIndex(want)
+            }
+
             override fun onPlayerError(error: PlaybackException) {
                 // IO_UNSPECIFIED 既可能是传输问题（换内核没意义），也可能是**数据根本不是
                 // Exo 解析器能吃的**（cause 链里是 IllegalStateException/ParserException，
@@ -72,6 +95,7 @@ class ExoEngine(context: Context) : PlayerEngine {
     }
 
     override fun open(source: EngineSource, sidecars: List<Sidecar>) {
+        pendingInitialAudioRef = source.initialAudioRef
         val mediaItem = MediaItem.Builder()
             .setUri(source.url)
             .setMediaMetadata(mediaMetadataOf(source))
@@ -79,7 +103,10 @@ class ExoEngine(context: Context) : PlayerEngine {
         val factory: MediaSourceFactory = if (source.hls) {
             HlsMediaSource.Factory(httpFactory)
         } else {
-            ProgressiveMediaSource.Factory(httpFactory)
+            val dsFactory: DataSource.Factory = source.matroskaCues
+                ?.let { cues -> DataSource.Factory { CuesServingDataSource(httpFactory.createDataSource(), cues) } }
+                ?: httpFactory
+            ProgressiveMediaSource.Factory(dsFactory)
         }
         val primary = factory.createMediaSource(mediaItem)
         val startPosition = source.startPositionMs.coerceAtLeast(0L)

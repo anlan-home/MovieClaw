@@ -359,6 +359,8 @@ fun SubsHomeScreen(
     onOpenTitle: (String) -> Unit = {},
     /** 空态那颗「去发现剧集」：切到发现页 */
     onOpenDiscover: () -> Unit = {},
+    /** 「剧集订阅 ⌄」「电影订阅 ⌄」与一排末尾的「查看全部」→ 订阅海报墙（kind = tv / movie） */
+    onOpenWall: (String) -> Unit = {},
     vm: SubsHomeViewModel = hiltViewModel(),
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
@@ -450,7 +452,7 @@ fun SubsHomeScreen(
                 if (state.tv.isNotEmpty()) {
                     val active = state.tv.filter { it.status == "active" }
                     val resting = state.tv.filterNot { it.status == "active" }
-                    ShelfHeader("剧集订阅", countSummary(state.tv, active.size))
+                    ShelfHeader("剧集订阅", countSummary(state.tv, active.size), onOpenWall = { onOpenWall("tv") })
                     Spacer(Modifier.height(12.dp))
                     LazyRow(
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = McMetrics.pagePadding),
@@ -461,7 +463,7 @@ fun SubsHomeScreen(
                             item(key = "div-tv") { RestingDivider(restingLabel(resting), height = 189.dp) }
                             items(resting, key = { "r-${it.id}" }) { sub -> SubCard(sub, dim = true) { onOpenSubscription(sub.id) } }
                         }
-                        item(key = "seeall-tv") { SeeAllCard(state.tv.size) { onOpenSubscription(-1) } }
+                        item(key = "seeall-tv") { SeeAllCard(state.tv.size) { onOpenWall("tv") } }
                     }
                     Spacer(Modifier.height(36.dp))
                 }
@@ -469,7 +471,7 @@ fun SubsHomeScreen(
                 if (state.movie.isNotEmpty()) {
                     val active = state.movie.filter { it.status == "active" }
                     val resting = state.movie.filterNot { it.status == "active" }
-                    ShelfHeader("电影订阅", countSummary(state.movie, active.size))
+                    ShelfHeader("电影订阅", countSummary(state.movie, active.size), onOpenWall = { onOpenWall("movie") })
                     Spacer(Modifier.height(12.dp))
                     LazyRow(
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = McMetrics.pagePadding),
@@ -480,7 +482,7 @@ fun SubsHomeScreen(
                             item(key = "div-mv") { RestingDivider(restingLabel(resting), height = 189.dp) }
                             items(resting, key = { "rm-${it.id}" }) { sub -> SubCard(sub, dim = true) { onOpenSubscription(sub.id) } }
                         }
-                        item(key = "seeall-mv") { SeeAllCard(state.movie.size) { onOpenSubscription(-1) } }
+                        item(key = "seeall-mv") { SeeAllCard(state.movie.size) { onOpenWall("movie") } }
                     }
                 }
             }
@@ -639,7 +641,7 @@ private fun SubsHero(
 }
 
 /** 状态小签推导（iOS SubsHomeShelfItem.chip 的简化口径） */
-private fun subChip(sub: SubscriptionView): Pair<String, Color> = when {
+internal fun subChip(sub: SubscriptionView): Pair<String, Color> = when {
     sub.status == "paused" -> "已暂停" to TextMuted
     sub.status == "completed" -> (if (sub.media.kind == "movie") "已入库" else "已收齐") to Ok
     sub.progress.upgrading > 0 -> "洗版中" to Color(0xFF2DD4BF)

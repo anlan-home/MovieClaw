@@ -419,13 +419,30 @@ private fun MemberCard(
         }
 
         Spacer(Modifier.height(12.dp))
-        PermissionRow("允许订阅与追更", member.allowSubscribe) { next ->
+        PermissionRow("允许订阅与追更", "发起订阅并管理自己的订阅", member.allowSubscribe) { next ->
             onTogglePermission(MemberUpdateRequest(allowSubscribe = next)) { it.copy(allowSubscribe = next) }
         }
-        PermissionRow("允许资源搜索", member.allowSearch) { next ->
-            onTogglePermission(MemberUpdateRequest(allowSearch = next)) { it.copy(allowSearch = next) }
+        // 「站点搜索」已更名「资源搜索」（member-permissions-v2）：搜影视、搜媒体库不受这个开关限制
+        PermissionRow(
+            "允许资源搜索",
+            "在被分配的 PT 站点里搜索种子资源（媒体库内搜索不受此开关影响）",
+            member.allowSearch,
+        ) { next ->
+            // 关掉资源搜索时一键下载必须跟着关（它依赖前者，服务端也按同一口径校验）
+            if (!next) {
+                onTogglePermission(
+                    MemberUpdateRequest(allowSearch = false, allowDirectDownload = false),
+                ) { it.copy(allowSearch = false, allowDirectDownload = false) }
+            } else {
+                onTogglePermission(MemberUpdateRequest(allowSearch = true)) { it.copy(allowSearch = true) }
+            }
         }
-        PermissionRow("允许一键下载", member.allowDirectDownload) { next ->
+        PermissionRow(
+            "允许一键下载",
+            "从搜索结果直接提交下载、给自己的订阅手动选种，依赖资源搜索",
+            member.allowDirectDownload,
+            enabled = member.allowSearch,
+        ) { next ->
             onTogglePermission(MemberUpdateRequest(allowDirectDownload = next)) { it.copy(allowDirectDownload = next) }
         }
 
@@ -440,15 +457,29 @@ private fun MemberCard(
 }
 
 @Composable
-private fun PermissionRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+private fun PermissionRow(
+    label: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onChange: (Boolean) -> Unit,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
     ) {
-        Text(label, style = McType.footnote, color = TextMuted, modifier = Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                style = McType.footnote,
+                color = if (enabled) TextMuted else TextFaint,
+            )
+            Text(subtitle, style = McType.caption2, color = TextFaint, lineHeight = 15.sp)
+        }
         Switch(
             checked = checked,
             onCheckedChange = onChange,
+            enabled = enabled,
             colors = SwitchDefaults.colors(checkedTrackColor = Accent),
         )
     }

@@ -192,20 +192,26 @@ class SubscribeViewModel @Inject constructor(
                     // 由弹层管理态接手），而不是再让你"创建"一遍
                     loadRouting()
 
-                    // 规则组与目标库：与选季一样是创建订阅的一部分（网页弹层同款）
-                    runCatching { apiFactory.forOrigin(origin).ruleSets().dataOrThrow() }
-                        .onSuccess { list ->
-                            android.util.Log.i("McSubs", "规则组 ${list.size} 条")
-                            _ui.update { it.copy(ruleSets = list) }
-                        }
-                        .onFailure { android.util.Log.w("McSubs", "规则组拉取失败", it) }
-                    runCatching { apiFactory.forOrigin(origin).libraries().dataOrThrow() }
-                        .onSuccess { list ->
-                            val usable = list.filter { l -> l.viewerAccess }
-                            android.util.Log.i("McSubs", "媒体库 ${list.size} 个（可用 ${usable.size}）")
-                            _ui.update { it.copy(libraries = usable) }
-                        }
-                        .onFailure { android.util.Log.w("McSubs", "媒体库拉取失败", it) }
+                    // 规则组与目标库**只有超管能选**（`GET /rule-sets` 是 require_admin；成员
+                    // 创建订阅时这两项由服务端按系统默认路由决定，见 member-permissions-v2 §3.7）。
+                    // 之前这里不带权限就拉，成员每次打开弹层都白吃一个 403。
+                    val canManage = io.movieclaw.android.core.session.Permissions
+                        .of(sessionRepository.ui.value.session).canManageSubscriptions
+                    if (canManage) {
+                        runCatching { apiFactory.forOrigin(origin).ruleSets().dataOrThrow() }
+                            .onSuccess { list ->
+                                android.util.Log.i("McSubs", "规则组 ${list.size} 条")
+                                _ui.update { it.copy(ruleSets = list) }
+                            }
+                            .onFailure { android.util.Log.w("McSubs", "规则组拉取失败", it) }
+                        runCatching { apiFactory.forOrigin(origin).libraries().dataOrThrow() }
+                            .onSuccess { list ->
+                                val usable = list.filter { l -> l.viewerAccess }
+                                android.util.Log.i("McSubs", "媒体库 ${list.size} 个（可用 ${usable.size}）")
+                                _ui.update { it.copy(libraries = usable) }
+                            }
+                            .onFailure { android.util.Log.w("McSubs", "媒体库拉取失败", it) }
+                    }
                     preview.existingSubscriptionId?.let { id ->
                         runCatching {
                             apiFactory.forOrigin(origin).subscription(id).dataOrThrow()
@@ -288,14 +294,18 @@ class SubscribeViewModel @Inject constructor(
         _ui.update { it.copy(creating = true) }
         viewModelScope.launch {
             val origin = origin ?: return@launch
+            // 成员不带规则组与目标库：服务端对成员一律按系统默认路由决定这两项
+            // （member-permissions-v2 §3.7；即便带上也会被忽略，不如不带）
+            val canManage = io.movieclaw.android.core.session.Permissions
+                .of(sessionRepository.ui.value.session).canManageSubscriptions
             runCatching {
                 apiFactory.forOrigin(origin).createSubscription(
                     SubscriptionCreateRequest(
                         titleRef = currentRef,
                         selectedSeasons = state.selectedSeasons.sorted(),
                         followFuture = state.followFuture,
-                        ruleSetId = state.ruleSetId,
-                        libraryId = state.libraryId,
+                        ruleSetId = state.ruleSetId.takeIf { canManage },
+                        libraryId = state.libraryId.takeIf { canManage },
                     )
                 ).dataOrThrow()
             }

@@ -69,6 +69,14 @@ data class EngineSource(
     val title: String = "",
     val subtitle: String? = null,
     val artworkUrl: String? = null,
+    /** 服务端随会话下发的 MKV 精简索引（档 0 直出才有）：Exo 按 SeekHead 读 Cues 时直接给 */
+    val matroskaCues: io.movieclaw.android.core.model.MatroskaCuesView? = null,
+    /**
+     * 起播要放的那条音轨（中性引用 `embedded:N`）——**服务端计划里的那条**（用户这次选的
+     * 或按记忆/默认轨策略挑的）。引擎解析出轨道后要按它落轨：以前只在界面上打勾，
+     * 引擎放的是容器标注的默认轨，于是"菜单勾着国语、耳朵听的是日语"。
+     */
+    val initialAudioRef: String? = null,
 )
 
 /** 外挂字幕旁挂载荷(Exo 合流;MPV 后续走 sub-add) */

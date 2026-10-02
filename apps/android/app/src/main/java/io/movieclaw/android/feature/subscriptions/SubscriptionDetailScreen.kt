@@ -91,6 +91,8 @@ data class SubDetailState(
     val sub: io.movieclaw.android.core.model.SubscriptionView? = null,
     val wanted: List<WantedView> = emptyList(),
     val activities: List<SubActivityView> = emptyList(),
+    /** 在途种子的实时下载快照（按 info_hash 索引；5 秒轮询，无在途时为零请求） */
+    val downloads: Map<String, io.movieclaw.android.core.model.SubscriptionDownloadView> = emptyMap(),
 )
 
 @HiltViewModel
@@ -110,6 +112,8 @@ class SubscriptionDetailViewModel @Inject constructor(
     private val _notice = MutableStateFlow<McNotice?>(null)
     val notice = _notice.asStateFlow()
 
+    private var pollJob: kotlinx.coroutines.Job? = null
+
     init { load() }
 
     fun load() {
@@ -122,10 +126,56 @@ class SubscriptionDetailViewModel @Inject constructor(
                 val sub = api.subscription(id).dataOrThrow()
                 val acts = runCatching { api.subscriptionActivities(id, 50).dataOrThrow() }.getOrDefault(emptyList())
                 _ui.update { it.copy(loading = false, sub = sub, wanted = sub.wanted, activities = acts) }
+                // 在途下载的实时进度：有在途工单时才起轮询（同 iOS `.polling(every: 5)` +
+                // `if hasInFlight` 的门控），进页先立刻拉一次，别等满一个周期
+                if (hasInFlight()) {
+                    refreshDownloads()
+                    startPolling()
+                } else {
+                    stopPolling()
+                }
             } catch (e: Exception) {
                 _ui.update { it.copy(loading = false, error = friendlyMessage(e)) }
             }
         }
+    }
+
+    /** 有单元锚定了种子且还没入库 = 有在途投递（iOS `hasInFlight` 同口径） */
+    private fun hasInFlight(): Boolean =
+        _ui.value.wanted.any { it.infoHash != null && it.importedAt == null }
+
+    /** 纯读快照：只给进度/速度/剩余时间，成员拿到的种子名与下载器名是空的 */
+    fun refreshDownloads() {
+        viewModelScope.launch {
+            val origin = origin ?: return@launch
+            if (!hasInFlight()) return@launch
+            runCatching { apiFactory.forOrigin(origin).activeDownloads(id).dataOrThrow() }
+                .onSuccess { list ->
+                    _ui.update { it.copy(downloads = list.associateBy { d -> d.infoHash }) }
+                }
+        }
+    }
+
+    private fun startPolling() {
+        if (pollJob?.isActive == true) return
+        pollJob = viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(5_000)
+                if (!hasInFlight()) break
+                refreshDownloads()
+            }
+        }
+    }
+
+    private fun stopPolling() {
+        pollJob?.cancel()
+        pollJob = null
+        _ui.update { it.copy(downloads = emptyMap()) }
+    }
+
+    override fun onCleared() {
+        pollJob?.cancel()
+        super.onCleared()
     }
 
     private fun act(onDone: (() -> Unit)? = null, block: suspend (io.movieclaw.android.core.api.McApi) -> String) {
@@ -156,6 +206,9 @@ class SubscriptionDetailViewModel @Inject constructor(
     val ruleSets = _ruleSets.asStateFlow()
 
     fun loadRuleSets() {
+        // 规则组只有超管可读（`GET /rule-sets` 是 require_admin）：成员别打这一枪
+        // （member-permissions-v2 §3.7；成员洗版沿用订阅当前的规则组）
+        if (!io.movieclaw.android.core.session.Permissions.of(repository.ui.value.session).canManageSubscriptions) return
         viewModelScope.launch {
             val origin = origin ?: return@launch
             runCatching { apiFactory.forOrigin(origin).ruleSets().dataOrThrow() }
@@ -174,7 +227,7 @@ class SubscriptionDetailViewModel @Inject constructor(
         "已更新选季"
     }
 
-    /** 更换规则组：同上，只带 rule_set_id */
+    /** 更换规则组：同上，只带 rule_set_id（超管专属；成员这一层后端也会拒） */
     fun updateRuleSet(ruleSetId: Long) = act { api ->
         api.updateSubscription(
             id,
@@ -185,8 +238,9 @@ class SubscriptionDetailViewModel @Inject constructor(
         "已更换规则组"
     }
 
-    fun upgradeRun() = act { api ->
-        api.upgradeRun(id)
+    /** 洗版：成员不带 rule_set_id（服务端会忽略非超管传来的组，沿用订阅当前的） */
+    fun upgradeRun(ruleSetId: Long? = null) = act { api ->
+        api.upgradeRun(id, io.movieclaw.android.core.model.UpgradeRunPayload(ruleSetId))
         "洗版已开始，进展在「追踪明细」里跟进"
     }
 
@@ -231,7 +285,8 @@ private fun statusDot(s: io.movieclaw.android.core.model.SubscriptionView): Colo
 @Composable
 fun SubscriptionDetailScreen(
     onBack: () -> Unit,
-    onOpenSearch: () -> Unit = {},
+    /** 「手动选种」：带订阅标题进搜索页的手动选种模式（搜索页把结果投给这条订阅） */
+    onOpenSearch: (String) -> Unit = {},
     vm: SubscriptionDetailViewModel = hiltViewModel(),
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
@@ -352,10 +407,31 @@ fun SubscriptionDetailScreen(
                             }
                         }
                         Spacer(Modifier.height(14.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            ActionButton("立即搜索", filled = true, modifier = Modifier.weight(1f)) { vm.searchNow() }
-                            ActionButton("手动选种", modifier = Modifier.weight(1f)) { onOpenSearch() }
-                            ActionButton("更多", modifier = Modifier.weight(1f)) { menuOpen = true }
+                        // 操作行：调整类动作（立即搜索 / 手动选种）只给发起人与超管——
+                        // 后端按同一口径下发 `can_manage`，只关注的成员只剩取消关注
+                        // （member-permissions-v2 §3.7；授权仍以服务端校验为准）。
+                        // 手动选种另需「订阅 + 资源搜索 + 一键下载」三项能力。
+                        val permissions = io.movieclaw.android.core.session.LocalPermissions.current
+                        val canTune = permissions.canSubscribe && sub.canManage
+                        val showSearchNow = canTune && p.wanted > 0 && sub.status != "paused"
+                        val showManual = permissions.canGrabForSubscription && canTune &&
+                            (p.wanted > 0 || state.wanted.any { it.upgrade != null })
+                        val showMore = permissions.canSubscribe || permissions.canManageSubscriptions
+                        if (showSearchNow || showManual || showMore) {
+                            Spacer(Modifier.height(14.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                if (showSearchNow) {
+                                    ActionButton("立即搜索", filled = true, modifier = Modifier.weight(1f)) { vm.searchNow() }
+                                }
+                                if (showManual) {
+                                    ActionButton("手动选种", modifier = Modifier.weight(1f)) {
+                                        onOpenSearch(sub.media.title)
+                                    }
+                                }
+                                if (showMore) {
+                                    ActionButton("更多", modifier = Modifier.weight(1f)) { menuOpen = true }
+                                }
+                            }
                         }
                     }
 
@@ -397,6 +473,18 @@ fun SubscriptionDetailScreen(
                                             Text(s, fontSize = 12.sp, color = TextMuted)
                                         }
                                     }
+                                    // 在途投递的实时进度（5 秒轮询）：按单元锚定的种子 hash 对上；
+                                    // 成员拿到的快照里种子名是空的，所以行首用单元号而不是任务名
+                                    items.mapNotNull { unit -> unit.infoHash?.let { hash -> state.downloads[hash]?.let { unit to it } } }
+                                        .forEach { (unit, d) ->
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(
+                                                unitLabel(unit) + " · " + downloadNote(d),
+                                                fontSize = 12.sp,
+                                                color = Color(0xFF9FB0C9),
+                                                lineHeight = 17.sp,
+                                            )
+                                        }
                                 }
                             }
                         }
@@ -441,10 +529,13 @@ fun SubscriptionDetailScreen(
                     onDismiss = { pickRule = false },
                 )
             } else {
+                val permissions = io.movieclaw.android.core.session.LocalPermissions.current
                 ManageSheet(
                     followFuture = if (sub.media.kind == "movie") null else sub.followFuture,
                     paused = sub.status == "paused",
                     completed = sub.status == "completed",
+                    canTune = permissions.canSubscribe && sub.canManage,
+                    canManage = permissions.canManageSubscriptions,
                     onAdjust = { pickSeasons = true },
                     onUpgradeRun = { vm.upgradeRun(); menuOpen = false },
                     onToggleFollowFuture = { vm.setFollowFuture(!sub.followFuture); menuOpen = false },
@@ -490,6 +581,54 @@ private fun FactRow(k: String, v: String) {
     }
 }
 
+/** 「S1E2」/「S1」/「全片」（电影为 0/0）；SP 用两位补零口径同 iOS */
+private fun unitLabel(unit: WantedView): String {
+    if (unit.seasonNumber == 0 && unit.episodeNumber == 0) return "全片"
+    if (unit.episodeNumber == 0) return if (unit.seasonNumber == 0) "SP" else "S${unit.seasonNumber}"
+    return "S${unit.seasonNumber}E${unit.episodeNumber}"
+}
+
+/**
+ * 在途下载一行进度说明 —— 口径照 iOS `WantedLogic.downloadNote`。
+ * 成员拿到的快照里种子名、下载器名与报错原文由服务端置空：出错时没有原文就不叫成员
+ * 「去下载器处理」（成员进不了下载器），改为提示由管理员处理（member-permissions-v2 §3.2）。
+ */
+private fun downloadNote(d: io.movieclaw.android.core.model.SubscriptionDownloadView): String {
+    if (d.state == "missing") return "种子已不在下载器中（可能被手动删除），稍后自动重新寻找资源"
+    val pct = d.progress?.let { "${((it * 100).toInt()).coerceAtLeast(0)}%" } ?: ""
+    return when (d.state) {
+        "completed" -> "已下载完成，等待整理入库"
+        "paused" -> "$pct · 已在下载器中暂停"
+        "error" -> {
+            val message = d.errorMessage?.takeIf { it.isNotBlank() }
+            if (message == null) {
+                "$pct · 下载任务出错；换源判定已暂停，需管理员在下载器中处理"
+            } else {
+                "$pct · $message；换源判定已暂停，请在下载器中处理"
+            }
+        }
+        "stalled" -> "$pct · 等待连接做种"
+        else -> {
+            val parts = mutableListOf(pct)
+            d.dlspeedBytes?.takeIf { it > 0 }?.let { parts += "${io.movieclaw.android.core.designsystem.McFormat.bytes(it)}/s" }
+            d.etaSeconds?.let { parts += "剩余约 ${etaText(it)}" }
+            if (parts.size == 1) d.sizeBytes?.let { parts += io.movieclaw.android.core.designsystem.McFormat.bytes(it) }
+            parts.filter { it.isNotEmpty() }.joinToString(" · ")
+        }
+    }
+}
+
+/** 剩余时间：「45 秒」/「3 分钟」/「1.5 小时」（同 iOS `SubsFormat.duration`） */
+private fun etaText(seconds: Long): String = when {
+    seconds <= 0 -> "—"
+    seconds < 60 -> "$seconds 秒"
+    seconds < 3600 -> "${Math.round(seconds / 60.0)} 分钟"
+    else -> {
+        val hours = seconds / 3600.0
+        if (hours == hours.toLong().toDouble()) "${hours.toLong()} 小时" else "%.1f 小时".format(hours)
+    }
+}
+
 @Composable
 private fun ActionButton(label: String, modifier: Modifier = Modifier, filled: Boolean = false, onClick: () -> Unit) {
     Box(
@@ -520,6 +659,8 @@ private fun MenuRow(text: String, danger: Boolean = false, onClick: () -> Unit) 
 /**
  * 「更多」底部抽屉（网页移动端范式）：条目与网页 `SubscriptionManageMenu` 一一对应，
  * 且每一项都真的打接口（此前「调整订阅」「更换规则组」是演示占位）。
+ * 调整类动作只给发起人与超管（[canTune]）；「更换规则组」是超管专属（[canManage]）——
+ * 只关注的成员只剩「取消订阅」（= 取消关注，服务端 404 之外唯一放行的动作）。
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -527,6 +668,8 @@ private fun ManageSheet(
     followFuture: Boolean?,
     paused: Boolean,
     completed: Boolean,
+    canTune: Boolean,
+    canManage: Boolean,
     onAdjust: () -> Unit,
     onUpgradeRun: () -> Unit,
     onToggleFollowFuture: () -> Unit,
@@ -541,17 +684,23 @@ private fun ManageSheet(
         contentColor = TextPrimary,
     ) {
         Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
-            SheetRow("调整订阅…", onClick = onAdjust)
-            SheetRow("洗一轮版…", onClick = onUpgradeRun)
-            if (followFuture != null) {
-                SheetRow(if (followFuture) "关闭自动续订" else "开启自动续订", onClick = onToggleFollowFuture)
+            if (canTune) {
+                SheetRow("调整订阅…", onClick = onAdjust)
+                SheetRow("洗一轮版…", onClick = onUpgradeRun)
+                if (followFuture != null) {
+                    SheetRow(if (followFuture) "关闭自动续订" else "开启自动续订", onClick = onToggleFollowFuture)
+                }
             }
-            SheetRow("更换规则组…", onClick = onSwitchRule)
-            SheetRow(
-                if (paused) "恢复追踪" else "暂停追踪",
-                enabled = !completed,
-                onClick = onTogglePause,
-            )
+            if (canManage) {
+                SheetRow("更换规则组…", onClick = onSwitchRule)
+            }
+            if (canTune) {
+                SheetRow(
+                    if (paused) "恢复追踪" else "暂停追踪",
+                    enabled = !completed,
+                    onClick = onTogglePause,
+                )
+            }
             Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.07f)))
             SheetRow("取消订阅", danger = true, onClick = onRemove)
         }

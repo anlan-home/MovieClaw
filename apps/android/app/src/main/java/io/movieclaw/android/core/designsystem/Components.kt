@@ -108,6 +108,15 @@ fun SectionHeader(
     modifier: Modifier = Modifier,
     /** 右侧计数（如「共 1 部」「10月4日 · 1 部」），13px 36% */
     counter: String? = null,
+    /**
+     * 右侧动作是不是「去往下一页」：是就带一枚右箭头（用户要求：不带箭头看着不像能点的按钮），
+     * 就地动作（点一下清空 / 忽略之类）传 false。
+     *
+     * 两端参考在这里其实**不带**箭头（网页 `MediaRow` 的 more 链接与 iOS `LibrarySectionHeader`
+     * 都是纯文字），活动页那种「查看全部 ›」才带；这里是按用户要求统一补上，只对
+     * 「点进去还有一页」的动作生效。
+     */
+    actionChevron: Boolean = true,
 ) {
     Row(
         modifier = modifier
@@ -122,13 +131,28 @@ fun SectionHeader(
         }
         if (actionText != null && onAction != null) {
             Spacer(Modifier.width(10.dp))
-            Text(
-                actionText,
-                style = McType.sub,
-                color = TextMuted,
-                maxLines = 1,
-                modifier = Modifier.clickable(onClick = onAction).padding(vertical = 6.dp),
-            )
+            Row(
+                modifier = Modifier
+                    .clickable(onClick = onAction)
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    actionText,
+                    style = McType.sub,
+                    color = TextMuted,
+                    maxLines = 1,
+                )
+                if (actionChevron) {
+                    Spacer(Modifier.width(2.dp))
+                    Icon(
+                        Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = TextMuted,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
         }
     }
 }

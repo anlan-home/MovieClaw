@@ -160,7 +160,13 @@ class ActivityViewModel @Inject constructor(
     fun upgradeSubscription(subscriptionId: Long) {
         viewModelScope.launch {
             val origin = origin ?: return@launch
-            runCatching { apiFactory.forOrigin(origin).upgradeRun(subscriptionId).dataOrThrow() }
+            runCatching {
+                apiFactory.forOrigin(origin).upgradeRun(
+                    subscriptionId,
+                    // 这个接口的 body 必填：不带体服务端判 422
+                    io.movieclaw.android.core.model.UpgradeRunPayload(),
+                ).dataOrThrow()
+            }
                 .onSuccess { report ->
                     _ui.update {
                         it.copy(notice = McNotice(report.summary.ifBlank { "洗版已开始，进展在「追踪明细」里跟进" }))

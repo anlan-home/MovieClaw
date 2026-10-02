@@ -53,6 +53,7 @@ import io.movieclaw.android.core.designsystem.TextFaint
 import io.movieclaw.android.core.designsystem.TextMuted
 import io.movieclaw.android.core.designsystem.Warning
 import io.movieclaw.android.core.model.Notice
+import io.movieclaw.android.core.model.visibleNotices
 import io.movieclaw.android.core.network.ApiFactory
 import io.movieclaw.android.core.network.dataOrThrow
 import io.movieclaw.android.core.network.friendlyMessage
@@ -97,7 +98,9 @@ class NoticeCenterViewModel @Inject constructor(
             val origin = sessionRepository.ui.value.origin ?: return@launch
             if (!silent) _state.value = Loadable.Loading
             runCatching { apiFactory.forOrigin(origin).notices().dataOrThrow() }
-                .onSuccess { notices -> _state.value = Loadable.Ready(notices) }
+                // 与「我的」页待处理计数同一口径（网页 notice-center / iOS NoticeCenterView.visible）：
+                // 目录级根因告警存在时，被它收编的单种子告警折叠不显示
+                .onSuccess { notices -> _state.value = Loadable.Ready(visibleNotices(notices)) }
                 .onFailure { e ->
                     if (_state.value !is Loadable.Ready) _state.value = Loadable.Failed(friendlyMessage(e))
                 }
