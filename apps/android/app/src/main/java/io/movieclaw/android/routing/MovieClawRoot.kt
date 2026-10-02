@@ -20,6 +20,10 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import io.movieclaw.android.core.designsystem.Bg
 import io.movieclaw.android.core.session.SessionPhase
 import io.movieclaw.android.core.session.SessionRepository
+import io.movieclaw.android.core.session.LocalPermissions
+import io.movieclaw.android.core.session.LocalSearchAccess
+import io.movieclaw.android.core.session.Permissions
+import io.movieclaw.android.core.session.SearchAccessRepository
 import io.movieclaw.android.feature.onboarding.LoginScreen
 import io.movieclaw.android.feature.root.MainTabScreen
 import javax.inject.Inject
@@ -30,9 +34,13 @@ class RootViewModel @Inject constructor(
     private val repository: SessionRepository,
     val feedback: FeedbackBus,
     private val deepLinkBus: DeepLinkBus,
+    private val searchAccess: SearchAccessRepository,
 ) : ViewModel() {
     val state = repository.ui
     val share = deepLinkBus.pendingShare
+
+    /** 搜索分区（成员那格要探测可见库，见 SearchAccessRepository） */
+    val searchAccessState = searchAccess.state
 
     var dismissedShare = MutableStateFlow<String?>(null)
 
@@ -48,6 +56,10 @@ class RootViewModel @Inject constructor(
         if (repository.ui.value.phase == SessionPhase.BOOTING) {
             viewModelScope.launch { repository.boot() }
         }
+        // 权限快照随会话变化重算（换账号即重探可见库）
+        viewModelScope.launch {
+            repository.ui.collect { ui -> searchAccess.sync(ui.session) }
+        }
     }
 }
 
@@ -57,8 +69,14 @@ fun MovieClawRoot(vm: RootViewModel = hiltViewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
     val shareLink by vm.share.collectAsStateWithLifecycle()
     val toasts by vm.feedback.toasts.collectAsStateWithLifecycle()
+    val searchAccess by vm.searchAccessState.collectAsStateWithLifecycle()
 
-    androidx.compose.runtime.CompositionLocalProvider(LocalFeedback provides vm.feedback) {
+    // 权限快照 + 搜索分区下发给整棵主壳：页面读它裁剪入口（安全边界仍在后端）
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalFeedback provides vm.feedback,
+        LocalPermissions provides Permissions.of(state.session),
+        LocalSearchAccess provides searchAccess,
+    ) {
         Box(Modifier.fillMaxSize().background(Bg)) {
             when {
                 // 访客分享不需要登录:深链打开时优先展示分享页

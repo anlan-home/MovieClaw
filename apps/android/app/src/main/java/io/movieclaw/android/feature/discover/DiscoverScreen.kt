@@ -24,6 +24,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -89,6 +92,7 @@ import io.movieclaw.android.core.network.friendlyMessage
 import io.movieclaw.android.core.playback.PlayTarget
 import io.movieclaw.android.core.session.SessionRepository
 import javax.inject.Inject
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -96,6 +100,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.rounded.Add
@@ -119,12 +126,25 @@ class DiscoverViewModel @Inject constructor(
         val upNext: List<UpNextItem> = emptyList(),
         val libraries: List<LibraryView> = emptyList(),
         val rows: List<DiscoverRow> = emptyList(),
+        // ── 筛选结果网格（条件生效时正文换成它，见 DiscoverFilteredGrid.kt）──
+        val filtered: List<DiscTitle> = emptyList(),
+        val filteredLoading: Boolean = false,
+        val filteredError: String? = null,
+        val filteredPage: Int = 1,
+        val filteredTotalPages: Int = 1,
+        val filteredTotal: Int = 0,
     )
 
     private val _ui = MutableStateFlow(UiState())
     val ui = _ui.asStateFlow()
 
     val origin: String? get() = repository.ui.value.origin
+
+    /** 条件是否生效：只有 TMDB 源有筛选（豆瓣源的按钮不出现），且至少一项条件（iOS `filtering` 同口径） */
+    val filtering: Boolean get() = isFiltering(_ui.value)
+
+    private fun isFiltering(s: UiState): Boolean =
+        s.source.equals("tmdb", ignoreCase = true) && s.filters.activeCount > 0
 
     init {
         load()
@@ -136,21 +156,122 @@ class DiscoverViewModel @Inject constructor(
     fun switchSource(source: String) {
         if (_ui.value.source == source) return
         _ui.update { it.copy(source = source, rows = emptyList()) }
-        load()
+        refresh()
     }
 
+    /**
+     * 选一项筛选条件即生效（没有「查看结果」这一步）：条件生效时正文换成结果网格并原地重查；
+     * 条件被清空则回到常规首页板块。
+     */
     fun applyFilters(filters: DiscoveryFilter) {
         _ui.update { it.copy(filters = filters) }
-        load()
+        refresh()
+    }
+
+    /** 媒体类型 / 数据源 / 条件变化后的统一入口：按是否处于筛选态决定拉哪一份数据 */
+    private fun refresh() {
+        if (isFiltering(_ui.value)) {
+            // 网格上还是空的（首次进入筛选态）就不必等防抖
+            loadFiltered(skipDebounce = _ui.value.filtered.isEmpty())
+        } else {
+            _ui.update { it.copy(filtered = emptyList(), filteredError = null) }
+            load()
+        }
+    }
+
+    /** 筛选结果的单页查询序号：只允许最后一次请求写回（条件连改时不发散） */
+    private var filteredSeq = 0
+    private var filteredDebounce: Job? = null
+
+    /**
+     * 结果网格重查：条件变了先等 300 毫秒防抖（连勾几个类型只查最后一次），
+     * 首次进入不必等（iOS `DiscoverFilteredGrid.task(id: filters)` 同款）。
+     */
+    fun loadFiltered(skipDebounce: Boolean = false) {
+        filteredDebounce?.cancel()
+        filteredDebounce = viewModelScope.launch {
+            if (!skipDebounce) kotlinx.coroutines.delay(300)
+            val s = _ui.value
+            val origin = origin ?: run {
+                _ui.update { it.copy(filteredLoading = false, filteredError = "尚未连接服务器") }
+                return@launch
+            }
+            val seq = ++filteredSeq
+            _ui.update { it.copy(filteredLoading = true, filteredError = null, filtered = emptyList(), filteredPage = 1) }
+            runCatching {
+                apiFactory.forOrigin(origin).discoverTitles(
+                    mediaType = s.mediaType,
+                    genres = s.filters.genreIds.takeIf { it.isNotEmpty() }?.joinToString(","),
+                    country = s.filters.country,
+                    year = s.filters.year,
+                    rating = s.filters.rating,
+                    runtime = s.filters.runtime,
+                    sort = s.filters.sort,
+                    page = 1,
+                ).dataOrThrow().jsonObject
+            }
+                .onSuccess { raw ->
+                    if (seq != filteredSeq) return@onSuccess
+                    _ui.update {
+                        it.copy(
+                            filteredLoading = false,
+                            filtered = parseTitles(raw),
+                            filteredPage = raw["page"]?.jsonPrimitive?.intOrNull ?: 1,
+                            filteredTotalPages = raw["total_pages"]?.jsonPrimitive?.intOrNull ?: 1,
+                            filteredTotal = raw["total_results"]?.jsonPrimitive?.intOrNull ?: 0,
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    if (seq != filteredSeq) return@onFailure
+                    _ui.update { it.copy(filteredLoading = false, filteredError = friendlyMessage(e)) }
+                }
+        }
+    }
+
+    fun loadMoreFiltered() {
+        val s = _ui.value
+        if (s.filteredLoading || s.filteredPage >= s.filteredTotalPages || !isFiltering(s)) return
+        viewModelScope.launch {
+            val origin = origin ?: return@launch
+            val next = s.filteredPage + 1
+            _ui.update { it.copy(filteredLoading = true) }
+            runCatching {
+                apiFactory.forOrigin(origin).discoverTitles(
+                    mediaType = s.mediaType,
+                    genres = s.filters.genreIds.takeIf { it.isNotEmpty() }?.joinToString(","),
+                    country = s.filters.country,
+                    year = s.filters.year,
+                    rating = s.filters.rating,
+                    runtime = s.filters.runtime,
+                    sort = s.filters.sort,
+                    page = next,
+                ).dataOrThrow().jsonObject
+            }
+                .onSuccess { raw ->
+                    _ui.update {
+                        it.copy(
+                            filteredLoading = false,
+                            filteredPage = next,
+                            filtered = it.filtered + parseTitles(raw),
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    _ui.update { it.copy(filteredLoading = false, filteredError = friendlyMessage(e)) }
+                }
+        }
     }
 
     fun switchMediaType(mediaType: String) {
         if (_ui.value.mediaType == mediaType) return
-        _ui.update { it.copy(mediaType = mediaType, rows = emptyList()) }
-        load()
+        _ui.update { it.copy(mediaType = mediaType, rows = emptyList(), filtered = emptyList()) }
+        refresh()
     }
 
     fun load() {
+        // 筛选态下正文是结果网格，首页板块整块不在画面上：不必白拉一趟
+        if (isFiltering(_ui.value)) return
         viewModelScope.launch {
             val origin = origin
             if (origin == null) {
@@ -216,7 +337,6 @@ fun DiscoverScreen(
     onOpenCollection: (String, String) -> Unit,
     /** 未订阅 → 订阅弹层；已订阅 → 订阅管理（与网页「订阅影片 / 已订阅」同语义） */
     onSubscribeTitle: (String, io.movieclaw.android.feature.subscriptions.SubscribeSheetHost.Seed?) -> Unit,
-    onOpenFiltered: () -> Unit = {},
     subscriptions: SubscriptionIndex,
     vm: DiscoverViewModel = hiltViewModel(),
 ) {
@@ -226,6 +346,9 @@ fun DiscoverScreen(
     // 不再拿"是否在库里"冒充"是否已订阅"
     val subscriptionIndex by subscriptions.byKey.collectAsStateWithLifecycle()
     LaunchedEffect(origin, subscriptionIndex) { subscriptions.ensureLoaded() }
+
+    // 条件生效时正文整块换成结果网格（iOS `filtering` 同口径：TMDB 源 + 至少一项条件）
+    val filtering = state.source.equals("tmdb", ignoreCase = true) && state.filters.activeCount > 0
 
     val scroll = rememberScrollState()
     io.movieclaw.android.core.designsystem.TrackTabBarMinimize(scroll)
@@ -242,8 +365,14 @@ fun DiscoverScreen(
     var heroPage by remember { mutableIntStateOf(0) }
     // 氛围底色 = 当前这一屏剧照的主色（同一套取色算法）
     val ambient = rememberAmbientColor(heroSlides.getOrNull(heroPage)?.backdropUrl, origin)
+    // 悬浮顶栏实际占的高度（状态栏 + 52dp）：筛选态下胶囊行与维度菜单都按它让位
+    val topBarTotal = androidx.compose.foundation.layout.WindowInsets.statusBars
+        .asPaddingValues()
+        .calculateTopPadding() + McMetrics.topBarHeight
     var showSourceMenu by remember { mutableStateOf(false) }
     var showFilterMenu by remember { mutableStateOf(false) }
+    /** 结果页条件胶囊点开的那一维（null = 没开；浮层挂在胶囊行正下方） */
+    var chipDim by remember { mutableStateOf<String?>(null) }
 
     // 展开层宿主：同一时刻只展开一张海报卡（网页 hover 层在触摸端的等价物）
     val posterReveal = remember { mutableStateOf<String?>(null) }
@@ -259,9 +388,28 @@ fun DiscoverScreen(
         Column(
             Modifier
                 .fillMaxSize()
-                .verticalScroll(scroll)
+                // 筛选态下正文是懒加载网格：外层不能再套垂直滚动（无限高约束会崩），
+                // 网格自己滚；常规态仍是整页一个滚动容器（实测形态）
+                .then(if (filtering) Modifier else Modifier.verticalScroll(scroll))
                 .padding(bottom = McTabBarContentPadding),
         ) {
+            if (filtering) {
+                // ── 条件生效：正文整块换成结果网格（iOS DiscoverFilteredGrid）──
+                // 头（TMDB DISCOVER / 筛选结果 / 计数 + 清空条件）与条件胶囊都在网格里
+                // 跟着滚（iOS 就是这样，见 DiscoverFilteredGrid.kt）；顶栏那颗「全部」
+                // 任何时候都能改条件。让位的是**状态栏 + 顶栏**（悬浮顶栏占的那一段）。
+                Spacer(Modifier.height(topBarTotal))
+                DiscoverFilteredGridBody(
+                    state = state,
+                    origin = origin,
+                    onOpenTitle = onOpenTitle,
+                    onOpenDim = { chipDim = it },
+                    onClear = { vm.applyFilters(DiscoveryFilter()) },
+                    onLoadMore = { vm.loadMoreFiltered() },
+                    onRetry = { vm.loadFiltered(skipDebounce = true) },
+                )
+                return@Column
+            }
             if (heroSlides.isNotEmpty()) {
                 HeroCarousel(
                     slides = heroSlides,
@@ -414,32 +562,43 @@ fun DiscoverScreen(
         variant = McTopBarVariant.Discover,
         title = if (state.mediaType == "tv") "剧集" else "电影",
         sourceLabel = if (state.source.equals("douban", ignoreCase = true)) "豆瓣" else "TMDB",
-        onSourceClick = { showFilterMenu = false; showSourceMenu = !showSourceMenu },
+        onSourceClick = { showFilterMenu = false; chipDim = null; showSourceMenu = !showSourceMenu },
         mistStrength = 0.5f,
         mistHeight = 135.dp,
         modifier = Modifier.align(Alignment.TopCenter),
     ) {
-        Text(
-            state.filters.label(),
-            style = McType.subSemibold,
-            color = Color.White.copy(alpha = 0.92f),
-            modifier = Modifier
-                .height(36.dp)
-                .clip(RoundedCornerShape(999.dp))
-                .background(GlassCapsule)
-                .border(1.dp, LineSoft, RoundedCornerShape(999.dp))
-                .clickable { showSourceMenu = false; onOpenFiltered() }
-                .padding(horizontal = 14.dp)
-                .wrapContentHeight(),
-        )
-        Spacer(Modifier.width(8.dp))
-        McNavButton(Icons.Rounded.Search, contentDescription = "搜索", onClick = onOpenSearch)
+        // 「全部」筛选键（iOS DiscoverFilterMenu）：点开是六个维度各一个二级菜单 + 「清空条件」，
+        // 选一项即生效——**不压栈新页**，也没有「查看结果」这一步。豆瓣源没有筛选，键不出现。
+        if (state.source.equals("tmdb", ignoreCase = true)) {
+            Text(
+                state.filters.label(),
+                style = McType.subSemibold,
+                color = Color.White.copy(alpha = 0.92f),
+                modifier = Modifier
+                    .height(36.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(GlassCapsule)
+                    .border(1.dp, LineSoft, RoundedCornerShape(999.dp))
+                    .clickable {
+                        showSourceMenu = false
+                        chipDim = null
+                        showFilterMenu = !showFilterMenu
+                    }
+                    .padding(horizontal = 14.dp)
+                    .wrapContentHeight(),
+            )
+            Spacer(Modifier.width(8.dp))
+        }
+        // 入口口径是「任一搜索分区可用」（影视 / 资源 / 媒体库，见 SearchAccess.canOpenSearch）
+        if (io.movieclaw.android.core.session.LocalSearchAccess.current.canOpenSearch) {
+            McNavButton(Icons.Rounded.Search, contentDescription = "搜索", onClick = onOpenSearch)
+        }
     }
 
     // 菜单层。网页的 page-scrim 在 z-5、.app-shell 在 z-10，
     // 遮罩永远被盖住——所以弹出时背景不模糊也不变暗，
     // 只有一层透明的点外关闭区。
-    if (showSourceMenu || showFilterMenu) {
+    if (showSourceMenu || showFilterMenu || chipDim != null) {
         Box(
             Modifier
                 .fillMaxSize()
@@ -449,6 +608,7 @@ fun DiscoverScreen(
                 ) {
                     showSourceMenu = false
                     showFilterMenu = false
+                    chipDim = null
                 },
         )
     }
@@ -468,6 +628,7 @@ fun DiscoverScreen(
     if (showFilterMenu) {
         DiscoveryFilterMenu(
             filter = state.filters,
+            // 选一项即生效并收起（同 iOS）；条件被清空后正文本就回到首页板块
             onApply = { vm.applyFilters(it); showFilterMenu = false },
             modifier = Modifier
                 .align(Alignment.TopEnd)
@@ -475,8 +636,22 @@ fun DiscoverScreen(
                 .padding(end = McMetrics.topBarInsetRoot, top = McMetrics.topBarHeight),
         )
     }
+    // 结果页条件胶囊点开的那一维：浮层挂在顶栏右下（与「全部」菜单同一处）。
+    // iOS 是把菜单锚在胶囊本身上；安卓这边胶囊在滚动容器里，锚点跟着滚会跑偏，
+    // 统一挂在固定的右上角——同一个取值菜单、同一份文案，只是位置固定可预期。
+    chipDim?.let { dim ->
+        DiscoveryFilterDimPanel(
+            dimKey = dim,
+            filters = state.filters,
+            onApply = { vm.applyFilters(it); chipDim = null },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(end = McMetrics.topBarInsetRoot, top = topBarTotal),
+        )
     }
-}
+    }
+    }
 }
 
 /**

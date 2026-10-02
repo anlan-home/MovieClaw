@@ -1,6 +1,11 @@
 package io.movieclaw.android.feature.activity
 
 import io.movieclaw.android.core.designsystem.LocalFeedback
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
@@ -26,6 +31,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -137,6 +145,8 @@ fun ActivityScreen(
                                 trailing = activity.attentionJobs
                                     .takeIf { it.any { job -> job.status == "failed" } }
                                     ?.let { "全部忽略" to { vm.dismissAllFailed() } },
+                                // 就地动作（清干净这一屏），不是去下一页——照 iOS `chevron: false` 不带箭头
+                                trailingChevron = false,
                             )
                         }
                         items(activity.attentionGroups, key = { "att-grp-${it.key}" }) { group ->
@@ -156,8 +166,10 @@ fun ActivityScreen(
                         }
                         items(activity.attentionJobs, key = { "att-job-${it.id}" }) { job ->
                             AttentionCard(
-                                title = job.subject ?: job.jobType,
-                                subtitle = job.jobType,
+                                // 需要处理的卡片：标题给作品名、副行给任务类型的人话名
+                                // （以前副行是 `library.skip_segments` 这种原始键）
+                                title = job.subject ?: jobTypeLabel(job.jobType),
+                                subtitle = jobTypeLabel(job.jobType),
                                 reason = job.error?.message?.takeIf { it.isNotBlank() }
                                     ?: job.progress.message.ifBlank { "任务失败" },
                                 meta = "第 ${job.attempt}/${job.maxAttempts} 次尝试",
@@ -318,12 +330,21 @@ private fun FinishedJobRow(job: JobView, onClick: () -> Unit) {
     }
 }
 
-/** 分区标题：实测 16/600、左内距 20（比卡片多 4，卡片是 16） */
+/**
+ * 分区标题：实测 16/600、左内距 20（比卡片多 4，卡片是 16）。
+ *
+ * 右侧出口的两种形态照网页 `ActivityGroup` 的 `trailing` 与 iOS `ActivitySectionHeader`：
+ * **去二级页的（「查看全部」）带一枚右箭头**，「就地动作」（「全部忽略」）不带——
+ * 箭头是「点进去还有一页」的信号，就地动作加上它会误导。两端都是这个口径。
+ * 出口一律贴右边缘（以前用两个 weight，标题与出口各占一半空档，看着偏在中间）。
+ */
 @Composable
 internal fun SectionLabel(
     text: String,
     /** 分区标题右侧的出口（网页 `ActivityGroup` 的 `trailing`），如「查看全部」 */
     trailing: Pair<String, () -> Unit>? = null,
+    /** 出口是不是「去往下一页」：是就带箭头（「全部忽略」这类就地动作传 false） */
+    trailingChevron: Boolean = true,
 ) {
     Row(
         Modifier
@@ -331,18 +352,28 @@ internal fun SectionLabel(
             .padding(start = 20.dp, end = 20.dp, top = McMetrics.sectionTopTight, bottom = McMetrics.sectionBottomTight),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(text, style = McType.bodySemibold, modifier = Modifier.weight(1f, fill = false))
+        Text(text, style = McType.bodySemibold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.weight(1f))
         trailing?.let { (label, run) ->
-            Spacer(Modifier.weight(1f))
-            Text(
-                label,
-                fontSize = 12.5.sp,
-                color = Accent,
-                modifier = Modifier
+            Row(
+                Modifier
                     .clip(RoundedCornerShape(8.dp))
                     .clickable(onClick = run)
-                    .padding(horizontal = 6.dp, vertical = 3.dp),
-            )
+                    .padding(start = 12.dp, top = 3.dp, bottom = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(label, fontSize = 12.5.sp, color = Accent)
+                if (trailingChevron) {
+                    // 与标题基线对齐的一枚小箭头（iOS chevron.right caption/semibold、网页 size-3.5）
+                    Spacer(Modifier.width(2.dp))
+                    Icon(
+                        Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = Accent,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -559,6 +590,56 @@ private fun DeviceDownloadRow(download: ActiveFileDownload, origin: String?) {
     }
 }
 
+/**
+ * 任务进度条（网页 `ActiveJobFeedItem`）：有百分比画定长条；**跑着但还没有百分比画不确定态**
+ * ——三分之一宽的脉冲段（网页就是 `w-1/3 animate-pulse`，不来回移动）。
+ * 以前没有百分比就整条不画，正在跑的识别任务看着像卡住了。
+ */
+@Composable
+private fun JobProgressBar(percent: Float?, tint: Color) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(Color.White.copy(alpha = 0.12f)),
+    ) {
+        if (percent != null) {
+            Box(
+                Modifier
+                    .fillMaxWidth((percent / 100f).coerceIn(0f, 1f))
+                    .height(3.dp)
+                    .background(tint),
+            )
+        } else {
+            val pulse = rememberInfiniteTransition(label = "job-pulse")
+            val alpha by pulse.animateFloat(
+                initialValue = 0.65f,
+                targetValue = 0.28f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(700),
+                    repeatMode = RepeatMode.Reverse,
+                ),
+                label = "job-pulse-alpha",
+            )
+            Box(
+                Modifier
+                    .fillMaxWidth(1f / 3f)
+                    .height(3.dp)
+                    .background(tint.copy(alpha = alpha)),
+            )
+        }
+    }
+}
+
+/**
+ * 「进行中」里的一个后台任务（网页 `ActiveJobFeedItem`）：作品名（认不出就用任务类型的人话名）
+ * + 状态行（进行中说动作、其余说状态名，后面跟百分比）+ 进度消息（两行）+ 进度条。
+ *
+ * 两处与网页对齐、以前做得不对的地方：卡片**内容溢出**（`FlatCard` 自己不带上内边距，
+ * 这一处忘了补，文字贴着卡片边框、压到圆角上）；进度条**没有百分比就整条不画**
+ * （识别片头片尾这类任务没有百分比），现在与网页一样给不确定态脉冲条。
+ */
 @Composable
 internal fun JobCard(job: JobView, onCancel: () -> Unit, onRetry: () -> Unit, onDismiss: () -> Unit) {
     val color = when (job.status) {
@@ -569,50 +650,61 @@ internal fun JobCard(job: JobView, onCancel: () -> Unit, onRetry: () -> Unit, on
         else -> Info
     }
     FlatCard(Modifier.padding(horizontal = McMetrics.pagePadding).fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(7.dp).background(color, CircleShape))
-            Spacer(Modifier.width(8.dp))
-            Text(
-                job.subject ?: job.jobType,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                when (job.status) {
-                    "running", "queued", "waiting" -> TextButton(onClick = onCancel) {
-                        Text("取消", fontSize = 11.5.sp, color = Danger)
+        // FlatCard 只有底色与描边，内边距由调用方给（同 AttentionGroupCard 那张卡片）
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(7.dp).background(color, CircleShape))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    job.subject ?: jobTypeLabel(job.jobType),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    when (job.status) {
+                        "running", "queued", "waiting" -> TextButton(onClick = onCancel) {
+                            Text("取消", fontSize = 11.5.sp, color = Danger)
+                        }
+                        "failed", "error", "cancelled", "canceled" -> {
+                            TextButton(onClick = onRetry) { Text("重试", fontSize = 11.5.sp, color = Accent) }
+                            TextButton(onClick = onDismiss) { Text("忽略", fontSize = 11.5.sp, color = TextFaint) }
+                        }
+                        else -> TextButton(onClick = onDismiss) { Text("忽略", fontSize = 11.5.sp, color = TextFaint) }
                     }
-                    "failed", "error", "cancelled", "canceled" -> {
-                        TextButton(onClick = onRetry) { Text("重试", fontSize = 11.5.sp, color = Accent) }
-                        TextButton(onClick = onDismiss) { Text("忽略", fontSize = 11.5.sp, color = TextFaint) }
-                    }
-                    else -> TextButton(onClick = onDismiss) { Text("忽略", fontSize = 11.5.sp, color = TextFaint) }
                 }
             }
-        }
-        Spacer(Modifier.height(6.dp))
-        Text(
-            buildString {
-                append(job.jobType)
-                if (job.attempt > 1) append(" · 第 ${job.attempt}/${job.maxAttempts} 次")
-                job.actorName?.let { append(" · $it") }
-            },
-            fontSize = 10.5.sp,
-            color = TextFaint,
-        )
-        job.progress.message.takeIf { it.isNotEmpty() }?.let {
             Spacer(Modifier.height(6.dp))
-            Text(it, fontSize = 11.5.sp, color = TextMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        }
-        job.progress.percent?.let { percent ->
-            Spacer(Modifier.height(8.dp))
-            ProgressBar(fraction = percent / 100f, tint = color)
-        } ?: job.progress.total?.takeIf { it > 0 }?.let { total ->
-            Spacer(Modifier.height(8.dp))
-            ProgressBar(fraction = (job.progress.current ?: 0).toFloat() / total, tint = color)
+            val percent = job.progress.percent
+            Text(
+                buildString {
+                    append(activeJobStatus(job))
+                    percent?.let { append(" · ").append(Math.round(it)).append("%") }
+                    if (job.attempt > 1) append(" · 第 ${job.attempt}/${job.maxAttempts} 次")
+                },
+                fontSize = 11.5.sp,
+                color = TextMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            job.progress.message.takeIf { it.isNotEmpty() }?.let {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    it,
+                    fontSize = 11.5.sp,
+                    color = TextFaint,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 16.sp,
+                )
+            }
+            // 有百分比画定长条；正在跑但没百分比画不确定态；排队 / 等待 / 已结束的不画
+            if (percent != null || job.status == "running") {
+                Spacer(Modifier.height(8.dp))
+                JobProgressBar(percent = percent, tint = color)
+            }
         }
     }
 }

@@ -9,6 +9,7 @@ import android.util.Rational
 import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.offset
@@ -351,6 +352,9 @@ private fun PlayingSurface(
     var levelHud by remember { mutableStateOf<LevelHud?>(null) }
     var holdSpeed by remember { mutableStateOf(false) }
     var upNextDismissed by remember { mutableStateOf(false) }
+    // 自动连播（iOS autoNextArmed）：连续自动播了几集（任何用户操作清零）；倒计时秒数
+    var autoNextStreak by remember { mutableIntStateOf(0) }
+    var autoNextLeft by remember { mutableIntStateOf(0) }
     var scrubbing by remember { mutableStateOf(false) }
     var adjusting by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -367,6 +371,7 @@ private fun PlayingSurface(
         pendingSeekMs = clamped
         seekGraceUntil = android.os.SystemClock.elapsedRealtime() + 2_500
         positionMs = clamped
+        autoNextStreak = 0   // 用户操作清零自动连播计数（iOS 同语义）
         controller.seekToFileMs(clamped)
     }
 
@@ -802,13 +807,58 @@ private fun PlayingSurface(
             )
         }
 
-        // 片尾连播卡(T−40s 出现,常驻不倒计时;iOS PlayerUpNextCard)
+        // ── 跳过片头/片尾（docs/design/skip-intro.md §5，逻辑照 iOS SkipSegments）──
+        // 位置进区间（终点前 3s 前）出按钮，点了跳到区间尾；「other」段观众眼里也是片头，
+        // 文案同为「跳过片头」。一直放到结尾的片尾不出（交给连播卡），两者不同时出现。
+        // 片段模式/已播完/报错/要同意/锁屏都不给（报错与同意在 Playing 分支之外，天然排除）。
+        // 不自动跳过（v1 拍板）。
+        val activeSkip = remember(positionMs) { controller.activeSkipSegment() }
+        // 「一直放到结尾」的片尾：连播卡提前到片尾起点就弹，不必等最后 40 秒
+        val inFileOutro = remember(positionMs) { controller.isInFileOutro() }
         val remaining = durationMs - positionMs
-        if (upNext != null && !upNextDismissed && !locked && (ended || (remaining in 1..40_000))) {
+        val upNextShowing = upNext != null && !upNextDismissed && !locked &&
+            (ended || remaining in 1..40_000 || inFileOutro)
+        if (activeSkip != null && !locked && !ended && !upNextShowing) {
+            Text(
+                controller.skipLabel(activeSkip),
+                style = McType.subheadlineSemibold,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = 96.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(999.dp))
+                    .clickable {
+                        autoNextStreak = 0   // 任何用户操作都清零连播计数
+                        seekTo(activeSkip.endMs)
+                    }
+                    .padding(horizontal = 16.dp, vertical = 9.dp),
+            )
+        }
+
+        // 片尾连播卡（iOS PlayerUpNextCard）：T−40s 或服务端认出的片尾起点出现。
+        // 自动连播只在「服务端认出一直放到结尾的片尾」时启用（按最后 40 秒猜出来的
+        // 片尾，字幕还没放完画面就被抢走）：8 秒倒计时、连播 ≤3 集、任何用户操作清零——
+        // 人多半睡着了，也别让 NAS 白转一晚上。倒计时进度画在「立即播放」按钮上。
+        if (upNextShowing) {
+            val armed = inFileOutro && !ended && playing && autoNextStreak < 3
+            LaunchedEffect(inFileOutro, playing, upNext, upNextDismissed, locked) {
+                if (!armed || upNext == null) return@LaunchedEffect
+                autoNextLeft = 8
+                while (autoNextLeft > 0) {
+                    delay(1_000)
+                    if (!armed) return@LaunchedEffect
+                    autoNextLeft--
+                }
+                autoNextStreak++
+                onPlayNext(upNext)
+            }
             UpNextCard(
                 upNext = upNext,
                 onPlay = { onPlayNext(upNext); upNextDismissed = false },
                 onDismiss = { upNextDismissed = true },
+                autoNextInSec = if (armed) autoNextLeft else null,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 48.dp, vertical = 96.dp),
             )
         }
@@ -1000,7 +1050,10 @@ private fun PlayingSurface(
                             Icon(Icons.Rounded.Replay10, contentDescription = "后退 10 秒", tint = Color.White)
                         }
                         IconButton(
-                            onClick = { controller.setPlaying(!playing) },
+                            onClick = {
+                                autoNextStreak = 0   // 用户操作清零自动连播计数
+                                controller.setPlaying(!playing)
+                            },
                             modifier = Modifier
                                 .size(56.dp)
                                 .background(Color.White.copy(alpha = 0.14f), CircleShape),
@@ -1077,6 +1130,8 @@ private fun UpNextCard(
     upNext: PlayerViewModel.UpNext,
     onPlay: () -> Unit,
     onDismiss: () -> Unit,
+    /** 服务端认出「一直放到结尾」的片尾时的自动连播倒计时（秒）；null = 不倒计时 */
+    autoNextInSec: Int? = null,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -1116,7 +1171,11 @@ private fun UpNextCard(
                 colors = ButtonDefaults.buttonColors(containerColor = AccentStrong, contentColor = Color(0xFF0A0E12)),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("立即播放", style = McType.subheadlineSemibold)
+                // 自动连播时「立即播放」本身就是这条进度（iOS 同款）：数字走到 0 自动播下一集
+                Text(
+                    if (autoNextInSec != null) "立即播放 · ${autoNextInSec}s" else "立即播放",
+                    style = McType.subheadlineSemibold,
+                )
             }
         }
     }

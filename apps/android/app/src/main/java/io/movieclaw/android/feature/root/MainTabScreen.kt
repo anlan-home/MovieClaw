@@ -21,10 +21,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
 import io.movieclaw.android.core.designsystem.Bg
 import io.movieclaw.android.core.designsystem.McCapsuleTabBar
 import io.movieclaw.android.core.designsystem.McMetrics
 import io.movieclaw.android.core.playback.PlayTarget
+import io.movieclaw.android.core.session.LocalPermissions
+import io.movieclaw.android.core.session.initials
 import io.movieclaw.android.feature.activity.ActivityScreen
 import io.movieclaw.android.feature.discover.DiscoverScreen
 import io.movieclaw.android.feature.library.LibraryScreen
@@ -42,6 +49,13 @@ enum class MainTab(
     MORE("我的", Icons.Rounded.Person),
 }
 
+@HiltViewModel
+class MainTabViewModel @Inject constructor(
+    private val repository: io.movieclaw.android.core.session.SessionRepository,
+) : ViewModel() {
+    val ui = repository.ui
+}
+
 /**
  * 五 Tab 主壳 —— 底栏按移动端网页实测重做：
  * 悬浮胶囊 348×54（左右 21、距底 22）、圆角 999、**图标-only**（无文字标签）、
@@ -53,15 +67,22 @@ fun MainTabScreen(
     onOpenLibrary: (Long, String) -> Unit,
     onOpenItem: (Long, Long) -> Unit,
     onPlay: (PlayTarget) -> Unit,
-    onOpenSearch: () -> Unit,
+    /** 放大镜：参数是进来时预选的搜索分区（发现 / 订阅 → 影视，媒体库 → 媒体库，活动 → 资源；「我的」= null 沿用上次） */
+    onOpenSearch: (String?) -> Unit,
     onOpenNotices: () -> Unit,
     onOpenSubscription: (Long) -> Unit,
     onOpenTitle: (String) -> Unit,
     onOpenCollection: (String, String) -> Unit,
     onSubscribeTitle: (String, io.movieclaw.android.feature.subscriptions.SubscribeSheetHost.Seed?) -> Unit,
     onOpenManage: () -> Unit,
-    onOpenFiltered: () -> Unit,
+    /** 「我的」页账户卡 → 个人信息；提醒组的更新行 → 设置 → 更新与维护 */
+    onOpenProfile: () -> Unit = {},
+    onOpenUpdate: () -> Unit = {},
+    /** 「我的」页最近会话的首行「新会话」（点某条会话复用下面的 onOpenAgentSession） */
+    onOpenNewSession: () -> Unit = {},
     onOpenFavorites: () -> Unit,
+    /** 媒体库 ⋯ 菜单的「全部合集」 */
+    onOpenCollections: () -> Unit = {},
     onOpenAgent: () -> Unit,
     /** 活动页「交给 AI 分析」建好会话后直接进那个会话 */
     onOpenAgentSession: (String) -> Unit,
@@ -69,30 +90,50 @@ fun MainTabScreen(
     onOpenActivityDetail: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenAccounts: () -> Unit,
+    /** 「全部电影」类型行点「查看全部」进跨库墙 */
+    onOpenKind: (String) -> Unit = {},
+    /** 订阅首页的「剧集/电影订阅 ›」与「查看全部」→ 订阅海报墙 */
+    onOpenSubsWall: (String) -> Unit = {},
     subscriptions: io.movieclaw.android.feature.subscriptions.SubscriptionIndex,
+    vm: MainTabViewModel = hiltViewModel(),
 ) {
     var current by rememberSaveable { mutableStateOf(MainTab.DISCOVER) }
+    val ui by vm.ui.collectAsStateWithLifecycle()
+    val permissions = LocalPermissions.current
+
+    // 页签按权限裁剪（同网页底栏 / iOS MainTabView.visibleTabs）：
+    // 「订阅」要能订阅、「活动」是超管页面（成员手输 URL 也进不去）
+    val tabs = MainTab.entries.filter { tab ->
+        when (tab) {
+            MainTab.SUBSCRIPTIONS -> permissions.canSubscribe
+            MainTab.ACTIVITY -> permissions.isAdmin
+            else -> true
+        }
+    }
+    // 换账号后当前页签可能已被裁掉（管理员 → 成员正停在「活动」），落回第一格
+    val selected = tabs.indexOf(current).takeIf { it >= 0 } ?: 0
 
     Box(Modifier.fillMaxSize().background(Bg)) {
-        when (current) {
+        when (tabs[selected]) {
             MainTab.DISCOVER -> DiscoverScreen(
                 onOpenLibrary = onOpenLibrary,
                 onOpenItem = onOpenItem,
                 onPlay = onPlay,
-                onOpenSearch = onOpenSearch,
+                onOpenSearch = { onOpenSearch("media") },
                 onOpenTitle = onOpenTitle,
                 onOpenCollection = onOpenCollection,
                 onSubscribeTitle = onSubscribeTitle,
-                onOpenFiltered = onOpenFiltered,
                 subscriptions = subscriptions,
             )
             MainTab.LIBRARY -> LibraryScreen(
                 onOpenLibrary = onOpenLibrary,
                 onOpenItem = onOpenItem,
                 onPlay = onPlay,
-                onOpenSearch = onOpenSearch,
+                onOpenSearch = { onOpenSearch("library") },
                 onOpenManage = onOpenManage,
                 onOpenFavorites = onOpenFavorites,
+                onOpenCollections = onOpenCollections,
+                onOpenKind = onOpenKind,
             )
             MainTab.SUBSCRIPTIONS -> SubsHomeScreen(
                 onOpenSubscription = onOpenSubscription,
@@ -100,26 +141,30 @@ fun MainTabScreen(
                 onOpenTitle = onOpenTitle,
                 // 空态的「去发现剧集」：切到发现页（网页是跳 /discover/tv）
                 onOpenDiscover = { current = MainTab.DISCOVER },
+                // 「剧集/电影订阅 ›」与「查看全部」→ 订阅海报墙
+                onOpenWall = onOpenSubsWall,
             )
             MainTab.ACTIVITY -> ActivityScreen(
                 onOpenAgentSession = onOpenAgentSession,
                 onOpenActivityDetail = onOpenActivityDetail,
             )
             MainTab.MORE -> MoreScreen(
+                onOpenProfile = onOpenProfile,
                 onOpenNotices = onOpenNotices,
-                onOpenAgent = onOpenAgent,
+                onOpenUpdate = onOpenUpdate,
+                onOpenNewSession = onOpenNewSession,
+                onOpenAgentSession = onOpenAgentSession,
                 onOpenSettings = onOpenSettings,
-                onOpenAccounts = onOpenAccounts,
             )
         }
 
         // 悬浮胶囊底栏：内容从它下面穿过（实测就是这样，底栏不占布局高度）
         McCapsuleTabBar(
-            icons = MainTab.entries.map { it.icon },
-            labels = MainTab.entries.map { it.label },
-            selectedIndex = current.ordinal,
-            onSelect = { current = MainTab.entries[it] },
-            avatarInitials = "AN",
+            icons = tabs.map { it.icon },
+            labels = tabs.map { it.label },
+            selectedIndex = selected,
+            onSelect = { current = tabs[it] },
+            avatarInitials = ui.session.initials(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()

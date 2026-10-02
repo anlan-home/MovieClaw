@@ -27,6 +27,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.border
+import androidx.compose.material.icons.rounded.SwitchAccount
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
@@ -85,6 +87,8 @@ import io.movieclaw.android.core.designsystem.Loadable
 import io.movieclaw.android.core.designsystem.McFormat
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.Bg
+import io.movieclaw.android.core.designsystem.LineSoft
+import io.movieclaw.android.core.designsystem.FlatRow
 import io.movieclaw.android.core.designsystem.McMetrics
 import io.movieclaw.android.core.designsystem.McTopBar
 import io.movieclaw.android.core.designsystem.McTopBarVariant
@@ -119,19 +123,29 @@ import okhttp3.RequestBody.Companion.asRequestBody
 
 /* ---------------- 设置索引 ---------------- */
 
-enum class SettingsSection(val label: String, val subtitle: String, val group: String, val adminOnly: Boolean = false) {
-    PROFILE("个人信息", "昵称、头像、登录密码", "账号"),
-    DEVICES("设备管理", "已登录的客户端与播放器,可改名或注销", "账号", adminOnly = true),
-    MEMBERS("家庭成员", "成员权限、媒体库可见范围、重置密码", "账号", adminOnly = true),
+enum class SettingsSection(
+    val label: String,
+    val subtitle: String,
+    val group: String,
+    /**
+     * 成员可见的分区。同 Web `MEMBER_SECTION_IDS`（profile / devices / appearance）与
+     * iOS `memberVisible`（profile / devices）：成员只剩「个人信息」与自己的设备，
+     * 其余分区后端一律 403，前端不给入口（安全边界仍在后端）。
+     */
+    val memberVisible: Boolean = false,
+) {
+    PROFILE("个人信息", "昵称、头像、登录密码", "账号", memberVisible = true),
+    DEVICES("设备管理", "已登录的客户端与播放器,可改名或注销", "账号", memberVisible = true),
+    MEMBERS("家庭成员", "成员权限、媒体库可见范围、重置密码", "账号"),
     PLAYBACK("播放", "软件转码、进度预览、转码缓存", "播放与内容"),
     SUBSCRIPTION_WEB("订阅与追更", "在网页端管理订阅规则与规则集", "播放与内容"),
     SITES_WEB("站点与索引器", "在网页端管理站点与登录态", "播放与内容"),
     DOWNLOADERS_WEB("下载器", "在网页端管理下载器与限速", "播放与内容"),
     IMPORT_WATCH_WEB("导入与观看记录", "在网页端管理导入监听与记录导入", "播放与内容"),
     OVERVIEW_WEB("总览", "服务器概况与体检", "服务器"),
-    MAINTENANCE("更新与维护", "服务器更新、存储清理、重启", "服务器", adminOnly = true),
-    NETWORK("网络", "服务器网络配置与连通性测试", "服务器", adminOnly = true),
-    LOGS("日志", "服务器运行日志", "服务器", adminOnly = true),
+    MAINTENANCE("更新与维护", "服务器更新、存储清理、重启", "服务器"),
+    NETWORK("网络", "服务器网络配置与连通性测试", "服务器"),
+    LOGS("日志", "服务器运行日志", "服务器"),
 }
 
 @HiltViewModel
@@ -142,9 +156,14 @@ class SettingsViewModel @Inject constructor(
     val origin: String? get() = repository.ui.value.origin
 
     fun visibleSections(): List<SettingsSection> {
-        val isAdmin = repository.ui.value.session?.role == "admin"
-        return SettingsSection.entries.filter { !it.adminOnly || isAdmin }
+        val permissions = io.movieclaw.android.core.session.Permissions.of(repository.ui.value.session)
+        return SettingsSection.entries.filter { permissions.isAdmin || it.memberVisible }
     }
+
+    /** 分区的直链守卫：成员深链到超管分区不给开（同 Web `accessiblePathFor`） */
+    fun canOpen(section: SettingsSection): Boolean =
+        io.movieclaw.android.core.session.Permissions.of(repository.ui.value.session)
+            .let { it.isAdmin || section.memberVisible }
 }
 
 @Composable
@@ -296,6 +315,11 @@ class ProfileSettingsViewModel @Inject constructor(
     private val _busy = MutableStateFlow(false)
     val busy = _busy.asStateFlow()
 
+    /** 退出登录（只退当前账号；同 iOS 把它放在个人信息页底部） */
+    fun logout() {
+        viewModelScope.launch { repository.logout() }
+    }
+
     fun updateNickname(nickname: String, onDone: () -> Unit) {
         if (_busy.value) return
         _busy.value = true
@@ -361,7 +385,12 @@ class ProfileSettingsViewModel @Inject constructor(
 }
 
 @Composable
-fun ProfileSettingsScreen(onBack: () -> Unit, vm: ProfileSettingsViewModel = hiltViewModel()) {
+fun ProfileSettingsScreen(
+    onBack: () -> Unit,
+    /** 「切换账号」：跳账号切换页（同 iOS：这一对动作放在个人信息页最底部，不在「我的」页） */
+    onOpenAccounts: () -> Unit = {},
+    vm: ProfileSettingsViewModel = hiltViewModel(),
+) {
     val session = vm.session
     val context = LocalContext.current
     var nickname by remember(session?.nickname) { mutableStateOf(session?.nickname ?: "") }
@@ -479,6 +508,32 @@ fun ProfileSettingsScreen(onBack: () -> Unit, vm: ProfileSettingsViewModel = hil
             status?.let {
                 Spacer(Modifier.height(14.dp))
                 Text(it, style = McType.footnote, color = if (it.contains("已")) Success else Danger)
+            }
+
+            // ── 切换账号（同 iOS：账户详情页最底部，看得见的兜底入口）──
+            Spacer(Modifier.height(26.dp))
+            Spacer(Modifier.height(1.dp).fillMaxWidth().background(LineSoft))
+            Spacer(Modifier.height(10.dp))
+            FlatRow(
+                title = "切换账号",
+                icon = Icons.Rounded.SwitchAccount,
+                onClick = onOpenAccounts,
+            )
+            Spacer(Modifier.height(10.dp))
+
+            // ── 退出登录（单独一组、红色居中，同 iOS 设置 App 账户页最底部）──
+            Spacer(Modifier.height(16.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.White.copy(alpha = 0.05f))
+                    .border(1.dp, LineSoft, RoundedCornerShape(14.dp))
+                    .clickable { vm.logout() }
+                    .padding(vertical = 14.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("退出登录", style = McType.bodyMedium, color = Danger)
             }
             Spacer(Modifier.height(30.dp))
         }

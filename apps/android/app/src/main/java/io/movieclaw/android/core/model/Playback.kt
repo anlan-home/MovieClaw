@@ -157,6 +157,37 @@ data class PlaybackSourceView(
     fun height(): Int? = resolution?.substringAfterLast('x')?.toIntOrNull()
 }
 
+/**
+ * 可跳过的一段（服务端整季比对认出来的，客户端只管用；docs/design/skip-intro.md）：
+ * - `intro` 片头：区间里显示「跳过片头」，点了跳到 end_ms；
+ * - `outro` 片尾：到 start_ms 提前显示「即将播放下一集」；to_end 为假时片尾后面
+ *   还有内容（下集预告、彩蛋），按钮是「跳过片尾」；
+ * - `other` 其他重复段（片头前的冠名广告、发行许可）：观众眼里也是片头，同「跳过片头」。
+ */
+@Serializable
+data class PlaybackSegmentView(
+    val type: String = "",
+    val startMs: Long = 0,
+    val endMs: Long = 0,
+    /** 片尾一直放到文件结尾（只有 outro 有意义） */
+    val toEnd: Boolean = false,
+)
+
+/**
+ * MKV 精简索引（只含视频轨索引点的 Cues 元素）：档 0 直出的 MKV 随会话下发，
+ * 引擎解复用器读 SeekHead 登记的 Cues 位置时直接给这份，不必再下载原索引
+ * （字幕轨多的片子原索引有几百 KB 到几 MB）。索引点数值与原文件逐位一致。
+ */
+@Serializable
+data class MatroskaCuesView(
+    /** Cues 元素在文件里的绝对位置；核对它与文件头里 SeekHead 登记的位置一致才用 */
+    val offset: Long = 0,
+    /** 精简后的整个 Cues 元素（含元素头），base64 */
+    val data: String = "",
+    /** 原 Cues 元素多少字节（诊断用） */
+    val originalBytes: Long = 0,
+)
+
 @Serializable
 data class PlaybackSessionView(
     val decision: PlaybackDecisionView,
@@ -171,6 +202,14 @@ data class PlaybackSessionView(
     val watch: PlaybackStateView? = null,
     /** 源文件客观规格(诊断与降质建议的「需要的码率」来源) */
     val source: PlaybackSourceView? = null,
+    /**
+     * 片头/片尾/其他可跳过的段（剧集库开了「识别片头片尾」且这一季识别过才有）。
+     * 新服务端恒为数组（没有就是空表）；声明成可空只为对旧服务端宽容——
+     * 非可选字段缺失会让整个会话解码失败、起不了播
+     */
+    val segments: List<PlaybackSegmentView>? = null,
+    /** 档 0 直出的 MKV：服务端缓存里有精简索引时随会话下发（没有就在后台生成，给下次用） */
+    val matroskaCues: MatroskaCuesView? = null,
 )
 
 @Serializable

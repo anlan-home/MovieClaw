@@ -80,20 +80,12 @@ import javax.inject.Inject
 
 /* ══════════ 我的收藏（iOS FavoritesView） ══════════ */
 
-data class FavItem(
-    val mediaItemId: Long,
-    val libraryId: Long,
-    val title: String,
-    val year: Int?,
-    val posterUrl: String?,
-    val rating: Float?,
-    val favoritedAt: String?,
-)
-
 data class FavoritesState(
     val loading: Boolean = true,
     val error: String? = null,
-    val items: List<FavItem> = emptyList(),
+    val items: List<io.movieclaw.android.core.model.FavoriteItemView> = emptyList(),
+    /** 去重后的收藏作品总数（行首那句「N 部作品」用它，不是当前加载到的条数） */
+    val total: Int = 0,
 )
 
 @HiltViewModel
@@ -112,33 +104,12 @@ class FavoritesViewModel @Inject constructor(
             val origin = origin ?: run { _ui.update { it.copy(loading = false, error = "尚未连接服务器") }; return@launch }
             _ui.update { it.copy(loading = true, error = null) }
             try {
-                val raw = apiFactory.forOrigin(origin).favorites(60, 0).dataOrThrow()
-                _ui.update { it.copy(loading = false, items = parseFavorites(raw)) }
+                val page = apiFactory.forOrigin(origin).favorites(limit = 60, offset = 0).dataOrThrow()
+                _ui.update { it.copy(loading = false, items = page.items, total = page.total) }
             } catch (e: Exception) {
                 _ui.update { it.copy(loading = false, error = friendlyMessage(e)) }
             }
         }
-    }
-}
-
-private fun parseFavorites(raw: JsonElement): List<FavItem> {
-    val arr = raw.jsonObject["items"]?.jsonArray
-        ?: raw.jsonObject["favorites"]?.jsonArray
-        ?: (raw as? kotlinx.serialization.json.JsonArray)
-        ?: return emptyList()
-    return arr.mapNotNull { el ->
-        val o = el.jsonObject
-        val media = (o["media"] as? JsonObject) ?: o
-        val mid = (media["media_item_id"] ?: media["id"])?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
-        FavItem(
-            mediaItemId = mid,
-            libraryId = (o["library_id"] ?: media["library_id"])?.jsonPrimitive?.longOrNull ?: 0,
-            title = media["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-            year = media["year"]?.jsonPrimitive?.intOrNull,
-            posterUrl = media["poster_url"]?.jsonPrimitive?.contentOrNull,
-            rating = media["rating"]?.jsonPrimitive?.floatOrNull,
-            favoritedAt = o["favorited_at"]?.jsonPrimitive?.contentOrNull,
-        )
     }
 }
 
@@ -157,7 +128,7 @@ fun FavoritesScreen(
             state.items.isEmpty() -> EmptyHint("还没有收藏。在影片页点心，或在 Jellyfin 客户端里收藏，都会出现在这里。")
             else -> {
                 Text(
-                    "${state.items.size} 部作品 · 与 Jellyfin 客户端里点的心同一份",
+                    "${if (state.total > 0) state.total else state.items.size} 部作品 · 与 Jellyfin 客户端里点的心同一份",
                     fontSize = 15.sp, color = TextMuted,
                     modifier = Modifier.padding(horizontal = McMetrics.pagePadding, vertical = 8.dp),
                 )
@@ -194,7 +165,7 @@ fun FavoritesScreen(
                 ) {
                     items(state.items, key = { it.mediaItemId }) { item ->
                         val libraryName = ""
-                        Column(Modifier.clickable { onOpenItem(item.libraryId, item.mediaItemId) }) {
+                        Column(Modifier.clickable { onOpenItem(item.libraryId ?: -1L, item.mediaItemId) }) {
                             Box(
                                 Modifier.fillMaxWidth().aspectRatio(2f / 3f)
                                     .clip(RoundedCornerShape(McMetrics.posterRadius))
@@ -209,7 +180,7 @@ fun FavoritesScreen(
                             Text(
                                 // iOS 收藏格副行是「库名 · 年份」
                                 listOfNotNull(
-                                    if (item.libraryId > 0) "库 · $libraryName" else null,
+                                    if ((item.libraryId ?: 0L) > 0) "库 · $libraryName" else null,
                                     item.year?.toString(),
                                 ).joinToString(" · "),
                                 fontSize = 12.sp, color = TextMuted, modifier = Modifier.padding(top = 2.dp),

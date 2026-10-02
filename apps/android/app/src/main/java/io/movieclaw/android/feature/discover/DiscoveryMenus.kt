@@ -3,6 +3,7 @@ package io.movieclaw.android.feature.discover
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Movie
@@ -63,6 +65,10 @@ data class DiscoveryFilter(
     val runtime: String? = null,
     val sort: String? = null,
 ) {
+    /**
+     * 已启用的维度数（iOS `DiscoveryFilters.activeCount` 同口径）：排序停在默认的
+     * 「热门优先」**不算**启用——它不是条件，勾了它不该把首页翻成筛选结果页。
+     */
     val activeCount: Int
         get() = listOf(
             genreIds.isNotEmpty(),
@@ -70,16 +76,18 @@ data class DiscoveryFilter(
             year != null,
             rating != null,
             runtime != null,
-            sort != null,
+            sort != null && sort != DEFAULT_SORT,
         ).count { it }
 
+    /**
+     * 顶栏筛选键的按钮文字（iOS `DiscoverFilterMenu.buttonTitle`）：顶栏寸土寸金，
+     * 只写**首个类型**（多个再带个数）；没选类型就是「全部」——不写国家 / 年份那些
+     * （那一格的完整条件在结果页的胶囊行里）。
+     */
     fun label(): String {
-        if (activeCount == 0) return "全部"
-        val first = genreIds.firstOrNull()?.let { GenreLabel[it] }
-            ?: country?.let { CountryLabel[it] }
-            ?: year ?: rating ?: runtime ?: sort
-            ?: return "全部"
-        return if (activeCount == 1) first else "$first +${activeCount - 1}"
+        val first = genreIds.firstOrNull() ?: return "全部"
+        val name = GenreLabel[first] ?: "1 个类型"
+        return if (genreIds.size == 1) name else "$name +${genreIds.size - 1}"
     }
 }
 
@@ -148,6 +156,8 @@ fun SourceMenu(
  * 「全部」筛选菜单 —— 实测：272 宽；六行（类型 / 国家·地区 / 上映年份 / 最低评分 / 最长片长 / 排序），
  * 每行 264×38、行首 16 图标、行尾当前值 + 箭头；点进去**原地换成该维度的选项列表**
  * （顶部是「‹ 维度名」的高亮返回行），整个面板封顶 416；类型多选，其余单选且每项带「不限」复位。
+ *
+ * 有条件时末尾多一行「清空条件」（同 iOS `DiscoverFilterMenu`），选择即生效（没有「查看结果」这一步）。
  */
 @Composable
 fun DiscoveryFilterMenu(
@@ -160,44 +170,98 @@ fun DiscoveryFilterMenu(
         val dim = openDim
         if (dim == null) {
             DIMS.forEach { d ->
-                val value = when (d.key) {
-                    "genres" -> when {
-                        filter.genreIds.isEmpty() -> "不限"
-                        filter.genreIds.size == 1 -> GenreLabel[filter.genreIds.first()] ?: "1 个类型"
-                        else -> "${GenreLabel[filter.genreIds.first()] ?: ""} +${filter.genreIds.size - 1}"
-                    }
-                    "country" -> filter.country?.let { CountryLabel[it] ?: it } ?: "不限"
-                    "year" -> filter.year ?: "不限"
-                    "rating" -> filter.rating?.let { "$it 分以上" } ?: "不限"
-                    "runtime" -> filter.runtime?.let { "$it 分钟以内" } ?: "不限"
-                    else -> filter.sort?.let { s -> SORT_OPTIONS.firstOrNull { it.first == s }?.second ?: s } ?: "热门优先"
-                }
-                MenuRow(d.title, value = value, icon = d.icon, chevron = true) { openDim = d }
+                MenuRow(d.title, value = dimValue(d, filter), icon = d.icon, chevron = true) { openDim = d }
+            }
+            if (filter.activeCount > 0) {
+                Spacer(Modifier.height(4.dp))
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.07f)))
+                MenuRow("清空条件", icon = Icons.Rounded.Close, danger = true) { onApply(DiscoveryFilter()) }
             }
         } else {
-            MenuRow(dim.title, icon = Icons.AutoMirrored.Rounded.ArrowBack, highlight = true) { openDim = null }
-            Column(Modifier.heightIn(max = 370.dp).verticalScroll(rememberScrollState())) {
-                if (dim.key != "sort") {
-                    val none = when (dim.key) {
-                        "genres" -> filter.genreIds.isEmpty()
-                        "country" -> filter.country == null
-                        "year" -> filter.year == null
-                        "rating" -> filter.rating == null
-                        else -> filter.runtime == null
-                    }
-                    OptionRow("不限", selected = none) { onApply(clear(dim.key, filter)) }
+            // 结果页头部的条件胶囊点开也走这一份（见 DiscoverFilterChips 的调用）
+            DiscoveryFilterOptionsPanel(
+                dimKey = dim.key,
+                filter = filter,
+                onApply = onApply,
+                onBack = { openDim = null },
+            )
+        }
+    }
+}
+
+/** 某一维度当前的显示值（菜单行与条件胶囊共用同一套文案） */
+private fun dimValue(dim: Dim, filter: DiscoveryFilter): String = when (dim.key) {
+    "genres" -> when {
+        filter.genreIds.isEmpty() -> "不限"
+        filter.genreIds.size == 1 -> GenreLabel[filter.genreIds.first()] ?: "1 个类型"
+        else -> "${GenreLabel[filter.genreIds.first()] ?: ""} +${filter.genreIds.size - 1}"
+    }
+    "country" -> filter.country?.let { CountryLabel[it] ?: it } ?: "不限"
+    "year" -> filter.year ?: "不限"
+    "rating" -> filter.rating?.let { "$it 分以上" } ?: "不限"
+    "runtime" -> filter.runtime?.let { "$it 分钟以内" } ?: "不限"
+    else -> filter.sort?.takeIf { it != DEFAULT_SORT }
+        ?.let { s -> SORT_OPTIONS.firstOrNull { it.first == s }?.second ?: s } ?: "热门优先"
+}
+
+/** 维度名（筛选结果页的条件胶囊上用它 + 当前值） */
+internal fun discoveryDimTitle(key: String): String =
+    DIMS.firstOrNull { it.key == key }?.title ?: key
+
+/** 六个维度固定顺序的 key（结果页的条件胶囊按这个顺序排，不按启用与否重排） */
+internal val discoveryDimKeys: List<String> = DIMS.map { it.key }
+
+/** 一个维度的当前值摘要（未启用返回 null；排序停在「热门优先」也算未启用，与角标口径一致） */
+internal fun discoveryDimSummary(key: String, filter: DiscoveryFilter): String? {
+    val dim = DIMS.firstOrNull { it.key == key } ?: return null
+    if (!dimEnabled(dim, filter)) return null
+    return dimValue(dim, filter)
+}
+
+private const val DEFAULT_SORT = "popular"
+
+private fun dimEnabled(dim: Dim, filter: DiscoveryFilter): Boolean = when (dim.key) {
+    "genres" -> filter.genreIds.isNotEmpty()
+    "country" -> filter.country != null
+    "year" -> filter.year != null
+    "rating" -> filter.rating != null
+    "runtime" -> filter.runtime != null
+    // 默认档「热门优先」不算启用（与 activeCount 同口径）
+    else -> filter.sort != null && filter.sort != DEFAULT_SORT
+}
+
+/**
+ * 单维度的选项面板（二级菜单的内容）：顶部「‹ 维度名」高亮返回行，下面是非多选维度的「不限」
+ * 与各选项（当前项带对勾）。**从主菜单与结果页条件胶囊两处复用**——两处的取值、文案、
+ * 选中态永远一致。
+ */
+@Composable
+fun DiscoveryFilterOptionsPanel(
+    dimKey: String,
+    filter: DiscoveryFilter,
+    onApply: (DiscoveryFilter) -> Unit,
+    onBack: (() -> Unit)? = null,
+) {
+    val dim = DIMS.firstOrNull { it.key == dimKey } ?: return
+    Column(Modifier.fillMaxWidth()) {
+        if (onBack != null) {
+            MenuRow(dim.title, icon = Icons.AutoMirrored.Rounded.ArrowBack, highlight = true, onClick = onBack)
+        }
+        Column(Modifier.heightIn(max = 370.dp).verticalScroll(rememberScrollState())) {
+            // 排序没有「不限」语义（默认档就是「热门优先」）；类型是多选，也不给「不限」
+            if (dim.key != "sort" && !dim.multi) {
+                OptionRow("不限", selected = !dimEnabled(dim, filter)) { onApply(clear(dim.key, filter)) }
+            }
+            dim.options.forEach { (value, label) ->
+                val on = when (dim.key) {
+                    "genres" -> filter.genreIds.contains(value)
+                    "country" -> filter.country == value
+                    "year" -> filter.year == value
+                    "rating" -> filter.rating == value
+                    "runtime" -> filter.runtime == value
+                    else -> filter.sort == value
                 }
-                dim.options.forEach { (value, label) ->
-                    val on = when (dim.key) {
-                        "genres" -> filter.genreIds.contains(value)
-                        "country" -> filter.country == value
-                        "year" -> filter.year == value
-                        "rating" -> filter.rating == value
-                        "runtime" -> filter.runtime == value
-                        else -> filter.sort == value
-                    }
-                    OptionRow(label, selected = on) { onApply(toggle(dim.key, value, filter)) }
-                }
+                OptionRow(label, selected = on) { onApply(toggle(dim.key, value, filter)) }
             }
         }
     }
@@ -257,6 +321,8 @@ private fun MenuRow(
     selected: Boolean = false,
     highlight: Boolean = false,
     chevron: Boolean = false,
+    /** 破坏性动作（「清空条件」）：文字用危险色，同 iOS 的 destructive 角色 */
+    danger: Boolean = false,
     onClick: () -> Unit,
 ) {
     Row(
@@ -270,13 +336,22 @@ private fun MenuRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
-            Icon(icon, contentDescription = null, tint = Color.White.copy(alpha = 0.55f), modifier = Modifier.size(16.dp))
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = if (danger) io.movieclaw.android.core.designsystem.Danger else Color.White.copy(alpha = 0.55f),
+                modifier = Modifier.size(16.dp),
+            )
             Spacer(Modifier.width(12.dp))
         }
         Text(
             title,
             style = McType.sub.copy(fontWeight = if (highlight) FontWeight.SemiBold else null),
-            color = if (highlight) TextPrimary else TextMuted,
+            color = when {
+                danger -> io.movieclaw.android.core.designsystem.Danger
+                highlight -> TextPrimary
+                else -> TextMuted
+            },
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

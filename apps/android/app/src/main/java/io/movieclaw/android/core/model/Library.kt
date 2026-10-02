@@ -18,6 +18,8 @@ data class LibraryItemView(
     val totalSizeBytes: Long = 0,
     val seasons: List<Int> = emptyList(),
     val episodeCount: Int? = null,
+    /** 去重的介质规格标签（如 `["2160p","1080p"]`）；探测不到为空。搜索结果格的库存概况用它 */
+    val resolutions: List<String> = emptyList(),
     val missingCount: Int? = null,
     val isFavorite: Boolean = false,
 )
@@ -126,6 +128,8 @@ data class LibraryItemDetailView(
     val year: Int? = null,
     val posterUrl: String? = null,
     val backdropUrl: String? = null,
+    /** 片名 Logo（透明底 PNG；本地资产 > TMDB 图床）。没有时前端显示文字片名 */
+    val logoUrl: String? = null,
     val primaryAspect: Float = 0.6667f,
     val localMeta: LocalMetaView? = null,
     val files: List<LibraryFileView> = emptyList(),
@@ -186,6 +190,19 @@ data class LibraryIndexEntry(
     val initial: String = "",
     val count: Int = 0,
     val offset: Int = 0,
+)
+
+/**
+ * 按类型的跨库墙概况（`GET /libraries/kinds/{kind}`）：「全部电影」这一行由哪些库
+ * 组成、共几部（同一部片跨库只算一部）。口径在服务端：观看者可见 ∩ 该类型 ∩
+ * 没勾「从首页排除」。
+ */
+@Serializable
+data class LibraryKindSummaryView(
+    /** movie / tv / video（照片库不做跨库墙） */
+    val kind: String = "movie",
+    val libraryIds: List<Long> = emptyList(),
+    val itemCount: Int = 0,
 )
 
 /** 媒体库筛选条件(与服务端 /items 的查询参数一一对应) */

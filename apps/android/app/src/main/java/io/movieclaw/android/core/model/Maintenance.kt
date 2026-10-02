@@ -18,6 +18,21 @@ data class UpdateStatus(
     val inactiveOverlayReason: String? = null,
 )
 
+/**
+ * 待更新快照（`GET /app/update/pending`，读库不触网）：「我的」页提醒组与设置页的更新卡片
+ * 都由它点亮。`appVersion`/`modelTag` 都为 null = 无可用更新（含从未检查过）。
+ */
+@Serializable
+data class PendingUpdate(
+    val appVersion: String? = null,
+    /** False = 该版本含依赖变化，需重拉 Docker 镜像，应用内更新按钮不可用 */
+    val appCompatible: Boolean = true,
+    val appChangelog: String = "",
+    val appPublishedAt: String = "",
+    val modelTag: String? = null,
+    val checkedAt: String? = null,
+)
+
 @Serializable
 data class UpdateCheck(
     val currentVersion: String = "",

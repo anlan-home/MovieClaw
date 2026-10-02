@@ -85,6 +85,8 @@ data class LibraryView(
     val source: String = "tmdb",
     val excludeFromHome: Boolean = false,
     val viewerAccess: Boolean = true,
+    /** 默认库（成员落点弹窗按它预选同类型的库） */
+    val isDefault: Boolean = false,
     val rootPaths: List<String> = emptyList(),
     /** 服务端预算好的库存统计（iOS libraryStatsSummary 用的就是它） */
     val stats: LibraryStats = LibraryStats(),

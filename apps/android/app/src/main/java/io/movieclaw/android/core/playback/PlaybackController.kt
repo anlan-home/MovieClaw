@@ -261,6 +261,10 @@ class PlaybackController(
         startPositionMs = playerMs,
         title = target.title,
         subtitle = target.subtitle,
+        // 档 0 直出的 MKV：把服务端给的精简索引带给 Exo（HLS 换封装用不上，判掉）
+        matroskaCues = session?.matroskaCues?.takeUnless { currentHls },
+        // 起播音轨：引擎拿到轨道后按它落轨（见 ExoEngine.onTracksChanged / loadEngineTracks）
+        initialAudioRef = _selectedAudioRef.value,
     )
 
     suspend fun negotiate(): Negotiation = negotiateInternal(startMs = null)
@@ -416,13 +420,30 @@ class PlaybackController(
         // 起播选中轨：
         //  · 音轨以 **decision.audio.trackRef** 为准——那是这份计划真要放的那条
         //    （详情页选的轨随请求发上去，服务端 apply 后就体现在这里）；
-        //  · 字幕以**本次请求指定的**为准，没指定才用观看记忆（watch 快照已含"沿用上一集"的结果）。
-        // 旧版两个都只看 watch 快照，于是详情页选好的轨"没加载"：计划放的是新的，
-        // 界面和叠加层抓的却是记忆里那条。
+        //  · 字幕以**本次请求指定的**为准，没指定才用观看记忆（watch 快照已含"沿用上一集"的结果），
+        //    再没有就**落到片源标了默认的那条**——口径照 iOS `Subtitles.initialSelection`：
+        //    「优先上次记住的（off = 用户明确关掉，必须尊重），其次服务端/片源标了默认的那条，
+        //     都没有就不自动开」。少了最后这级兜底时，从「接下来继续」这类**不带轨**的入口
+        //    进来（无记忆）就一条字幕都不显示——而本机叠层是接管字幕的、引擎渲染又被关着
+        //    （见 PlayerScreen 的"引擎一律不画字幕"），结果是"同一个文件，详情页进来有字幕、
+        //    库里进来没有"（实机日志：详情页 ref=embedded:0，库里入口 ref=null）。
         _selectedAudioRef.value = view.decision.audio?.trackRef
             ?: target.preferredAudio
             ?: view.watch?.audioTrack
-        _selectedSubtitleRef.value = target.preferredSubtitle ?: view.watch?.subtitleTrack
+        _selectedSubtitleRef.value = target.preferredSubtitle
+            ?: view.watch?.subtitleTrack
+            ?: view.decision.subtitles.firstOrNull { it.isDefault }?.trackRef
+        // 起播落轨的输入与结论一律打一行（不管是不是要强制拨轨）：音频那条 bug 的现场就是这样
+        // 定位的——只有"详情页起播"会打印，从库里进来时计划到底给了哪条轨完全看不见
+        android.util.Log.i(
+            "McPlayer",
+            "起播轨: 音轨=${_selectedAudioRef.value ?: "null"}（计划=${view.decision.audio?.trackRef ?: "-"}" +
+                " 请求=${target.preferredAudio ?: "-"} 记忆=${view.watch?.audioTrack ?: "-"}）" +
+                " 字幕=${_selectedSubtitleRef.value ?: "null"}（请求=${target.preferredSubtitle ?: "-"}" +
+                " 记忆=${view.watch?.subtitleTrack ?: "-"} 片源默认=${
+                    view.decision.subtitles.firstOrNull { it.isDefault }?.trackRef ?: "-"
+                }）",
+        )
         // 切核策略照搬已验证的 auto：网络流/HLS 走 Exo（硬解最优）；
         // **原盘代理流（.m2ts/.iso/bdmv）与 HDR 内容切 mpv**（格式兼容 + tone-mapping）。
         // 真机实证（2026-09-27）：Exo 播原盘 m2ts 会白等 5 秒才失败回退。
@@ -519,7 +540,17 @@ class PlaybackController(
                         val kind = kindOfCodec(t.codec)
                         TrackOption("embedded:$i", TrackLabels.subtitle(t.language, kind, "embedded:$i", false))
                     }
-                    // mpv 已经选中的那条，同步成界面上的"当前选中"
+                    // 原盘：mpv 默认放的是盘内标注的默认轨，**与计划/记忆不一致时要拨过去**
+                    // （服务端读不到盘内结构，计划里那条轨是这次选的或记着的引擎序号；
+                    //  旧行为只把 mpv 的选择读回来盖在界面上——菜单勾 A、耳朵听 B）
+                    val wantAudio = _selectedAudioRef.value?.removePrefix("embedded:")?.toIntOrNull()
+                    if (wantAudio != null && wantAudio < tracks.audio.size &&
+                        tracks.audio[wantAudio].selected != true
+                    ) {
+                        android.util.Log.i("McPlayer", "起播落轨（原盘）: 音轨 embedded:$wantAudio")
+                        engine().selectAudioIndex(wantAudio)
+                    }
+                    // 以引擎**实际选中**的那条为准同步界面（拨过之后就是计划那条）
                     tracks.audio.indexOfFirst { it.selected }.takeIf { it >= 0 }
                         ?.let { _selectedAudioRef.value = "embedded:$it" }
                     tracks.subtitle.indexOfFirst { it.selected }.takeIf { it >= 0 }
@@ -604,6 +635,34 @@ class PlaybackController(
         engine().seekTo((fileMs - currentOffsetMs).coerceAtLeast(0L))
     }
 
+    // ── 跳过片头/片尾（docs/design/skip-intro.md）：服务端整季比对认出来的区间随会话下发，
+    // 客户端只管按播放位置用，不做任何计算。逻辑照 iOS SkipSegments；区间是文件绝对时间，
+    // 比较与跳转都走 filePositionMs/seekToFileMs（会话相对流的偏移在里面算好）。
+
+    /** 离区间尾不足这么多毫秒就不再给「跳过」：按下去只省一两秒，还会撞上区间尾的画面切换 */
+    private val skipTailMs = 3_000L
+
+    /** 当前位置该给哪个「跳过」按钮；一直放到结尾的片尾不在这里，交给连播卡 */
+    fun activeSkipSegment(): io.movieclaw.android.core.model.PlaybackSegmentView? {
+        val segs = session?.segments ?: return null
+        val pos = filePositionMs()
+        return segs.firstOrNull { seg ->
+            if (seg.type == "outro" && seg.toEnd) return@firstOrNull false
+            pos >= seg.startMs && pos < seg.endMs - skipTailMs
+        }
+    }
+
+    /** 已经进了一直放到结尾的片尾：连播卡不必等到最后 40 秒 */
+    fun isInFileOutro(): Boolean {
+        val segs = session?.segments ?: return false
+        val pos = filePositionMs()
+        return segs.any { it.type == "outro" && it.toEnd && pos >= it.startMs }
+    }
+
+    /** 「跳过」按钮的文案（other 段观众眼里也是片头，只写「跳过」看不出跳的是什么） */
+    fun skipLabel(seg: io.movieclaw.android.core.model.PlaybackSegmentView): String =
+        if (seg.type == "outro") "跳过片尾" else "跳过片头"
+
     fun seekBy(deltaMs: Long) {
         lastSeekAtMs = System.currentTimeMillis()
         attempt?.let { qoe?.noteSeek(it) }
@@ -617,12 +676,18 @@ class PlaybackController(
 
     fun currentSpeed(): Float = currentSpeed
 
+    /**
+     * 进度上报。音轨/字幕**默认带当前选中那条**（iOS `PlaybackAPI` 同款）：
+     * 服务端只把「与默认轨策略不同的那条」记成用户的选择（`_untouched_choice`），
+     * 所以带上正在放的轨不会污染记忆；不带（旧行为）则整条链路上服务端永远不知道
+     * 用户换了什么，「本集记忆 / 沿用上一集」都无从谈起。
+     */
     private fun progressRequest(
         event: String,
         paused: Boolean? = null,
         positionMs: Long = filePositionMs(),
-        audioTrack: String? = null,
-        subtitleTrack: String? = null,
+        audioTrack: String? = _selectedAudioRef.value,
+        subtitleTrack: String? = _selectedSubtitleRef.value,
     ) =
         PlaybackProgressRequest(
             mediaItemId = target.mediaItemId,

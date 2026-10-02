@@ -142,6 +142,10 @@ interface McApi {
 
     /* ---------------- 更新与维护 / 网络 / 日志(P2 设置区) ---------------- */
 
+    /** 待更新快照（读库不触网）：「我的」页提醒组的「新版本 vX / 新识别模型 X」用它 */
+    @GET("app/update/pending")
+    suspend fun pendingUpdate(): McEnvelope<io.movieclaw.android.core.model.PendingUpdate>
+
     @GET("app/update/status")
     suspend fun updateStatus(): McEnvelope<UpdateStatus>
 
@@ -253,6 +257,27 @@ interface McApi {
         @Query("stock") stock: String? = null,
     ): McEnvelope<List<LibraryItemView>>
 
+    /**
+     * 按类型的跨库墙概况（首页「全部电影」行与墙页头）：由可见、没被排除出首页的
+     * 同类型库聚合，同一部片跨库只算一部。
+     */
+    @GET("libraries/kinds/{kind}")
+    suspend fun libraryKindSummary(
+        @Path("kind") kind: String,
+        @Query("w") watch: String? = null,
+    ): McEnvelope<io.movieclaw.android.core.model.LibraryKindSummaryView>
+
+    /** 按类型的跨库海报墙（首页类型行 + 点「查看全部」进去的那面墙）；每格自带落点库 */
+    @GET("libraries/kinds/{kind}/items")
+    suspend fun libraryKindItems(
+        @Path("kind") kind: String,
+        @Query("sort") sort: String? = null,
+        @Query("order") order: String? = null,
+        @Query("limit") limit: Int = 60,
+        @Query("offset") offset: Int = 0,
+        @Query("w") watch: String? = null,
+    ): McEnvelope<List<LibraryItemView>>
+
     /** 筛选面板候选值与计数(与 /items 共用同一组筛选参数) */
     @GET("libraries/{libraryId}/facets")
     suspend fun libraryFacets(
@@ -316,11 +341,18 @@ interface McApi {
 
     /* ---------------- 收藏 / 合集 / 回收站 / 重复文件 ---------------- */
 
+    /**
+     * 我的收藏。首页横滚行用 `unwatchedFirst = true`（把还没看完的整体提前）+ 前 20 条；
+     * 「全部收藏」海报墙按 offset 滚动加载、排序档与单库海报墙对齐（sort / order）。
+     */
     @GET("playback/favorites")
     suspend fun favorites(
         @Query("limit") limit: Int = 60,
         @Query("offset") offset: Int = 0,
-    ): McEnvelope<JsonElement>
+        @Query("unwatched_first") unwatchedFirst: Boolean = false,
+        @Query("sort") sort: String? = null,
+        @Query("order") order: String? = null,
+    ): McEnvelope<io.movieclaw.android.core.model.FavoritesPageView>
 
     @GET("collections")
     suspend fun collections(): McEnvelope<JsonElement>
@@ -442,10 +474,39 @@ interface McApi {
     @DELETE("search/history/{historyId}")
     suspend fun deleteSearchHistory(@Path("historyId") historyId: Long): McEnvelope<JsonElement>
 
-    /* ---------------- 下载提交 ---------------- */
+    /* ---------------- 下载提交 / 落点预检 ---------------- */
 
     @POST("downloaders/submit")
-    suspend fun submitDownload(@Body body: DownloadSubmitRequest): McEnvelope<JsonElement>
+    suspend fun submitDownload(
+        @Body body: DownloadSubmitRequest,
+    ): McEnvelope<io.movieclaw.android.core.model.DownloadSubmitView>
+
+    /** 手动下载弹窗的只读预检：识别条目 → 库路由 → 投递目录（成员只提交 library_id） */
+    @POST("downloaders/resolve-target")
+    suspend fun resolveDownloadTarget(
+        @Body body: io.movieclaw.android.core.model.ManualDownloadTargetRequest,
+    ): McEnvelope<io.movieclaw.android.core.model.ManualDownloadTargetView>
+
+    /** 我的保存位置记忆（按种子分类）；有记忆时点「下载」先弹确认条 */
+    @GET("downloaders/target-prefs")
+    suspend fun downloadTargetPrefs(): McEnvelope<List<io.movieclaw.android.core.model.DownloadTargetPrefView>>
+
+    /** 「不再记住」某个分类的保存位置（幂等） */
+    @DELETE("downloaders/target-prefs/{category}")
+    suspend fun forgetDownloadTargetPref(
+        @Path("category") category: String,
+    ): McEnvelope<JsonElement>
+
+    /** 下载器列表（脱敏）：落点弹窗的「其他保存位置」用它列目录候选 */
+    @GET("downloaders")
+    suspend fun downloaders(): McEnvelope<List<io.movieclaw.android.core.model.DownloaderView>>
+
+    /** 手动选种：把搜索结果里选中一条种子投给订阅（跳过规则组过滤，身份匹配照常） */
+    @POST("subscriptions/{subscriptionId}/selected-torrent-downloads")
+    suspend fun grabSubscriptionTorrent(
+        @Path("subscriptionId") subscriptionId: Long,
+        @Body body: io.movieclaw.android.core.model.GrabPayload,
+    ): McEnvelope<io.movieclaw.android.core.model.GrabResultView>
 
     /* ---------------- 通知中心 ---------------- */
 
@@ -520,11 +581,25 @@ interface McApi {
         @Query("limit") limit: Int = 50,
     ): McEnvelope<List<io.movieclaw.android.core.model.SubActivityView>>
 
+    /**
+     * 在途种子的实时下载快照（详情页 5 秒轮询；无在途时零请求）。
+     * 成员也能读自己发起/关注的订阅，但服务端把种子名、下载器名与报错置空——
+     * 只给进度、速度与剩余时间。
+     */
+    @GET("subscriptions/{subscriptionId}/active-downloads")
+    suspend fun activeDownloads(
+        @Path("subscriptionId") id: Long,
+    ): McEnvelope<List<io.movieclaw.android.core.model.SubscriptionDownloadView>>
+
     @POST("subscriptions/{subscriptionId}/missing-resource-searches")
     suspend fun searchMissingResources(@Path("subscriptionId") id: Long): McEnvelope<JsonElement>
 
+    /** 触发一轮洗版；`rule_set_id` 只有超管会被服务端采纳（成员走「沿用当前规则组」的路） */
     @POST("subscriptions/{subscriptionId}/upgrade-runs")
-    suspend fun upgradeRun(@Path("subscriptionId") id: Long): McEnvelope<UpgradeRunView>
+    suspend fun upgradeRun(
+        @Path("subscriptionId") id: Long,
+        @Body body: io.movieclaw.android.core.model.UpgradeRunPayload,
+    ): McEnvelope<UpgradeRunView>
 
     @PATCH("subscriptions/{subscriptionId}/tracking-state")
     suspend fun setTrackingState(
@@ -659,6 +734,12 @@ interface McApi {
 
     @POST("sessions/{sessionId}/compact-context")
     suspend fun compactAgentContext(@Path("sessionId") sessionId: String): McEnvelope<JsonElement>
+
+    /** 从已有上下文创建独立的新会话（`POST /sessions/{id}/fork`）；源会话保持不变 */
+    @POST("sessions/{sessionId}/fork")
+    suspend fun forkSession(
+        @Path("sessionId") sessionId: String,
+    ): McEnvelope<SessionTranscript>
 
     @PATCH("sessions/{sessionId}")
     suspend fun renameSession(

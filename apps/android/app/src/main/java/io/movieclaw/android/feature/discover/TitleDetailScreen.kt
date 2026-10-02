@@ -172,6 +172,7 @@ fun TitleDetailScreen(
     val state by vm.state.collectAsStateWithLifecycle()
     val sub by vm.sub.collectAsStateWithLifecycle()
     val origin = vm.origin
+    val permissions = io.movieclaw.android.core.session.LocalPermissions.current
     var lightbox by remember { mutableStateOf<Pair<List<MediaImage>, Int>?>(null) }
 
     when (val s = state) {
@@ -260,7 +261,7 @@ fun TitleDetailScreen(
                             ),
                     )
 
-                    // 顶栏：返回 / 搜索 两颗玻璃圆钮浮在剧照上（网页 52 高、圆钮 36）
+                    // 顶栏：只有返回（网页/iOS 的标题详情都没有顶栏搜索键——「搜索资源」在操作行）
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -269,8 +270,6 @@ fun TitleDetailScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         McNavButton(icon = Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", onClick = onBack)
-                        Spacer(Modifier.weight(1f))
-                        McNavButton(icon = Icons.Rounded.Search, contentDescription = "搜索资源", onClick = { onSearch(title.title) })
                     }
                 }
 
@@ -357,26 +356,41 @@ fun TitleDetailScreen(
                         }
                     }
                     // 操作行（iOS DiscoverFlowLayout：订阅追踪 / 已订阅 · 状态 / 搜索资源）
-                    Spacer(Modifier.height(12.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        val subscription = sub
-                        if (subscription == null) {
-                            // 未订阅：按作品类型说"订阅影片 / 订阅剧集"（用户要的口径），强调样式
-                            val label = if (title.mediaType == "tv") "订阅剧集" else "订阅影片"
-                            ActionPill(label, Icons.Rounded.NotificationsNone, filled = true) {
-                                onSubscribe(title.titleRef)
+                    // 在库收起规则（网页/iOS 同一条，2026-10-02 定版）：电影入库即完成——再摆
+                    // 「订阅 / 搜索资源」等于邀请用户重下一遍已有的片子，隐藏后由上方「在库」
+                    // 信息条接手；**剧集不适用**（在库≠收齐，缺集与未来新季仍要追更/手动找资源，
+                    // 两颗照常显示）。已订阅的在库电影保留状态键：它是管理/取消订阅入口。
+                    // 「搜索资源」另看**资源搜索**权限（member-permissions-v2：条目详情同口径）——
+                    // 成员没这个开关时这里不摆按钮，免得点了被后端拒。
+                    val ownedMovie = title.mediaType == "movie" && details.libraryLinks.isNotEmpty()
+                    val subscription = sub
+                    val showSubscribe = subscription != null || !ownedMovie
+                    val showSearch = !ownedMovie && permissions.canSearch
+                    if (showSubscribe || showSearch) {
+                        Spacer(Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (showSubscribe) {
+                                if (subscription == null) {
+                                    // 未订阅：按作品类型说"订阅影片 / 订阅剧集"（用户要的口径），强调样式
+                                    val label = if (title.mediaType == "tv") "订阅剧集" else "订阅影片"
+                                    ActionPill(label, Icons.Rounded.NotificationsNone, filled = true) {
+                                        onSubscribe(title.titleRef)
+                                    }
+                                } else {
+                                    // 已订阅：中性玻璃 + 对勾（颜色随状态），点它**同样打开订阅弹层**——
+                                    // 弹层看到已有订阅会进管理态（iOS 同款行为）。以前这里 onClick 是空的。
+                                    ActionPill(
+                                        label = "已订阅 · ${subscription.statusLabel()}",
+                                        icon = Icons.Rounded.Check,
+                                        filled = false,
+                                        tint = subscription.statusColor(),
+                                    ) { onSubscribe(title.titleRef) }
+                                }
                             }
-                        } else {
-                            // 已订阅：中性玻璃 + 对勾（颜色随状态），点它**同样打开订阅弹层**——
-                            // 弹层看到已有订阅会进管理态（iOS 同款行为）。以前这里 onClick 是空的。
-                            ActionPill(
-                                label = "已订阅 · ${subscription.statusLabel()}",
-                                icon = Icons.Rounded.Check,
-                                filled = false,
-                                tint = subscription.statusColor(),
-                            ) { onSubscribe(title.titleRef) }
+                            if (showSearch) {
+                                ActionPill("搜索资源", Icons.Rounded.Search, filled = false) { onSearch(title.title) }
+                            }
                         }
-                        ActionPill("搜索资源", Icons.Rounded.Search, filled = false) { onSearch(title.title) }
                     }
                 }
 
