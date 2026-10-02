@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.SmartDisplay
@@ -385,6 +386,8 @@ fun ReelsScreen(
     var filterOpen by remember { mutableStateOf(false) }
     var fullscreen by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    // 全屏收系统栏要用到宿主 View（WindowInsetsController 的锚点）
+    val view = androidx.compose.ui.platform.LocalView.current
 
     val currentIndex = pagerState.currentPage
     val current = state.items.getOrNull(currentIndex)
@@ -395,11 +398,18 @@ fun ReelsScreen(
         activity?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         onDispose {
             activity?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            // 兜底：全屏没退就直接离开这一页时，把状态栏 / 手势条还回去
+            activity?.let {
+                androidx.core.view.WindowCompat.getInsetsController(it.window, view)
+                    .show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            }
             players.release()
         }
     }
 
-    // 全屏：整页转横看这一段（画面不换播放器）
+    // 全屏：整页转横看这一段（画面不换播放器），并把状态栏 / 手势条一起收掉
+    // （iOS `statusBarHidden` + `persistentSystemOverlays(.hidden)` 的对应物：
+    //   实机反馈「全屏播放页面手机状态栏没有隐藏」）
     LaunchedEffect(fullscreen) {
         val activity = context as? android.app.Activity ?: return@LaunchedEffect
         activity.requestedOrientation = if (fullscreen) {
@@ -407,7 +417,19 @@ fun ReelsScreen(
         } else {
             android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
+        val controller = androidx.core.view.WindowCompat.getInsetsController(activity.window, view)
+        if (fullscreen) {
+            controller.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            // 边缘划一下临时唤出，随即自动隐去——不挡「手势返回」
+            controller.systemBarsBehavior =
+                androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        } else {
+            controller.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        }
     }
+
+    // 返回键 / 手势返回：全屏时先退出全屏，再退才离开片段页（iOS 也这样——全屏是一层浮层）
+    androidx.activity.compose.BackHandler(enabled = fullscreen) { fullscreen = false }
 
     // 滑动停稳才换播放器（拖动途中每变一次就起引擎会连开好几个）
     LaunchedEffect(pagerState.isScrollInProgress, state.items.size) {
@@ -643,32 +665,7 @@ private fun ReelPage(
         if (fullscreen && playing) controlsVisible = false
     }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            // 手势：点空白暂停 / 继续、双击左右三分之一 ∓10 秒、长按 2 倍速（同正片口径）
-            .pointerInput(item.id, isCurrent, fullscreen) {
-                detectTapGestures(
-                    onTap = {
-                        if (!isCurrent) return@detectTapGestures
-                        if (fullscreen) controlsVisible = !controlsVisible else players.togglePause()
-                    },
-                    onDoubleTap = { offset ->
-                        if (!isCurrent) return@detectTapGestures
-                        val third = size.width / 3f
-                        when {
-                            offset.x < third -> players.seekBy(-10_000)
-                            offset.x > size.width - third -> players.seekBy(10_000)
-                        }
-                    },
-                    onLongPress = { if (isCurrent) players.setSpeed(2f) },
-                    onPress = {
-                        awaitRelease()
-                        players.setSpeed(1f)
-                    },
-                )
-            },
-    ) {
+    Box(Modifier.fillMaxSize()) {
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
             val bandWidth = maxWidth
             val bandHeight = bandWidth * 9f / 16f
@@ -685,7 +682,32 @@ private fun ReelPage(
                             .height(bandHeight)
                             .offset(y = bandTop),
                     )
-                    .background(Color.Black),
+                    .background(Color.Black)
+                    // 手势挂在**画面**上（iOS 同款：`videoBand(...).onTapGesture`）：
+                    // 点画面暂停 / 继续、双击左右三分之一 ∓10 秒、长按 2 倍速（同正片口径）。
+                    // 挂在整页上时，点「全屏观看」「收藏」这些按钮会连带触发暂停——
+                    // 实测反馈的「进了全屏却在暂停」就是从这儿来的
+                    .pointerInput(item.id, isCurrent, fullscreen) {
+                        detectTapGestures(
+                            onTap = {
+                                if (!isCurrent) return@detectTapGestures
+                                if (fullscreen) controlsVisible = !controlsVisible else players.togglePause()
+                            },
+                            onDoubleTap = { offset ->
+                                if (!isCurrent) return@detectTapGestures
+                                val third = size.width / 3f
+                                when {
+                                    offset.x < third -> players.seekBy(-10_000)
+                                    offset.x > size.width - third -> players.seekBy(10_000)
+                                }
+                            },
+                            onLongPress = { if (isCurrent) players.setSpeed(2f) },
+                            onPress = {
+                                awaitRelease()
+                                players.setSpeed(1f)
+                            },
+                        )
+                    },
                 contentAlignment = Alignment.Center,
             ) {
                 // 这一页挂着的引擎：当前条，或**预起的下一条**（预起那条把首帧先渲染出来，
@@ -735,21 +757,28 @@ private fun ReelPage(
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
-                // 放到片段终点停下：正中一枚重播键（同 iOS）
+                // 画面正中的状态键（iOS `ReelPage.overlay`）：
+                //  · 点了暂停 → 播放三角（点它继续）——原先只有全屏才有，竖屏点了暂停**一点提示都没有**
+                //  · 放到片段终点停下 → 重播圈（原先也用播放三角，看着像「暂停」）
                 if (isCurrent && ended) {
-                    Box(
-                        Modifier
-                            .size(54.dp)
-                            .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.5f))
-                            .clickable { players.replay() },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            Icons.Rounded.PlayArrow, contentDescription = "重播",
-                            tint = Color.White, modifier = Modifier.size(26.dp),
-                        )
-                    }
+                    CenterGlyph(
+                        icon = Icons.Rounded.Replay,
+                        label = "重播",
+                        size = 56.dp,
+                        iconSize = 26.dp,
+                        onClick = { players.replay() },
+                    )
+                } else if (
+                    isCurrent && !playing && failMessage == null &&
+                    players.frameReadyId == item.id
+                ) {
+                    CenterGlyph(
+                        icon = Icons.Rounded.PlayArrow,
+                        label = "继续",
+                        size = if (fullscreen) 64.dp else 56.dp,
+                        iconSize = if (fullscreen) 30.dp else 26.dp,
+                        onClick = { players.togglePause() },
+                    )
                 }
                 if (isCurrent && failMessage != null) {
                     Column(
@@ -853,14 +882,20 @@ private fun ReelPage(
                                         listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent),
                                     )
                                 )
+                                // 控制层自己把点击吞掉：点到条子上（哪怕差几像素没点中按钮）
+                                // 也不能把整层切走——那看起来就是「点了没反应、按钮消失了」
+                                .pointerInput(Unit) { detectTapGestures { } }
                                 .padding(horizontal = 20.dp)
                                 .padding(top = 8.dp, bottom = 40.dp),
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                // 退出全屏：52 的触控区 + 24 的图标（原先 44/20，实机反馈「太小、点不动」；
+                                // 图标再配一层底，免得在亮画面上看不出是按钮）
                                 Box(
                                     Modifier
-                                        .size(44.dp)
+                                        .size(52.dp)
                                         .clip(CircleShape)
+                                        .background(Color.Black.copy(alpha = 0.35f))
                                         .clickable { onExitFullscreen() },
                                     contentAlignment = Alignment.Center,
                                 ) {
@@ -868,10 +903,10 @@ private fun ReelPage(
                                         Icons.Rounded.FullscreenExit,
                                         contentDescription = "退出全屏",
                                         tint = Color.White,
-                                        modifier = Modifier.size(20.dp),
+                                        modifier = Modifier.size(24.dp),
                                     )
                                 }
-                                Spacer(Modifier.width(8.dp))
+                                Spacer(Modifier.width(10.dp))
                                 Column(Modifier.weight(1f)) {
                                     Text(
                                         item.title.name,
@@ -896,6 +931,7 @@ private fun ReelPage(
                                         listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f)),
                                     )
                                 )
+                                .pointerInput(Unit) { detectTapGestures { } }
                                 .padding(horizontal = 20.dp)
                                 .padding(top = 40.dp, bottom = 10.dp),
                         ) {
@@ -963,6 +999,27 @@ private fun fullscreenSubtitle(item: ReelItemView): String? {
         }
     }
     return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+}
+
+/** 画面正中的状态键（iOS ）：只有点了才有反应，不参与控制层的显隐 */
+@Composable
+private fun CenterGlyph(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    size: androidx.compose.ui.unit.Dp,
+    iconSize: androidx.compose.ui.unit.Dp,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.45f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(iconSize))
+    }
 }
 
 /* ══════════════════════ 左下信息 / 右下图标 / 进度行 ══════════════════════ */

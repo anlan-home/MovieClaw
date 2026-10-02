@@ -125,7 +125,21 @@ class PlayerViewModel @Inject constructor(
     private val apiFactory: ApiFactory,
     private val sessionRepository: SessionRepository,
     private val subtitleStyles: io.movieclaw.android.core.playback.SubtitleStyleStore,
+    private val screenPrefs: io.movieclaw.android.core.playback.ScreenPrefs,
 ) : ViewModel() {
+
+    /** 上次手势调出来的播放页亮度（本机记忆；进播放页套上，退出仍把系统亮度还回去） */
+    private val _playerBrightness = MutableStateFlow<Float?>(null)
+    val playerBrightness = _playerBrightness.asStateFlow()
+
+    init {
+        viewModelScope.launch { _playerBrightness.value = screenPrefs.playerBrightness() }
+    }
+
+    fun rememberBrightness(value: Float) {
+        _playerBrightness.value = value
+        viewModelScope.launch { screenPrefs.rememberBrightness(value) }
+    }
 
     /** 字幕外观（字号/时间轴/位置/背景），存本机；改完立刻重画 */
     val subtitleStyle = subtitleStyles.style
@@ -256,6 +270,8 @@ fun PlayerScreen(onExit: () -> Unit, vm: PlayerViewModel = hiltViewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
     val upNext by vm.upNext.collectAsStateWithLifecycle()
     val subStyle by vm.subtitleStyle.collectAsStateWithLifecycle()
+    // 上次手势记下的播放页亮度（本机）：进页套上，退出仍把系统亮度还回去
+    val brightnessMemory by vm.playerBrightness.collectAsStateWithLifecycle()
 
     val activity = LocalContext.current as? Activity
     DisposableEffect(Unit) {
@@ -312,6 +328,8 @@ fun PlayerScreen(onExit: () -> Unit, vm: PlayerViewModel = hiltViewModel()) {
                 onExit = { vm.exit(); onExit() },
                 subStyle = subStyle,
                 onSubStyle = vm::updateSubtitleStyle,
+                brightnessMemory = brightnessMemory,
+                onRememberBrightness = vm::rememberBrightness,
             )
         }
     }
@@ -333,6 +351,9 @@ private fun PlayingSurface(
     onExit: () -> Unit,
     subStyle: io.movieclaw.android.core.playback.SubtitleStyle,
     onSubStyle: ((io.movieclaw.android.core.playback.SubtitleStyle) -> io.movieclaw.android.core.playback.SubtitleStyle) -> Unit,
+    /** 上次手势调出来的播放页亮度（本机记忆）；PlayingSurface 拿不到 VM，从外面递进来 */
+    brightnessMemory: Float?,
+    onRememberBrightness: (Float) -> Unit,
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -454,6 +475,18 @@ private fun PlayingSurface(
     val initialBrightness = remember { activity?.window?.attributes?.screenBrightness }
     var maxVolume by remember { mutableFloatStateOf(audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat()) }
     var levelGeneration by remember { mutableLongStateOf(0L) }
+
+    // 竖滑调整的**基准值**：在一次手势开始时取一次，之后用「基准 + 位移」算目标值。
+    // 之前是每个事件都拿当前值再加一次累计位移（等于把位移算了 N 遍），所以「太敏感」、
+    // 轻轻一划就冲到 0 或 100%（iOS `AdjustState(value, base)` 就是这里这个基准的用法）。
+    var adjustBase by remember { mutableFloatStateOf(0f) }
+
+    // 进播放页套上上次手势记下的亮度（本机记忆）；退出时仍把系统亮度还回去（iOS 同款）
+    LaunchedEffect(brightnessMemory, activity) {
+        brightnessMemory?.let { value ->
+            activity?.window?.attributes = activity?.window?.attributes?.apply { screenBrightness = value }
+        }
+    }
 
     // 退出播放恢复进入前的屏幕亮度(iOS 同款)
     DisposableEffect(Unit) {
@@ -621,24 +654,28 @@ private fun PlayingSurface(
                         scrub = null
                         scrubbing = false
                     },
-                    onAdjustStart = { _ ->
+                    onAdjustStart = { brightness ->
                         adjusting = true
                         chromeVisible = true
                         chromeActivity += 1
+                        // 基准只在手势开始时取一次（iOS 同款）：之后每个事件都是「基准 + 累计位移」
+                        maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat()
+                        adjustBase = if (brightness) {
+                            val current = activity?.window?.attributes?.screenBrightness ?: 0.5f
+                            if (current <= 0f) 0.5f else current
+                        } else {
+                            if (maxVolume <= 0f) 1f
+                            else audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / maxVolume
+                        }
                     },
                     onAdjust = { brightness, delta ->
                         levelGeneration += 1
                         if (brightness) {
-                            val current = activity?.window?.attributes?.screenBrightness ?: 0.5f
-                            val base = if (current <= 0f) 0.5f else current
-                            val next = (base + delta).coerceIn(0.05f, 1f)
+                            val next = (adjustBase + delta).coerceIn(0.05f, 1f)
                             activity?.window?.attributes = activity?.window?.attributes?.apply { screenBrightness = next }
                             levelHud = LevelHud(true, next, levelGeneration)
                         } else {
-                            val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
-                            val base = if (maxVolume <= 0f) 1f else current / maxVolume
-                            val next = (base + delta).coerceIn(0f, 1f)
-                            maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat()
+                            val next = (adjustBase + delta).coerceIn(0f, 1f)
                             audioManager.setStreamVolume(
                                 AudioManager.STREAM_MUSIC,
                                 (next * maxVolume).toInt().coerceIn(0, maxVolume.toInt()),
@@ -647,7 +684,13 @@ private fun PlayingSurface(
                             levelHud = LevelHud(false, next, levelGeneration)
                         }
                     },
-                    onAdjustEnd = { adjusting = false },
+                    onAdjustEnd = {
+                        adjusting = false
+                        // 手势结束记一次（不是每个事件都写盘）：下一部片子起播时套上同一个亮度
+                        activity?.window?.attributes?.screenBrightness
+                            ?.takeIf { it > 0f }
+                            ?.let { onRememberBrightness(it) }
+                    },
                     onHoldStart = {
                         holdSpeed = true
                         controller.setSpeed(HOLD_SPEED)

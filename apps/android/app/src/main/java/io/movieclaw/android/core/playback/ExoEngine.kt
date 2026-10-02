@@ -21,12 +21,43 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import io.movieclaw.android.core.network.BuildInfo
 
 /**
+ * 引擎缓冲档 —— **内存上限只在这里管**。
+ *
+ * Media3 默认按「最多缓冲 50 秒视频」算，不看字节：4K remux 码率 60~100 Mbps 时一个
+ * 播放器就能吃掉几百 MB Java 堆。实机在片段页抓到过 OOM 崩溃（两条 ExoPlayer 线程同时
+ * 报 `OutOfMemoryError: … target footprint 268435456`，堆只有 256MB），表现先是整机
+ * GC 抖动「转圈卡一会」，随后进程被杀。
+ *
+ * · [Normal]：正片与片段的当前条（96MB / 最长 15 秒——LAN 上 15 秒缓冲足够，1080p 下
+ *   时间上限先生效，4K 下字节上限先生效）；
+ * · [Compact]：预起的下一条（12MB / 最长 4 秒——装载到片段起点停着就好，不往前多吃，
+ *   这也是 iOS「预起后停止往前下载」的对应物）。
+ */
+enum class BufferProfile(val label: String, val targetBytes: Int, val minMs: Int, val maxMs: Int) {
+    Normal("normal", 96 * 1024 * 1024, 5_000, 15_000),
+    Compact("compact", 12 * 1024 * 1024, 2_000, 4_000),
+}
+
+/**
  * Exo 内核:硬解主力(省电、低延迟)+ 服务端 HLS 的唯一消费者。
  * 直连走 ProgressiveMediaSource,HLS 走 HlsMediaSource;流 URL 带签名 token 免鉴权头。
  */
-class ExoEngine(private val context: Context) : PlayerEngine {
+class ExoEngine(
+    private val context: Context,
+    profile: BufferProfile = BufferProfile.Normal,
+) : PlayerEngine {
 
-    val player: ExoPlayer = ExoPlayer.Builder(context).build()
+    val player: ExoPlayer = ExoPlayer.Builder(context)
+        .setLoadControl(
+            androidx.media3.exoplayer.DefaultLoadControl.Builder()
+                .setTargetBufferBytes(profile.targetBytes)
+                .setBufferDurationsMs(profile.minMs, profile.maxMs, 1_000, 2_000)
+                // 先看字节上限：高码率片不能按时间把堆撑爆（默认 true 是时间优先）
+                .setPrioritizeTimeOverSizeThresholds(false)
+                .build()
+        )
+        .build()
+        .also { android.util.Log.i("McPlayer", "引擎缓冲档=${profile.label} 上限=${profile.targetBytes / 1024 / 1024}MB") }
 
     /** 解码类错误回调:直连失败时 PlaybackController 据此自动切 MPV(网络错误不切) */
     var onDecodeError: ((Long) -> Unit)? = null

@@ -11,6 +11,7 @@ import io.movieclaw.android.core.network.dataOrThrow
 import io.movieclaw.android.core.playback.PlaybackNetwork
 import io.movieclaw.android.core.model.PlaybackSessionRequest
 import io.movieclaw.android.core.model.ReelItemView
+import io.movieclaw.android.core.playback.BufferProfile
 import io.movieclaw.android.core.playback.DeviceCapability
 import io.movieclaw.android.core.playback.EngineSource
 import io.movieclaw.android.core.playback.ExoEngine
@@ -118,6 +119,9 @@ class ReelsPlayers(
         var watchedMs: Long = 0L,
     )
 
+    /** 换条序号：连滑两条时把先落地那次作废（见 settle 注释） */
+    private var settleSeq = 0
+
     private var current: Clip? = null
     private var standby: Clip? = null
     private var standbyJob: Job? = null
@@ -154,9 +158,16 @@ class ReelsPlayers(
     /**
      * 当前条换成 [item]：下一条预起好了就直接接着播，否则现起（必要时先协商转码会话）。
      * 旧引擎先停声、500ms 后再拆（拆引擎在主线程要几十毫秒，不能赶在滑动收尾那一刻）。
+     *
+     * **换条序号 (`settleSeq`)**：协商 / 建引擎是异步的，用户连滑两条时会同时有两次
+     * settle 在飞。没有这道闸，先落地的那次会把引擎挂上 current，后落地的那次再覆盖
+     * 一次——**第一个引擎就成了没人管还在出声的孤儿**（实机反馈过「画面这一部、声音
+     * 另一部」）。现在：序号对不上就把这次整个作废（引擎都不建）。
      */
     fun settle(item: ReelItemView, index: Int, items: List<ReelItemView>) {
         if (current?.item?.id == item.id) return
+        settleSeq += 1
+        val seq = settleSeq
         leaveCurrent(deferTeardown = true)
         val impressionAt = android.os.SystemClock.elapsedRealtime()
         onEvent(item, "impression", null, null, item.segment.startMs, null)
@@ -167,8 +178,10 @@ class ReelsPlayers(
             standbyReadyId = null
             adopt(ready, item, impressionAt)
             ready.engine.setPlaying(true)
+            ready.engine.player.volume = 1f
             playing = true
             ended = false
+            android.util.Log.i("McReels", "接上预起：${item.title.name}")
             if (ready.hasFirstFrame) {
                 frameReadyId = item.id
                 afterFirstFrame(item, index, items)
@@ -181,8 +194,11 @@ class ReelsPlayers(
                     onEvent(item, "fail", null, null, null, "no_stream_url")
                     return@launch
                 }
-                if (current?.item?.id == item.id) return@launch    // 又滑走了
-                val engine = ExoEngine(context)
+                if (seq != settleSeq) {
+                    android.util.Log.i("McReels", "作废一次换条（已滑走）：${item.title.name}")
+                    return@launch
+                }
+                val engine = ExoEngine(context, BufferProfile.Normal)
                 val clip = Clip(item = item, engine = engine, source = source)
                 current = clip
                 currentEngine = engine
@@ -190,7 +206,17 @@ class ReelsPlayers(
                 failMessage = null
                 ended = false
                 attach(clip, impressionAt)
+                android.util.Log.i(
+                    "McReels",
+                    "起播 ${item.title.name}：${if (source.sessionId == null) "直出" else "转码"} " +
+                        "起=${source.playerStartMs}ms 停=${source.playerEndMs}ms " +
+                        "url=${source.url.substringBefore('?').take(90)}",
+                )
                 engine.open(engineSource(source, item), emptyList())
+                // **这里必须把播放状态置真**：引擎是 autoplay 起播的，漏了这一步就会
+                // 「画面在放、状态却是暂停」——一进页面就顶着暂停键，全屏里点一下还弹不起来
+                // （只有「接上预起」那条分支置过，这条漏了）
+                playing = true
                 startPing(source.sessionId)
             }
         }
@@ -279,6 +305,10 @@ class ReelsPlayers(
                     clip.item, "first_frame", null,
                     clip.startedAtMs - impressionAt, clip.item.segment.startMs, null,
                 )
+                android.util.Log.i(
+                    "McReels",
+                    "出画 ${clip.item.title.name}：等 ${clip.startedAtMs - impressionAt}ms",
+                )
                 val index = pendingItems.indexOfFirst { it.id == clip.item.id }
                 if (index >= 0) afterFirstFrame(clip.item, index, pendingItems)
             }
@@ -301,6 +331,10 @@ class ReelsPlayers(
                 delay(250)
                 val enginePos = engine.positionMs()
                 positionMs = enginePos + clip.source.fileOffsetMs
+                // 状态与引擎对账：任何一处漏置都能在这里收敛（不引 isPlaying()——它在缓冲期
+                // 会短暂为假，会让暂停键闪一下；playWhenReady 才是我真正控制的东西）
+                val want = runCatching { clip.engine.player.playWhenReady }.getOrDefault(playing)
+                if (want != playing && !(ended && !want)) playing = want
                 if (clip.hasFirstFrame && clip.startedAtMs > 0) {
                     clip.watchedMs = android.os.SystemClock.elapsedRealtime() - clip.startedAtMs
                 }
@@ -436,6 +470,7 @@ class ReelsPlayers(
         clip.pollJob?.cancel()
         clip.subtitleJob?.cancel()
         val engine = clip.engine
+        android.util.Log.i("McReels", "收引擎：${clip.item.title.name}")
         if (deferTeardown) {
             engine.setPlaying(false)
             scope.launch {
@@ -483,11 +518,21 @@ class ReelsPlayers(
         return cm.isActiveNetworkMetered
     }
 
+    /** 粗算这一条的码率（bps）：整片字节 ÷ 片长；缺一个就返回 null（判不了就当不高） */
+    private fun approxBitrateBps(item: ReelItemView): Long? {
+        val size = item.play.sizeBytes ?: return null
+        val minutes = item.title.runtimeMinutes?.takeIf { it > 0 } ?: return null
+        return size * 8 / (minutes * 60L)
+    }
+
     /* ---------------- 预起下一条 ---------------- */
 
     /**
      * 局域网直出才预起（外网/转码档位下预起会白占一路带宽与解码器）。等 1 秒让开滑动收尾，
      * 且下一条的字节已预取完（本地读，装载很快）。
+     *
+     * 高码率（>40 Mbps）不预起：这类文件同时开两个解码器容易抢不过（不少机型只有一个 4K
+     * 解码实例），内存也紧——字节已经预取好了，滑过去现起引擎也就是几百毫秒。
      */
     private fun scheduleStandby(index: Int, items: List<ReelItemView>) {
         standbyJob?.cancel()
@@ -495,6 +540,10 @@ class ReelsPlayers(
         if (standby?.item?.id == next.id) return
         if (ReelsQuality.effectiveCap(qualityCap, network) != null) return
         if (network == PlaybackNetwork.AWAY) return
+        if (approxBitrateBps(next)?.let { it > 40_000_000L } == true) {
+            android.util.Log.i("McReels", "跳过高码率预起：${next.title.name}")
+            return
+        }
         val origin = originProvider() ?: return
         val fullKey = "${next.id}#full"
         standbyJob = scope.launch {
@@ -502,7 +551,10 @@ class ReelsPlayers(
             prefetchJobs[fullKey]?.join()
             if (current?.item?.id == next.id) return@launch
             val source = directSource(next, origin) ?: return@launch
-            val engine = ExoEngine(context)
+            // 预起的那条用小缓冲档（12MB / 4 秒封顶）+ 静音：它只为「滑过去立刻动」存在，
+            // 不能跟当前条抢内存（4K 下两条默认缓冲就是 OOM，实机抓到过）
+            val engine = ExoEngine(context, BufferProfile.Compact)
+            engine.player.volume = 0f
             val clip = Clip(item = next, engine = engine, source = source)
             standby = clip
             standbyReadyId = null
@@ -517,6 +569,7 @@ class ReelsPlayers(
             })
             // 装载到片段起点停着：不播（滑过去才「播放」）
             engine.open(engineSource(source, next, autoplay = false), emptyList())
+            android.util.Log.i("McReels", "预起下一条：${next.title.name}")
         }
     }
 
@@ -526,6 +579,7 @@ class ReelsPlayers(
         val clip = standby ?: return
         standby = null
         standbyReadyId = null
+        android.util.Log.i("McReels", "丢掉预起：${clip.item.title.name}")
         clip.pollJob?.cancel()
         clip.subtitleJob?.cancel()
         clip.engine.release()
