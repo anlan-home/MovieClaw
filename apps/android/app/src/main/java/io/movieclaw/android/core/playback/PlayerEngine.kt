@@ -77,6 +77,13 @@ data class EngineSource(
      * 引擎放的是容器标注的默认轨，于是"菜单勾着国语、耳朵听的是日语"。
      */
     val initialAudioRef: String? = null,
+    /**
+     * 片源字节缓存的键（`SourceByteCache.key(fileId, size)`）：给了就挂缓存层，
+     * 放过的字节落盘，同一个文件下次起播直接读本地（正片与刷片共用一份，见 SourceByteCache）。
+     */
+    val cacheKey: String? = null,
+    /** 装载后是否直接播（预起下一条时 false：装载到片段起点停着，滑过去才播） */
+    val autoplay: Boolean = true,
 )
 
 /** 外挂字幕旁挂载荷(Exo 合流;MPV 后续走 sub-add) */

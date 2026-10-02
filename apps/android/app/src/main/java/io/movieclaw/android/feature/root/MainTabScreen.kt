@@ -92,6 +92,12 @@ fun MainTabScreen(
     onOpenAccounts: () -> Unit,
     /** 「全部电影」类型行点「查看全部」进跨库墙 */
     onOpenKind: (String) -> Unit = {},
+    /** 媒体库顶栏「▶ 片段」 */
+    onOpenReels: () -> Unit = {},
+    /** 媒体库 ⋯ 菜单「自定义首页」→ 原生行清单编辑器 */
+    onOpenCustomize: () -> Unit = {},
+    /** 首页合集行 / 全部合集的卡片 → 原生合集详情（库内合集，与发现页的 TMDB 合集不是同一种） */
+    onOpenLibraryCollection: (Long, String) -> Unit = { _, _ -> },
     /** 订阅首页的「剧集/电影订阅 ›」与「查看全部」→ 订阅海报墙 */
     onOpenSubsWall: (String) -> Unit = {},
     subscriptions: io.movieclaw.android.feature.subscriptions.SubscriptionIndex,
@@ -134,6 +140,9 @@ fun MainTabScreen(
                 onOpenFavorites = onOpenFavorites,
                 onOpenCollections = onOpenCollections,
                 onOpenKind = onOpenKind,
+                onOpenReels = onOpenReels,
+                onOpenCustomize = onOpenCustomize,
+                onOpenCollection = onOpenLibraryCollection,
             )
             MainTab.SUBSCRIPTIONS -> SubsHomeScreen(
                 onOpenSubscription = onOpenSubscription,

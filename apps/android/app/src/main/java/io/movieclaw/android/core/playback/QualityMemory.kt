@@ -48,6 +48,26 @@ class QualityMemory @Inject constructor(
         context.qualityStore.edit { it[KEY_MEMORY] = json.encodeToString(entries) }
     }
 
+    /* ---------------- 片段（刷片）的画质档位 ----------------
+     * 与正片分开记：刷片是「连着看很多条」，一个片名一条记忆没有意义，只按**网络环境**记一份。
+     * 用户没选过时按默认策略走（见 ReelsQuality.defaultCap）：局域网原画直出、外网 720p。
+     */
+
+    /** 片段的画质档位；null = 没选过（走默认策略） */
+    suspend fun reelsCap(network: PlaybackNetwork): Int? {
+        val raw = context.qualityStore.data.first()[KEY_REELS] ?: return null
+        val entries = runCatching { json.decodeFromString<List<Entry>>(raw) }.getOrDefault(emptyList())
+        return entries.firstOrNull { it.key == "reels:${network.id}" }?.height
+    }
+
+    suspend fun rememberReels(network: PlaybackNetwork, capHeight: Int?) {
+        val raw = context.qualityStore.data.first()[KEY_REELS]
+        val entries = runCatching { json.decodeFromString<List<Entry>>(raw ?: "") }.getOrDefault(emptyList())
+            .filterNot { it.key == "reels:${network.id}" } +
+            Entry("reels:${network.id}", capHeight ?: 0, System.currentTimeMillis())
+        context.qualityStore.edit { it[KEY_REELS] = json.encodeToString(entries) }
+    }
+
     private suspend fun load(): List<Entry> {
         val raw = context.qualityStore.data.first()[KEY_MEMORY] ?: return emptyList()
         return runCatching { json.decodeFromString<List<Entry>>(raw) }.getOrDefault(emptyList())
@@ -57,7 +77,37 @@ class QualityMemory @Inject constructor(
 
     private companion object {
         val KEY_MEMORY = stringPreferencesKey("quality_memory")
+        val KEY_REELS = stringPreferencesKey("reels_quality_memory")
         const val MAX_ENTRIES = 300
+    }
+}
+
+/**
+ * 片段的画质策略（iOS 没有这一层：iOS 的刷片一律原画直出）。
+ *
+ * 「自动」的含义按网络分档：**局域网原画直出**（服务端按文件签发令牌，零转码、起播最快），
+ * **外网 720p**（借正片的播放会话转码，见 `ReelsPlayers.openSource`）。用户显式选过就按选的走。
+ */
+object ReelsQuality {
+    const val AUTO = 0
+
+    val options: List<Pair<Int, String>> = listOf(
+        AUTO to "自动",
+        2160 to "4K",
+        1080 to "1080p",
+        720 to "720p",
+    )
+
+    /** 这一档在当前网络下实际会用什么（给界面写小字用） */
+    fun label(cap: Int, network: PlaybackNetwork): String = when (cap) {
+        AUTO -> if (network == PlaybackNetwork.AWAY) "自动（外网 720p）" else "自动（局域网原画）"
+        else -> options.firstOrNull { it.first == cap }?.second ?: "自动"
+    }
+
+    /** 记住的档位 → 这次实际要用的上限；null = 直出 */
+    fun effectiveCap(cap: Int, network: PlaybackNetwork): Int? = when (cap) {
+        AUTO -> if (network == PlaybackNetwork.AWAY) 720 else null
+        else -> cap
     }
 }
 

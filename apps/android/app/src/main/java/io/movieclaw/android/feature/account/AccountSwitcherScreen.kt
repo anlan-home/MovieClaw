@@ -59,6 +59,7 @@ import io.movieclaw.android.core.designsystem.AccentStrong
 import io.movieclaw.android.core.designsystem.Danger
 import io.movieclaw.android.core.designsystem.FeedbackBus
 import io.movieclaw.android.core.designsystem.LineColor
+import io.movieclaw.android.core.designsystem.McNavButton
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.SurfaceRaised
 import io.movieclaw.android.core.designsystem.TextFaint
@@ -124,9 +125,11 @@ fun AccountSwitcherScreen(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 4.dp, vertical = 4.dp),
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = TextMuted)
-            }
+            McNavButton(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                onClick = onBack,
+            )
             Text("切换账号", style = McType.headline)
         }
 

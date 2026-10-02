@@ -713,15 +713,14 @@ fun LogsSettingsScreen(onBack: () -> Unit, vm: LogsViewModel = hiltViewModel()) 
 
 /* ---------------- 共用小件 ---------------- */
 
+/** 子页顶栏：直接用全站那一条（`McTopBar(Sub)`），返回键与标题各页统一 */
 @Composable
 private fun SettingsHeader(title: String, onBack: () -> Unit) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
-    ) {
-        TextButton(onClick = onBack) { Text("返回", color = TextMuted) }
-        Text(title, style = McType.headline)
-    }
+    io.movieclaw.android.core.designsystem.McTopBar(
+        variant = io.movieclaw.android.core.designsystem.McTopBarVariant.Sub,
+        title = title,
+        onBack = onBack,
+    )
 }
 
 @Composable

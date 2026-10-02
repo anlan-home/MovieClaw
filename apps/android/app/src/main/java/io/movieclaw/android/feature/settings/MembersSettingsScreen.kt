@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -61,11 +63,14 @@ import io.movieclaw.android.core.designsystem.FeedbackBus
 import io.movieclaw.android.core.designsystem.GlassCard
 import io.movieclaw.android.core.designsystem.LineColor
 import io.movieclaw.android.core.designsystem.Loadable
+import io.movieclaw.android.core.designsystem.McMetrics
+import io.movieclaw.android.core.designsystem.McNavButton
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.SurfaceRaised
 import io.movieclaw.android.core.designsystem.Success
 import io.movieclaw.android.core.designsystem.TextFaint
 import io.movieclaw.android.core.designsystem.TextMuted
+import io.movieclaw.android.core.designsystem.TextPrimary
 import io.movieclaw.android.core.designsystem.Warning
 import io.movieclaw.android.core.model.MemberCreateRequest
 import io.movieclaw.android.core.model.MemberStatusRequest
@@ -215,10 +220,21 @@ fun MembersSettingsScreen(onBack: () -> Unit, vm: MembersViewModel = hiltViewMod
     Column(Modifier.fillMaxSize()) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .height(McMetrics.topBarHeight)
+                .padding(horizontal = McMetrics.topBarInsetSub),
         ) {
-            TextButton(onClick = onBack) { Text("返回", color = TextMuted) }
-            Text("家庭成员", style = McType.headline, modifier = Modifier.weight(1f))
+            // 返回键用全站那枚玻璃圆钮（同 McTopBar(Sub) 的行首）：各页返回按钮长得一样
+            McNavButton(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                onClick = onBack,
+            )
+            Spacer(Modifier.width(4.dp))
+            Text("家庭成员", style = McType.title3, color = TextPrimary, modifier = Modifier.weight(1f))
             TextButton(onClick = { creating = true }) {
                 Icon(Icons.Rounded.Add, contentDescription = null, tint = Accent, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))

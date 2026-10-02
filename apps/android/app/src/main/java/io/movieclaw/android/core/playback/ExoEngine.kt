@@ -24,7 +24,7 @@ import io.movieclaw.android.core.network.BuildInfo
  * Exo 内核:硬解主力(省电、低延迟)+ 服务端 HLS 的唯一消费者。
  * 直连走 ProgressiveMediaSource,HLS 走 HlsMediaSource;流 URL 带签名 token 免鉴权头。
  */
-class ExoEngine(context: Context) : PlayerEngine {
+class ExoEngine(private val context: Context) : PlayerEngine {
 
     val player: ExoPlayer = ExoPlayer.Builder(context).build()
 
@@ -103,9 +103,16 @@ class ExoEngine(context: Context) : PlayerEngine {
         val factory: MediaSourceFactory = if (source.hls) {
             HlsMediaSource.Factory(httpFactory)
         } else {
+            // 数据源链：CuesServing（MKV 精简索引，命中就绕过网络）→ 字节缓存 → 网络。
+            // 缓存键由调用方给（文件 id + 大小）：正片与刷片放过的字节彼此复用。
+            val upstream: DataSource.Factory = if (source.cacheKey != null) {
+                SourceByteCache.playbackFactory(this.context)
+            } else {
+                httpFactory
+            }
             val dsFactory: DataSource.Factory = source.matroskaCues
-                ?.let { cues -> DataSource.Factory { CuesServingDataSource(httpFactory.createDataSource(), cues) } }
-                ?: httpFactory
+                ?.let { cues -> DataSource.Factory { CuesServingDataSource(upstream.createDataSource(), cues) } }
+                ?: upstream
             ProgressiveMediaSource.Factory(dsFactory)
         }
         val primary = factory.createMediaSource(mediaItem)

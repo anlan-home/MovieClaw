@@ -63,6 +63,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.movieclaw.android.core.designsystem.McFormat
 import io.movieclaw.android.core.designsystem.MarkdownText
 import androidx.compose.foundation.layout.heightIn
+import io.movieclaw.android.core.designsystem.McNavButton
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.Accent
 import io.movieclaw.android.core.designsystem.AccentSoft
@@ -90,9 +91,11 @@ fun AgentSessionsScreen(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.statusBarsPadding().padding(horizontal = 4.dp),
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = TextMuted)
-            }
+            McNavButton(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                onClick = onBack,
+            )
             Text("AI 助手", style = McType.headline)
             Spacer(Modifier.weight(1f))
             IconButton(onClick = onNewSession) {
@@ -195,9 +198,11 @@ fun AgentConversationScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.statusBarsPadding().padding(horizontal = 4.dp),
             ) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = TextMuted)
-                }
+                McNavButton(
+                    icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                    contentDescription = "返回",
+                    onClick = onBack,
+                )
                 Column(Modifier.weight(1f)) {
                     Text(
                         state.title,

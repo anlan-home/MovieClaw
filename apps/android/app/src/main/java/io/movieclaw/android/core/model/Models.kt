@@ -75,6 +75,11 @@ data class LibraryStats(
     val itemCount: Int = 0,
     val fileCount: Int = 0,
     val totalSizeBytes: Long = 0,
+    /** 在位待识别文件数（scanning=true 时是中间态，扫完才是结论） */
+    val unidentifiedCount: Int = 0,
+    /** 标记 missing 的文件数——管理页「待处理文件」胶囊用它 */
+    val missingCount: Int = 0,
+    val ignoredCount: Int = 0,
 )
 
 @Serializable
@@ -85,9 +90,25 @@ data class LibraryView(
     val source: String = "tmdb",
     val excludeFromHome: Boolean = false,
     val viewerAccess: Boolean = true,
-    /** 默认库（成员落点弹窗按它预选同类型的库） */
+    /** 默认库（成员落点弹窗按它预选同类型的库；管理页有「默认」徽标） */
     val isDefault: Boolean = false,
     val rootPaths: List<String> = emptyList(),
+    /** 主根路径（root_paths 第一项）；管理页根目录行用它 */
+    val primaryRoot: String? = null,
+    /** 可见范围：everyone=所有成员 / selected=指定成员 */
+    val accessMode: String = "everyone",
+    /** 显式授权的成员 id（仅管理员可见；成员端恒空） */
+    val memberIds: List<Long> = emptyList(),
+    /** 任一根路径落在网络挂载（NFS/SMB/fuse）：实时监控收不到远端变更 */
+    val networkMount: Boolean = false,
+    /** 正在扫描（管理页的「在跑任务」与行内状态都用它） */
+    val scanning: Boolean = false,
+    /** 正在整理文件名 */
+    val organizing: Boolean = false,
+    /** 整库元数据刷新状态；null = 没在刷 */
+    val metadataRefresh: kotlinx.serialization.json.JsonElement? = null,
+    /** 整库生成章节的作业状态；null = 没在生成 */
+    val chapterJob: kotlinx.serialization.json.JsonElement? = null,
     /** 服务端预算好的库存统计（iOS libraryStatsSummary 用的就是它） */
     val stats: LibraryStats = LibraryStats(),
 )

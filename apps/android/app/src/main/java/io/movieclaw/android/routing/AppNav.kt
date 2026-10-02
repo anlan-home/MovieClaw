@@ -38,6 +38,8 @@ import io.movieclaw.android.feature.subscriptions.SubscriptionDetailScreen
 import javax.inject.Inject
 import io.movieclaw.android.feature.library.FavoritesScreen
 import io.movieclaw.android.feature.library.CollectionsScreen
+import io.movieclaw.android.feature.library.LibraryCollectionScreen
+import io.movieclaw.android.feature.library.LibraryCustomizeScreen
 import io.movieclaw.android.feature.library.LibraryManageScreen
 import io.movieclaw.android.feature.discover.PersonScreen
 
@@ -52,6 +54,13 @@ fun AppNav() {
     val navController = rememberNavController()
     val navVm: NavViewModel = hiltViewModel()
     val context = androidx.compose.ui.platform.LocalContext.current
+    // 分享要拼条目的网页地址：会话仓库经 EntryPoint 取（AppNav 不在 Hilt 注入图里）
+    val sessionRepo = androidx.compose.runtime.remember {
+        dagger.hilt.android.EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            SessionRepositoryEntry::class.java,
+        ).sessionRepository()
+    }
 
     // 全站订阅索引（单例）：发现页的订阅判断由它统一提供
     val subscriptionsEntry = androidx.compose.runtime.remember {
@@ -119,6 +128,9 @@ fun AppNav() {
                 onOpenSettings = { navController.navigate("settings") },
                 onOpenAccounts = { navController.navigate("accounts") },
                 onOpenKind = { kind -> navController.navigate("kind/$kind") },
+                onOpenReels = { navController.navigate("reels") },
+                onOpenCustomize = { navController.navigate("libraryCustomize") },
+                onOpenLibraryCollection = { id, name -> navController.navigate("libraryCollection/$id?title=${Uri.encode(name)}") },
                 onOpenSubsWall = { kind -> navController.navigate("subsWall/$kind") },
             )
         }
@@ -178,7 +190,17 @@ fun AppNav() {
         composable("collections") { entry ->
             CollectionsScreen(
                 onBack = { navController.popBackStack() },
-                onOpenCollection = { id, name -> navController.navigate("collection?ref=$id&title=${Uri.encode(name)}") },
+                // 库内合集走原生合集详情（此前误落到发现页的 TMDB 合集页——那边查的是另一个接口）
+                onOpenCollection = { id, name -> navController.navigate("libraryCollection/$id?title=${Uri.encode(name)}") },
+            )
+        }
+        // 库内合集详情（首页合集行 / 全部合集的卡片）
+        composable("libraryCollection/{collectionId}?title={title}") { entry ->
+            LibraryCollectionScreen(
+                collectionId = entry.arguments?.getString("collectionId")?.toLongOrNull() ?: -1L,
+                fallbackTitle = entry.arguments?.getString("title").orEmpty(),
+                onBack = { navController.popBackStack() },
+                onOpenItem = { libId, itemId -> navController.navigate("item/$libId/$itemId") },
             )
         }
         composable("libraryManage") { entry ->
@@ -186,6 +208,51 @@ fun AppNav() {
             LibraryManageScreen(
                 onBack = { navController.popBackStack() },
                 onOpenLibrary = { id, name -> navController.navigate("library/$id?name=${Uri.encode(name)}") },
+            )
+        }
+        // 自定义首页（媒体库 ⋯ 菜单）：行清单编辑器，保存进 ui.preferences.home.rows
+        composable("libraryCustomize") {
+            LibraryCustomizeScreen(onBack = { navController.popBackStack() })
+        }
+        // 刷片 / 片段（媒体库顶栏「▶ 片段」）：竖滑流，每条按 segment 起播、到终点停
+        composable("reels") { entry ->
+            io.movieclaw.android.feature.reels.ReelsScreen(
+                onBack = { navController.popBackStack() },
+                onOpenItem = { libraryId, itemId ->
+                    if (libraryId > 0) navController.navigate("item/$libraryId/$itemId")
+                },
+                onOpenPerson = { tmdbPersonId -> navController.navigate("person/$tmdbPersonId") },
+                // 「看全片」：把这一段交给正片播放器，**从片段里当前放到的那一刻**接着看
+                // （长按「从头看」给的是片段起点，两条都由页面算好传进来）
+                onOpenFullPlayer = { item, startMs ->
+                    navVm.open(
+                        PlayTarget(
+                            mediaItemId = item.title.mediaItemId,
+                            libraryId = item.title.libraryId,
+                            kind = item.title.kind,
+                            title = item.title.name,
+                            seasonNumber = item.title.episode?.season ?: 0,
+                            episodeNumber = item.title.episode?.episode ?: 0,
+                            startMs = startMs,
+                        )
+                    )
+                    navController.navigate("player")
+                },
+                // 分享：系统分享带条目的网页地址（与详情页「分享」同一份东西）
+                onShare = { item ->
+                    val base = sessionRepo.ui.value.origin?.trimEnd('/')
+                    val link = base?.let { "$it/library/${item.title.libraryId}/item/${item.title.mediaItemId}" }
+                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(
+                            android.content.Intent.EXTRA_TEXT,
+                            listOfNotNull(item.title.name, link).joinToString("\n"),
+                        )
+                    }
+                    runCatching {
+                        context.startActivity(android.content.Intent.createChooser(intent, "分享影片"))
+                    }
+                },
             )
         }
         // 按类型的跨库墙（首页「全部电影」行点「查看全部」进来）
@@ -354,6 +421,13 @@ fun AppNav() {
 @dagger.hilt.InstallIn(dagger.hilt.components.SingletonComponent::class)
 interface SubscriptionIndexEntry {
     fun subscriptionIndex(): io.movieclaw.android.feature.subscriptions.SubscriptionIndex
+}
+
+/** 服务器地址 / 会话（刷片分享要拼条目网页地址） */
+@dagger.hilt.EntryPoint
+@dagger.hilt.InstallIn(dagger.hilt.components.SingletonComponent::class)
+interface SessionRepositoryEntry {
+    fun sessionRepository(): io.movieclaw.android.core.session.SessionRepository
 }
 
 /**

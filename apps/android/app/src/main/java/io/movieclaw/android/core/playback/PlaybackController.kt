@@ -265,9 +265,15 @@ class PlaybackController(
         matroskaCues = session?.matroskaCues?.takeUnless { currentHls },
         // 起播音轨：引擎拿到轨道后按它落轨（见 ExoEngine.onTracksChanged / loadEngineTracks）
         initialAudioRef = _selectedAudioRef.value,
+        // 片源字节缓存：键 = 文件 id + 大小（iOS PlaybackController.sourceCacheKey 同口径）。
+        // 刷片预取 / 播放下过的字节都在同一份缓存里，点「接着看」转过来直接复用。
+        cacheKey = session?.let { SourceByteCache.key(it.decision.fileId ?: 0L, it.source?.sizeBytes) },
     )
 
     suspend fun negotiate(): Negotiation = negotiateInternal(startMs = null)
+
+    /** 从指定位置协商（刷片「全屏观看」：按片段起点起播，不接着续播点） */
+    suspend fun negotiateAt(startMs: Long): Negotiation = negotiateInternal(startMs = startMs)
 
     suspend fun fromBeginning(): Negotiation = negotiateInternal(startMs = 0L)
 

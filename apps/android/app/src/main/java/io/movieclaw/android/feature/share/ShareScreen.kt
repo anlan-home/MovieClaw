@@ -68,6 +68,7 @@ import io.movieclaw.android.core.designsystem.GlassCard
 import io.movieclaw.android.core.designsystem.McFormat
 import io.movieclaw.android.core.designsystem.McMetrics
 import io.movieclaw.android.core.designsystem.McRow
+import io.movieclaw.android.core.designsystem.McNavButton
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.PosterCard
 import io.movieclaw.android.core.designsystem.RemoteImage
@@ -232,9 +233,11 @@ fun ShareScreen(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 4.dp, vertical = 4.dp),
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = TextMuted)
-            }
+            McNavButton(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                onClick = onBack,
+            )
             Column(Modifier.weight(1f)) {
                 Text("分享", style = McType.headline)
                 Text(
