@@ -42,6 +42,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.movieclaw.android.core.designsystem.McFormat
+import io.movieclaw.android.core.designsystem.McNavButton
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.Accent
 import io.movieclaw.android.core.designsystem.Danger
@@ -146,9 +147,11 @@ fun NoticeCenterScreen(onBack: () -> Unit, vm: NoticeCenterViewModel = hiltViewM
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 4.dp)) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = TextMuted)
-            }
+            McNavButton(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                onClick = onBack,
+            )
             Text("通知中心", style = McType.headline)
             Spacer(Modifier.weight(1f))
             if ((state as? Loadable.Ready)?.value?.isNotEmpty() == true) {

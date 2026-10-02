@@ -238,6 +238,86 @@ interface McApi {
     @GET("libraries")
     suspend fun libraries(): McEnvelope<List<LibraryView>>
 
+    /* ---------------- 媒体库管理（管理页一库一行的 ⋯ 菜单） ---------------- */
+
+    /** 扫描该库的根路径（后台执行）；已在扫会 409，UI 按 `scanning` 换成「停止扫描」 */
+    @POST("libraries/{libraryId}/scan")
+    suspend fun scanLibrary(@Path("libraryId") libraryId: Long): McEnvelope<JsonElement>
+
+    /** 停止进行中的扫描（已入账的保留） */
+    @POST("libraries/{libraryId}/scan/stop")
+    suspend fun stopLibraryScan(@Path("libraryId") libraryId: Long): McEnvelope<JsonElement>
+
+    /** 整库刷新元数据（全部已识别条目重刮，可恢复后台作业） */
+    @POST("libraries/{libraryId}/metadata/refresh")
+    suspend fun refreshLibraryMetadata(@Path("libraryId") libraryId: Long): McEnvelope<JsonElement>
+
+    @POST("libraries/{libraryId}/metadata/refresh/stop")
+    suspend fun stopLibraryMetadataRefresh(@Path("libraryId") libraryId: Long): McEnvelope<JsonElement>
+
+    /** 生成整库章节场景图（force=true 已有的也重新生成） */
+    @POST("libraries/{libraryId}/chapter-images")
+    suspend fun generateLibraryChapters(
+        @Path("libraryId") libraryId: Long,
+        @Query("force") force: Boolean = false,
+    ): McEnvelope<JsonElement>
+
+    /** 开始整理：按规范命名批量改名归位（改名直落磁盘，调用前应先看预览） */
+    @POST("libraries/{libraryId}/file-organizations")
+    suspend fun organizeLibrary(@Path("libraryId") libraryId: Long): McEnvelope<JsonElement>
+
+    /** 设为该类型的默认库 */
+    @POST("libraries/{libraryId}/default-selection")
+    suspend fun setDefaultLibrary(@Path("libraryId") libraryId: Long): McEnvelope<JsonElement>
+
+    /** 重排媒体库展示顺序：必须一次给全所有库的 id（漏/多/重复都拒绝） */
+    @PUT("libraries/display-order")
+    suspend fun reorderLibraries(@Body body: JsonElement): McEnvelope<JsonElement>
+
+    /** 删除媒体库（不动磁盘文件；其订阅回落到该类型默认库；扫描/整理中会 409） */
+    @DELETE("libraries/{libraryId}")
+    suspend fun deleteLibrary(@Path("libraryId") libraryId: Long): McEnvelope<JsonElement>
+
+    /* ---------------- 刷片 / 片段（docs/design/reels.md） ---------------- */
+
+    /**
+     * 取一页片段。第一页不带 seed，服务端生成后随响应返回；翻页时原样带回。
+     * 筛选与媒体库同一组参数（g/c/d/rating_gte/rt/w），外加 kind。
+     */
+    @GET("reels")
+    suspend fun reels(
+        @Query("seed") seed: Long? = null,
+        @Query("offset") offset: Int = 0,
+        @Query("limit") limit: Int = 10,
+        /** App 会放的方式；一期只有 seek（为将来预剪的 clip 留口子） */
+        @Query("modes") modes: String = "seek",
+        @Query("kind") kind: String? = null,
+        @Query("g") genres: String? = null,
+        @Query("c") countries: String? = null,
+        @Query("d") decades: String? = null,
+        @Query("rating_gte") ratingGte: Float? = null,
+        @Query("rt") runtimes: String? = null,
+        @Query("w") watch: String? = null,
+    ): McEnvelope<io.movieclaw.android.core.model.ReelFeedView>
+
+    /** 刷片筛选菜单的候选值与计数（与 /reels 同一组参数；为 0 的档 UI 置灰） */
+    @GET("reels/facets")
+    suspend fun reelFacets(
+        @Query("kind") kind: String? = null,
+        @Query("g") genres: String? = null,
+        @Query("c") countries: String? = null,
+        @Query("d") decades: String? = null,
+        @Query("rating_gte") ratingGte: Float? = null,
+        @Query("rt") runtimes: String? = null,
+        @Query("w") watch: String? = null,
+    ): McEnvelope<io.movieclaw.android.core.model.ReelFacetsView>
+
+    /** 刷片事件批量上报（只落 reel_event 表，不写观看记录；失败即丢） */
+    @POST("reels/events")
+    suspend fun reportReelEvents(
+        @Body body: io.movieclaw.android.core.model.ReelEventBatch,
+    ): McEnvelope<io.movieclaw.android.core.model.ReelEventResult>
+
     @GET("libraries/{libraryId}/items")
     suspend fun libraryItems(
         @Path("libraryId") libraryId: Long,
@@ -354,18 +434,31 @@ interface McApi {
         @Query("order") order: String? = null,
     ): McEnvelope<io.movieclaw.android.core.model.FavoritesPageView>
 
+    /**
+     * 合集列表。返回的是**数组**（`data: CollectionView[]`，不是分页对象）。
+     * 默认不返回成员为 0 的合集——点进去空无一物的合集是纯粹的死路，只有管理界面才需要 includeEmpty。
+     */
     @GET("collections")
-    suspend fun collections(): McEnvelope<JsonElement>
+    suspend fun collections(
+        @Query("library_id") libraryId: Long? = null,
+        @Query("include_empty") includeEmpty: Boolean? = null,
+        @Query("include_hidden") includeHidden: Boolean? = null,
+    ): McEnvelope<List<io.movieclaw.android.core.model.CollectionView>>
 
     @GET("collections/{collectionId}")
-    suspend fun collection(@Path("collectionId") id: Long): McEnvelope<JsonElement>
+    suspend fun collection(
+        @Path("collectionId") id: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.CollectionView>
 
+    /** 合集成员：与单库海报墙同一份聚合，卡片因此长得一模一样（首页合集行也用这个） */
     @GET("collections/{collectionId}/items")
     suspend fun collectionItems(
         @Path("collectionId") id: Long,
         @Query("limit") limit: Int = 60,
         @Query("offset") offset: Int = 0,
-    ): McEnvelope<JsonElement>
+        @Query("sort") sort: String? = null,
+        @Query("order") order: String? = null,
+    ): McEnvelope<List<io.movieclaw.android.core.model.LibraryItemView>>
 
     @GET("libraries/trashed-files")
     suspend fun trashedFiles(): McEnvelope<JsonElement>
@@ -642,6 +735,22 @@ interface McApi {
     suspend fun endPlaybackSession(@Path("deviceId") deviceId: String): McEnvelope<JsonElement>
 
     /* ---------------- 发现页与标题详情(M2c) ---------------- */
+
+    /**
+     * 界面偏好（按页面分组的样式设定）。`home.rows` 就是媒体库首页的行清单——
+     * 自定义首页页读它、改它，返回首页立即生效（iOS LibraryHomePrefs 同一份）。
+     */
+    @GET("ui/preferences")
+    suspend fun uiPreferences(): McEnvelope<io.movieclaw.android.core.model.UiPreferencesSetting>
+
+    /**
+     * 保存界面偏好。后端是**整体覆盖**：调用方要以刚拉到的完整偏好为底，只换 `home.rows`——
+     * 只发一个 home 会把主题 / 侧栏 / 蒙版 / 主导航都写回默认值。
+     */
+    @PUT("ui/preferences")
+    suspend fun updateUiPreferences(
+        @Body body: io.movieclaw.android.core.model.UiPreferencesSetting,
+    ): McEnvelope<io.movieclaw.android.core.model.UiPreferencesSetting>
 
     @GET("ui/discovery/{mediaType}")
     suspend fun discoveryPage(

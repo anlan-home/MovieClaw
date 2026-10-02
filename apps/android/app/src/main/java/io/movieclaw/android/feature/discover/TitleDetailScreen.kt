@@ -675,9 +675,11 @@ fun CollectionScreen(
     Column(Modifier.fillMaxSize().background(Bg)) {
         // 顶栏：返回（网页是左上玻璃圆钮，这里保持紧凑顶栏）
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.statusBarsPadding().padding(horizontal = 4.dp)) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = TextMuted)
-            }
+            McNavButton(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                onClick = onBack,
+            )
             Spacer(Modifier.weight(1f))
         }
         // 卡片上方那一整块，按网页补齐：eyebrow → 大标题 → 已加载计数 → 搜索框 → 类型 chips

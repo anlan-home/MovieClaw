@@ -22,4 +22,9 @@ data class PlayTarget(
      * 而不是把一堆我们解析不了的字节丢过来。
      */
     val discSource: Boolean = false,
+    /**
+     * 起播位置（毫秒，原片时间轴）。null = 交给服务端按观看状态定（续播点）。
+     * 刷片的「全屏观看」用它：把这一段的起点带过去，而不是从续播点接着放。
+     */
+    val startMs: Long? = null,
 )

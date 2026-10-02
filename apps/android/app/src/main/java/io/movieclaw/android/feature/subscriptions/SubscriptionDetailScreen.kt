@@ -57,6 +57,7 @@ import io.movieclaw.android.core.designsystem.FeedbackTone
 import io.movieclaw.android.core.designsystem.LineSoft
 import io.movieclaw.android.core.designsystem.LocalFeedback
 import io.movieclaw.android.core.designsystem.McMetrics
+import io.movieclaw.android.core.designsystem.McNavButton
 import io.movieclaw.android.core.designsystem.McNotice
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.Ok
@@ -311,10 +312,10 @@ fun SubscriptionDetailScreen(
                 Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = TextMuted,
-                    modifier = Modifier
-                        .size(32.dp).clip(CircleShape).clickable { onBack() }.padding(6.dp),
+                McNavButton(
+                    icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                    contentDescription = "返回",
+                    onClick = onBack,
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
