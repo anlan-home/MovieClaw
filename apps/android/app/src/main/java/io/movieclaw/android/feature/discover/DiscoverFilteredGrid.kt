@@ -215,7 +215,8 @@ fun DiscoverFilteredGridBody(
                 horizontalPadding = 0.dp,
             )
         }
-        items(state.filtered, key = { it.ref }) { item ->
+        // distinctBy：网格按 ref 做 key，重复一条就是 IllegalArgumentException 崩（兜底，防服务端跨页重复）
+        items(state.filtered.distinctBy { it.ref }, key = { it.ref }) { item ->
             PosterCard(
                 imageUrl = item.posterUrl,
                 origin = origin,

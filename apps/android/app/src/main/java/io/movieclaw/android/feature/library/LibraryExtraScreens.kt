@@ -32,16 +32,38 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.pulltorefresh.pullToRefresh
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.GridView
+import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+import androidx.compose.foundation.lazy.staggeredgrid.itemsIndexed
+import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateOf
 import io.movieclaw.android.core.designsystem.Accent
 import io.movieclaw.android.core.designsystem.Danger
+import io.movieclaw.android.core.designsystem.FavoritesSortOptions
+import io.movieclaw.android.core.designsystem.ImageWidth
 import io.movieclaw.android.core.designsystem.Info
+import io.movieclaw.android.core.designsystem.WallSortDirection
+import io.movieclaw.android.core.designsystem.WallSortMenu
+import io.movieclaw.android.core.designsystem.WallSortState
 import io.movieclaw.android.core.designsystem.Warning
+import io.movieclaw.android.core.designsystem.effectiveSort
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,6 +77,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,13 +98,19 @@ import io.movieclaw.android.core.designsystem.TextMuted
 import io.movieclaw.android.core.designsystem.TextPrimary
 import io.movieclaw.android.core.model.CollectionCover
 import io.movieclaw.android.core.model.CollectionView
+import io.movieclaw.android.core.model.LibraryGalleryGroupView
+import io.movieclaw.android.core.model.LibraryMarksBus
 import io.movieclaw.android.core.model.LibraryView
+import io.movieclaw.android.core.model.PlaybackMarksRequest
 import io.movieclaw.android.core.network.ApiFactory
 import io.movieclaw.android.core.network.dataOrThrow
 import io.movieclaw.android.core.network.friendlyMessage
 import io.movieclaw.android.core.session.SessionRepository
+import io.movieclaw.android.core.session.WallPrefs
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
@@ -103,74 +132,265 @@ data class FavoritesState(
     val items: List<io.movieclaw.android.core.model.FavoriteItemView> = emptyList(),
     /** 去重后的收藏作品总数（行首那句「N 部作品」用它，不是当前加载到的条数） */
     val total: Int = 0,
+    // ── 排序（iOS WallSortState，键名同 Web 的 localStorage，记在本机）──
+    val sort: WallSortState = WallSortState(),
+    // ── 图床浏览（iOS GalleryPrefs：模式 / 分组 / 密度，都记在本机）──
+    val galleryMode: Boolean = false,
+    val galleryGrouped: Boolean = true,
+    /** compact / standard / loose */
+    val galleryDensity: String = "standard",
+    val galleryGroups: List<LibraryGalleryGroupView> = emptyList(),
+    val galleryLoading: Boolean = false,
+    val galleryLoadingMore: Boolean = false,
+    val galleryHasMore: Boolean = true,
 )
 
 @HiltViewModel
 class FavoritesViewModel @Inject constructor(
     private val apiFactory: ApiFactory,
     private val repository: SessionRepository,
+    private val wallPrefs: WallPrefs,
 ) : ViewModel() {
     private val _ui = MutableStateFlow(FavoritesState())
     val ui = _ui.asStateFlow()
     val origin: String? get() = repository.ui.value.origin
 
-    init { load() }
+    init {
+        // 本机偏好先落上（排序 / 图廊模式），再拉数据——免得先按默认拉一遍再重拉
+        viewModelScope.launch {
+            val prefs = wallPrefs.read()
+            _ui.update {
+                it.copy(
+                    sort = WallSortState(prefs.sort, prefs.reversed),
+                    galleryMode = prefs.galleryMode,
+                    galleryGrouped = prefs.galleryGrouped,
+                    galleryDensity = prefs.galleryDensity,
+                )
+            }
+            load()
+            if (_ui.value.galleryMode) loadGallery(reset = true)
+        }
+        // 在条目详情里点了收藏 / 取消：收藏墙也要跟着重拉
+        viewModelScope.launch {
+            LibraryMarksBus.version.drop(1).collect {
+                load()
+                if (_ui.value.galleryMode) loadGallery(reset = true)
+            }
+        }
+    }
+
+    /** 下拉刷新转圈（iOS `.refreshable` 的对应物） */
+    private val _refreshing = MutableStateFlow(false)
+    val refreshing: kotlinx.coroutines.flow.StateFlow<Boolean> = _refreshing.asStateFlow()
+
+    fun refresh() {
+        if (_refreshing.value) return
+        viewModelScope.launch {
+            _refreshing.value = true
+            try {
+                if (_ui.value.galleryMode) loadGallery(reset = true) else load()
+                kotlinx.coroutines.withTimeoutOrNull(12_000) { _ui.first { !it.loading && !it.galleryLoading } }
+            } finally {
+                _refreshing.value = false
+            }
+        }
+    }
+
+    /** 换排序（或翻方向）：iOS 换排序要回墙首，所以两处都从头拉 */
+    fun applySort(next: WallSortState) {
+        if (next == _ui.value.sort) return
+        _ui.update { it.copy(sort = next) }
+        viewModelScope.launch {
+            wallPrefs.saveSort(next.sort, next.reversed)
+            load()
+            if (_ui.value.galleryMode) loadGallery(reset = true)
+        }
+    }
+
+    fun setGalleryMode(on: Boolean) {
+        _ui.update { it.copy(galleryMode = on) }
+        viewModelScope.launch {
+            wallPrefs.saveGalleryMode(on)
+            if (on && _ui.value.galleryGroups.isEmpty()) loadGallery(reset = true) else if (!on) load()
+        }
+    }
+
+    fun setGalleryGrouped(on: Boolean) {
+        _ui.update { it.copy(galleryGrouped = on) }
+        viewModelScope.launch { wallPrefs.saveGalleryGrouped(on) }
+    }
+
+    fun setGalleryDensity(value: String) {
+        _ui.update { it.copy(galleryDensity = value) }
+        viewModelScope.launch { wallPrefs.saveGalleryDensity(value) }
+    }
+
+    /** 请求参数：默认档在服务端叫 `favorited_at`，只有反转了自然方向才带 order（与 Web 同一规矩） */
+    private fun sortParams(): Pair<String, String?> {
+        val s = _ui.value.sort
+        val effective = s.effectiveSort()
+        return effective to WallSortDirection.of(effective)?.orderParam(s.reversed)
+    }
 
     fun load() {
         viewModelScope.launch {
             val origin = origin ?: run { _ui.update { it.copy(loading = false, error = "尚未连接服务器") }; return@launch }
-            _ui.update { it.copy(loading = true, error = null) }
+            // 已有内容时不回到转圈：点收藏会被信号叫醒重拉，转圈会让整墙闪一下
+            if (_ui.value.items.isEmpty()) _ui.update { it.copy(loading = true, error = null) }
             try {
-                val page = apiFactory.forOrigin(origin).favorites(limit = 60, offset = 0).dataOrThrow()
+                val (sort, order) = sortParams()
+                val page = apiFactory.forOrigin(origin)
+                    .favorites(limit = 60, offset = 0, sort = sort, order = order)
+                    .dataOrThrow()
                 _ui.update { it.copy(loading = false, items = page.items, total = page.total) }
             } catch (e: Exception) {
                 _ui.update { it.copy(loading = false, error = friendlyMessage(e)) }
             }
         }
     }
+
+    /** 图廊的一页 = 24 部作品（服务端按作品分页；同 iOS `LibraryGalleryWall.pageSize`） */
+    fun loadGallery(reset: Boolean) {
+        viewModelScope.launch {
+            val origin = origin ?: run { _ui.update { it.copy(galleryLoading = false, galleryLoadingMore = false) }; return@launch }
+            if (!reset && (_ui.value.galleryLoadingMore || !_ui.value.galleryHasMore)) return@launch
+            val offset = if (reset) 0 else _ui.value.galleryGroups.size
+            _ui.update { it.copy(galleryLoading = reset, galleryLoadingMore = !reset, error = null) }
+            try {
+                val (sort, order) = sortParams()
+                val groups = apiFactory.forOrigin(origin)
+                    .favoritesGallery(limit = GALLERY_PAGE, offset = offset, sort = sort, order = order)
+                    .dataOrThrow()
+                _ui.update {
+                    it.copy(
+                        galleryLoading = false,
+                        galleryLoadingMore = false,
+                        galleryHasMore = groups.size >= GALLERY_PAGE,
+                        galleryGroups = if (reset) groups else it.galleryGroups + groups,
+                    )
+                }
+            } catch (e: Exception) {
+                _ui.update { it.copy(galleryLoading = false, galleryLoadingMore = false, error = friendlyMessage(e)) }
+            }
+        }
+    }
+
+    /** 灯箱里取消收藏：收藏的是**整部作品**，成功后就把它从墙上摘掉（iOS 同口径） */
+    fun unfavorite(mediaItemId: Long) {
+        viewModelScope.launch {
+            val origin = origin ?: return@launch
+            try {
+                apiFactory.forOrigin(origin)
+                    .setPlaybackMarks(PlaybackMarksRequest(mediaItemId = mediaItemId, favorite = false))
+                    .dataOrThrow()
+                _ui.update { s ->
+                    s.copy(
+                        galleryGroups = s.galleryGroups.filterNot { it.mediaItemId == mediaItemId },
+                        items = s.items.filterNot { it.mediaItemId == mediaItemId },
+                        total = (s.total - 1).coerceAtLeast(0),
+                    )
+                }
+            } catch (_: Exception) {
+                // 失败就当没点：那颗心原本是实心的，会弹回来
+            }
+        }
+    }
+
+    private companion object {
+        const val GALLERY_PAGE = 24
+    }
 }
 
 @Composable
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 fun FavoritesScreen(
     onBack: () -> Unit,
     onOpenItem: (Long, Long) -> Unit,
     vm: FavoritesViewModel = hiltViewModel(),
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
+    val refreshing by vm.refreshing.collectAsStateWithLifecycle()
+    var lightbox by remember { mutableStateOf<Pair<io.movieclaw.android.core.model.LibraryGalleryGroupView, Int>?>(null) }
+    var prefsMenu by remember { mutableStateOf(false) }
+    val empty = state.items.isEmpty()
     Column(Modifier.fillMaxSize().background(Bg)) {
-        SubTopBar("我的收藏", onBack)
-        when {
-            state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = TextMuted) }
-            state.error != null -> EmptyHint(state.error!!)
-            state.items.isEmpty() -> EmptyHint("还没有收藏。在影片页点心，或在 Jellyfin 客户端里收藏，都会出现在这里。")
-            else -> {
-                Text(
-                    "${if (state.total > 0) state.total else state.items.size} 部作品 · 与 Jellyfin 客户端里点的心同一份",
-                    fontSize = 15.sp, color = TextMuted,
-                    modifier = Modifier.padding(horizontal = McMetrics.pagePadding, vertical = 8.dp),
+        SubTopBar("我的收藏", onBack) {
+            if (!empty) {
+                // 图床浏览 / 回到海报墙（iOS FavoritesView 顶栏那颗）
+                io.movieclaw.android.core.designsystem.McNavButton(
+                    if (state.galleryMode) Icons.Rounded.GridView else Icons.Rounded.PhotoLibrary,
+                    contentDescription = if (state.galleryMode) "回到海报墙" else "图床浏览",
+                    onClick = { vm.setGalleryMode(!state.galleryMode) },
                 )
-                // iOS：排序档（默认「最近收藏」）+ 图床浏览入口
-                Row(
-                    Modifier.padding(horizontal = McMetrics.pagePadding, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
+                if (state.galleryMode) {
+                    Box {
+                        io.movieclaw.android.core.designsystem.McNavButton(
+                            Icons.Rounded.Tune,
+                            contentDescription = "浏览设置",
+                            onClick = { prefsMenu = true },
+                        )
+                        DropdownMenu(
+                            expanded = prefsMenu,
+                            onDismissRequest = { prefsMenu = false },
+                            shape = RoundedCornerShape(14.dp),
+                            containerColor = Color(0xFF15161A),
+                        ) {
+                            // 按作品分组（同 Web WallPrefItems；照片库没有分组一说，这里只有图床）
+                            DropdownMenuItem(
+                                text = { Text("按作品分组", fontSize = 14.sp, color = TextMuted) },
+                                trailingIcon = {
+                                    Text(if (state.galleryGrouped) "开" else "关", fontSize = 13.sp, color = Accent)
+                                },
+                                onClick = { vm.setGalleryGrouped(!state.galleryGrouped); prefsMenu = false },
+                            )
+                            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                            listOf("compact" to "紧凑", "standard" to "标准", "loose" to "宽松").forEach { (value, label) ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            label, fontSize = 14.sp,
+                                            color = if (state.galleryDensity == value) TextPrimary else TextMuted,
+                                        )
+                                    },
+                                    leadingIcon = if (state.galleryDensity == value) {
+                                        { Icon(Icons.Rounded.Check, contentDescription = null, tint = Accent, modifier = Modifier.size(18.dp)) }
+                                    } else null,
+                                    onClick = { vm.setGalleryDensity(value); prefsMenu = false },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        when {
+            state.loading && empty -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = TextMuted) }
+            state.error != null -> EmptyHint(state.error!!)
+            empty -> EmptyHint("还没有收藏。在影片页点心，或在 Jellyfin 客户端里收藏，都会出现在这里。")
+            state.galleryMode -> {
+                GalleryWall(
+                    state = state,
+                    origin = vm.origin,
+                    refreshing = refreshing,
+                    onRefresh = { vm.refresh() },
+                    onLoadMore = { vm.loadGallery(reset = false) },
+                    onOpenGroup = { group -> onOpenItem(group.libraryId, group.mediaItemId) },
+                    onOpenImage = { group, index -> lightbox = group to index },
+                )
+            }
+            else -> {
+                Column(Modifier.padding(horizontal = McMetrics.pagePadding)) {
                     Text(
-                        "最近收藏 ⌄",
-                        fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(GlassCapsule)
-                            .border(1.dp, LineSoft, RoundedCornerShape(999.dp))
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        "${if (state.total > 0) state.total else state.items.size} 部作品 · 与 Jellyfin 客户端里点的心同一份",
+                        fontSize = 15.sp, color = TextMuted,
+                        modifier = Modifier.padding(vertical = 8.dp),
                     )
-                    Text(
-                        "图床浏览",
-                        fontSize = 13.sp, color = TextMuted,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(Color.White.copy(alpha = 0.05f))
-                            .border(1.dp, LineSoft, RoundedCornerShape(999.dp))
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    // 排序（iOS WallSortMenu 的对应物）：默认「最近收藏」，当前档再点一次翻方向
+                    WallSortMenu(
+                        options = FavoritesSortOptions,
+                        state = state.sort,
+                        onPick = { vm.applySort(it) },
+                        modifier = Modifier.padding(bottom = 10.dp),
                     )
                 }
                 LazyVerticalGrid(
@@ -178,7 +398,11 @@ fun FavoritesScreen(
                     contentPadding = PaddingValues(horizontal = McMetrics.pagePadding, vertical = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().pullToRefresh(
+                        isRefreshing = refreshing,
+                        state = rememberPullToRefreshState(),
+                        onRefresh = { vm.refresh() },
+                    ),
                 ) {
                     items(state.items, key = { it.mediaItemId }) { item ->
                         val libraryName = ""
@@ -205,6 +429,144 @@ fun FavoritesScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    lightbox?.let { (group, index) ->
+        val images = group.images.map {
+            // lightbox 用宽高比排版缩略图条：图廊直接给了 aspect，折成等价的宽高
+            io.movieclaw.android.core.model.MediaImage(
+                previewUrl = it.url,
+                fullUrl = it.url,
+                width = (it.aspect.coerceIn(0.5f, 2f) * 1000).toInt(),
+                height = 1000,
+            )
+        }
+        io.movieclaw.android.core.designsystem.Lightbox(
+            images = images,
+            title = group.title,
+            initialIndex = index,
+            origin = vm.origin,
+            favorite = group.isFavorite,
+            onToggleFavorite = {
+                // 取消收藏 = 整部作品退出收藏墙（与详情页那颗心同一颗）
+                vm.unfavorite(group.mediaItemId)
+                lightbox = null
+            },
+            onOpenDetail = { onOpenItem(group.libraryId, group.mediaItemId); lightbox = null },
+            onDismiss = { lightbox = null },
+        )
+    }
+}
+
+/** 瀑布流密度三档（iOS `GalleryDensity`，同 Web photo-wall.tsx）：列数 = max(最少列数, 按目标列宽算的列数) */
+private data class GalleryDensitySpec(val column: Float, val minColumns: Int, val gap: Float)
+
+private fun galleryDensitySpec(value: String): GalleryDensitySpec = when (value) {
+    "compact" -> GalleryDensitySpec(column = 150f, minColumns = 3, gap = 3f)
+    "loose" -> GalleryDensitySpec(column = 340f, minColumns = 1, gap = 10f)
+    else -> GalleryDensitySpec(column = 230f, minColumns = 2, gap = 6f)
+}
+
+/** 图床浏览：按作品分组的瀑布流（iOS `LibraryGalleryWall`）；关掉分组就是一整面平铺 */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun GalleryWall(
+    state: FavoritesState,
+    origin: String?,
+    refreshing: Boolean,
+    onRefresh: () -> Unit,
+    onLoadMore: () -> Unit,
+    onOpenGroup: (io.movieclaw.android.core.model.LibraryGalleryGroupView) -> Unit,
+    onOpenImage: (io.movieclaw.android.core.model.LibraryGalleryGroupView, Int) -> Unit,
+) {
+    val spec = galleryDensitySpec(state.galleryDensity)
+    val density = androidx.compose.ui.platform.LocalDensity.current.density
+    val gridState = rememberLazyStaggeredGridState()
+    // 滑近底部自动要下一页（iOS 在墙面里同样按作品分页续拉）
+    LaunchedEffect(gridState, state.galleryGroups.size, state.galleryHasMore) {
+        snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+            .collect { last ->
+                val total = gridState.layoutInfo.totalItemsCount
+                if (state.galleryHasMore && total > 0 && last >= total - 6) onLoadMore()
+            }
+    }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val widthDp = maxWidth.value
+        val columns = maxOf(
+            spec.minColumns,
+            ((widthDp + spec.gap) / (spec.column + spec.gap)).toInt(),
+        )
+        LazyVerticalStaggeredGrid(
+            columns = StaggeredGridCells.Fixed(columns),
+            contentPadding = PaddingValues(horizontal = McMetrics.pagePadding, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(spec.gap.dp),
+            verticalItemSpacing = spec.gap.dp,
+            modifier = Modifier.fillMaxSize().pullToRefresh(
+                isRefreshing = refreshing,
+                state = rememberPullToRefreshState(),
+                onRefresh = onRefresh,
+            ),
+        ) {
+            state.galleryGroups.forEach { group ->
+                if (state.galleryGrouped) {
+                    // 段标题通栏：作品名 + 年份（可点进详情），iOS `LibraryGalleryWall` 的分组头
+                    item(key = "h-${group.mediaItemId}", span = StaggeredGridItemSpan.FullLine) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(top = 12.dp, bottom = 4.dp)
+                                .clickable { onOpenGroup(group) },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(group.title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            group.year?.let { year ->
+                                Spacer(Modifier.width(6.dp))
+                                Text("$year", fontSize = 13.sp, color = TextMuted)
+                            }
+                            Spacer(Modifier.weight(1f))
+                            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null, tint = TextFaint, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+                itemsIndexed(group.images) { index, image ->
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(image.aspect.takeIf { it > 0f }?.coerceIn(0.5f, 2f) ?: 1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF101219))
+                            .clickable { onOpenImage(group, index) },
+                    ) {
+                        RemoteImage(
+                            url = image.url,
+                            origin = origin,
+                            // 瓦片按实际显示宽取图（列宽 × 屏幕倍率），缩略图条与灯箱共用同一地址
+                            widthHint = ImageWidth.pixels(
+                                (widthDp - McMetrics.pagePadding.value * 2 - spec.gap * (columns - 1)) / columns,
+                                density,
+                            ),
+                            contentDescription = image.label,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+            }
+            if (state.galleryLoadingMore || state.galleryLoading) {
+                item(key = "loading-more", span = StaggeredGridItemSpan.FullLine) {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 18.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = TextMuted, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    }
+                }
+            }
+            item(key = "hint", span = StaggeredGridItemSpan.FullLine) {
+                Text(
+                    "${if (state.total > 0) state.total else state.galleryGroups.size} 部作品的图 · 点心取消收藏",
+                    fontSize = 12.sp, color = TextFaint,
+                    modifier = Modifier.padding(vertical = 10.dp),
+                )
             }
         }
     }
@@ -528,10 +890,15 @@ internal fun CollectionCoverStack(covers: List<CollectionCover>, origin: String?
 }
 
 @Composable
-internal fun SubTopBar(title: String, onBack: () -> Unit) {
+internal fun SubTopBar(
+    title: String,
+    onBack: () -> Unit,
+    actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
+) {
     io.movieclaw.android.core.designsystem.McTopBar(
         variant = io.movieclaw.android.core.designsystem.McTopBarVariant.Sub,
         title = title,
+        actions = actions,
         onBack = onBack,
     )
 }
@@ -751,7 +1118,8 @@ class LibraryManageViewModel @Inject constructor(
 fun LibraryManageScreen(
     onBack: () -> Unit,
     onOpenLibrary: (Long, String) -> Unit,
-    onOpenWebManage: (String) -> Unit = {},
+    /** 创建（"create"）/ 编辑（"edit:<id>"）→ 原生媒体库表单 */
+    onOpenForm: (Long?) -> Unit = {},
     vm: LibraryManageViewModel = hiltViewModel(),
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
@@ -768,28 +1136,26 @@ fun LibraryManageScreen(
     }
 
     Column(Modifier.fillMaxSize().background(Bg)) {
-        SubTopBar("媒体库管理", onBack)
+        // 标题只在顶栏（与「我的收藏 / 全部合集」同一规矩，页内不再重复一遍）；
+        // 「＋ 创建媒体库」放到顶栏右侧（iOS 把它摆在大标题那一行的右边）
+        SubTopBar("媒体库管理", onBack) {
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(Brush.linearGradient(listOf(Color(0xFFF6F8FC), Color(0xFFCCD6E6))))
+                    .clickable { onOpenForm(null) }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+            ) {
+                Text("＋ 创建媒体库", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF141821))
+            }
+        }
         LazyColumn(
             contentPadding = PaddingValues(bottom = 24.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
-            // ── 页头：大标题 + 创建（原生没有建库表单，指到网页端那一步） + 活的摘要 ──
+            // ── 页头：活的摘要（规模事实 + 在跑任务 / 待处理两枚胶囊）──
             item(key = "manage-head") {
                 Column(Modifier.padding(horizontal = McMetrics.pagePadding)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("媒体库管理", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                        Spacer(Modifier.weight(1f))
-                        Box(
-                            Modifier
-                                .clip(RoundedCornerShape(999.dp))
-                                .background(Brush.linearGradient(listOf(Color(0xFFF6F8FC), Color(0xFFCCD6E6))))
-                                .clickable { onOpenWebManage("create") }
-                                .padding(horizontal = 12.dp, vertical = 7.dp),
-                        ) {
-                            Text("＋ 创建媒体库", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF141821))
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -888,7 +1254,7 @@ fun LibraryManageScreen(
                                         Modifier
                                             .clip(RoundedCornerShape(999.dp))
                                             .background(Brush.linearGradient(listOf(Color(0xFFF6F8FC), Color(0xFFCCD6E6))))
-                                            .clickable { onOpenWebManage("create") }
+                                            .clickable { onOpenForm(null) }
                                             .padding(horizontal = 18.dp, vertical = 9.dp),
                                     ) { Text("创建第一个媒体库", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF141821)) }
                                 }
@@ -905,7 +1271,7 @@ fun LibraryManageScreen(
                             onMetadata = { vm.toggleMetadataRefresh(lib) },
                             onOrganize = { vm.organize(lib) },
                             onChapters = { chaptersTarget = lib },
-                            onEdit = { onOpenWebManage("edit:${lib.id}") },
+                            onEdit = { onOpenForm(lib.id) },
                             onSetDefault = { vm.setDefault(lib) },
                             onToggleHome = { vm.toggleHome(lib) },
                             onReorder = { reordering = true },

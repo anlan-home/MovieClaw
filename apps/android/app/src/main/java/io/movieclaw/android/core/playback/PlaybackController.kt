@@ -1,5 +1,7 @@
 package io.movieclaw.android.core.playback
 
+import io.movieclaw.android.core.AppScopes
+
 import android.content.Context
 import io.movieclaw.android.core.api.McApi
 import androidx.media3.common.MimeTypes
@@ -62,7 +64,7 @@ class PlaybackController(
 
     private fun endpointSessionApi(): McApi = apiRef ?: error("未注入 McApi")
     private val appContext: Context = context.applicationContext
-    private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val mainScope = AppScopes.main("PlaybackController")
     private val engines = mutableMapOf<EngineKind, PlayerEngine>()
 
     // 默认 **Exo**：硬解、省电；只有 Exo 解不了的容器（ISO/蓝光原盘等）
@@ -729,7 +731,12 @@ class PlaybackController(
                 delay(1_000)
                 feedQualityWatchdog()
                 attempt?.let { active ->
-                    if (active.firstFrameMs == null && positionMs() > 0) qoe?.noteFirstFrame(active)
+                    if (active.firstFrameMs == null && positionMs() > 0) {
+                        qoe?.noteFirstFrame(active)
+                        // 首帧到了：把「点击 → 决策+会话 → 引擎 → 首帧」整行打出来（起播分段，iOS 同款）
+                        PlaybackStartupTrace.mark("首帧")
+                        PlaybackStartupTrace.finish()
+                    }
                     qoe?.noteBuffering(active, engine().isBuffering())
                     qoe?.noteProgress(active, filePositionMs(), fileDurationMs())
                 }

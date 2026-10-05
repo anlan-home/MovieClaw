@@ -1,5 +1,7 @@
 package io.movieclaw.android.feature.search
 
+import io.movieclaw.android.core.AppScopes
+
 import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -31,7 +33,7 @@ class SearchModeMemory @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     private val key = stringPreferencesKey("last_mode")
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = AppScopes.io("SearchModeMemory")
 
     private val _mode = MutableStateFlow<SearchMode?>(null)
 

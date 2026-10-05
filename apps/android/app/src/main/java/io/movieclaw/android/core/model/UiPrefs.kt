@@ -63,3 +63,19 @@ object HomePrefsBus {
         _version.value += 1
     }
 }
+
+/**
+ * 「库里的标记变了」的信号（收藏 / 已看）。
+ *
+ * 详情页、刷片页打完标记 bump 一下，媒体库首页与收藏墙收到就重拉——否则首页那份是进页时
+ * 拉的快照，「点了收藏回到首页看不到新封面，进「查看全部」却有」（实机反馈）。
+ * iOS 那边靠首页 `onAppear` + 定时轮询达到同样效果（`LibraryHomeView.polling`），
+ * 这里用信号更快也更省。
+ */
+object LibraryMarksBus {
+    private val _version = kotlinx.coroutines.flow.MutableStateFlow(0)
+    val version: kotlinx.coroutines.flow.StateFlow<Int> = _version
+    fun bump() {
+        _version.value += 1
+    }
+}

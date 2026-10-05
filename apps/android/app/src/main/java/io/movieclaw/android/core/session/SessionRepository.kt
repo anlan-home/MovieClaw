@@ -1,5 +1,7 @@
 package io.movieclaw.android.core.session
 
+import io.movieclaw.android.core.AppScopes
+
 import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -74,8 +76,9 @@ class SessionRepository @Inject constructor(
     private val vault: TokenVault,
     private val apiFactory: ApiFactory,
     @GeneralChannel private val rawClient: OkHttpClient,
+    private val cacheCleaner: SessionCacheCleaner,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = AppScopes.io("SessionRepository")
 
     private val _ui = MutableStateFlow(SessionUi())
     val ui: StateFlow<SessionUi> = _ui.asStateFlow()
@@ -193,6 +196,8 @@ class SessionRepository @Inject constructor(
         }.filter { it.accounts.isNotEmpty() }
         _servers.value = servers
         persistServers(servers)
+        // 展示/播放缓存跨账号共用：移除账号时一并清掉，免得残留的图与字节在换账号后还命中（iOS 退出即删快照）
+        cacheCleaner.clear()
     }
 
     /** 退出全部账号(仅清本机;服务端凭证需逐台在设备管理里撤销) */
@@ -207,6 +212,7 @@ class SessionRepository @Inject constructor(
         _servers.value = emptyList()
         persistServers(emptyList())
         vault.deactivateActive()
+        cacheCleaner.clear()
         _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN)
     }
 
@@ -243,6 +249,7 @@ class SessionRepository @Inject constructor(
             clearActiveFlag(origin)
         }
         vault.deactivateActive()
+        cacheCleaner.clear()
         _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN, presetUsername = preset)
     }
 

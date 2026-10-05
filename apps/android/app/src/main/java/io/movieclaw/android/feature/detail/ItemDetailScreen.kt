@@ -123,6 +123,7 @@ class ItemDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val repository: SessionRepository,
     private val apiFactory: ApiFactory,
+    private val preconnect: io.movieclaw.android.core.playback.PlaybackPreconnect,
 ) : ViewModel() {
 
     val libraryId: Long = savedStateHandle.get<String>("libraryId")?.toLongOrNull() ?: -1L
@@ -139,9 +140,28 @@ class ItemDetailViewModel @Inject constructor(
     private val _selectedSeason = MutableStateFlow<Int?>(null)
     val selectedSeason = _selectedSeason.asStateFlow()
 
+    /**
+     * 选中的单元 —— 季 + 集（iOS `LibraryItemDetailView.SelectedEpisode` 的对应物）。
+     *
+     * iOS 上它是**详情页的一等状态**：播放键（`play` 带 `season`/`episode`）、续播点
+     * （`playbackResume(seasonNumber:episodeNumber:)`，键就是「季/集」）、已看（`playUnit`）、
+     * 版本/文件（`selectedEpisode.files`）全都以它为准。安卓此前只有「季」这一个状态，
+     * 播放键又自己去扫「跨季第一个没看的在库集」，于是**选了季也照旧从第一季起播**。
+     */
+    data class SelectedUnit(val season: Int, val episode: Int)
+
+    private val _selectedEpisode = MutableStateFlow<SelectedUnit?>(null)
+    val selectedEpisode = _selectedEpisode.asStateFlow()
+
+    /** 初始选中（= 服务端续播那一集，iOS 由路由 `?season=&episode=` 带进来，这里由详情自己算） */
+    private var seedUnit: SelectedUnit? = null
+    private var episodesBySeason: Map<Int, List<EpisodeView>> = emptyMap()
+
     val origin: String? get() = repository.ui.value.origin
 
     init {
+        // 详情页是播放入口：进页就把起播要用的两条连接连好（iOS `LibraryItemDetailView.task` 同款）
+        preconnect.warm()
         load()
     }
 
@@ -164,15 +184,48 @@ class ItemDetailViewModel @Inject constructor(
                     emptyMap()
                 }
                 _state.value = Loadable.Ready(Detail(detail, episodes))
-                _selectedSeason.value = detail.seasons.firstOrNull()
+                episodesBySeason = episodes
+                // 初始选中：服务端续播那一个单元（跨季第一个没看的在库集）。
+                // 季的回退链照 iOS `SeasonEpisodesSection.currentSeason`：
+                // 续播那季 → 第一个在库的季 → 第一个季
+                val seed = pickResumeEpisode(detail, episodes).takeIf { it.second > 0 }
+                    ?: detail.seasons.firstOrNull()?.let { season ->
+                        episodes[season]?.firstOrNull()?.let { Triple(season, it.episodeNumber, it.name) }
+                    }
+                seedUnit = seed?.let { SelectedUnit(it.first, it.second) }
+                val ownedSeasons = detail.files.map { it.seasonNumber }.toSet()
+                _selectedSeason.value = seed?.first?.takeIf { episodes.containsKey(it) }
+                    ?: detail.seasons.firstOrNull { it in ownedSeasons }
+                    ?: detail.seasons.firstOrNull()
+                _selectedEpisode.value = seedUnit
+                    ?: _selectedSeason.value?.let { s ->
+                        episodes[s]?.firstOrNull()?.let { SelectedUnit(s, it.episodeNumber) }
+                    }
             } catch (e: Exception) {
                 _state.value = Loadable.Failed(friendlyMessage(e))
             }
         }
     }
 
+    /**
+     * 换季：**连带把选中集切到这一季**（iOS `SeasonEpisodesSection.load(reset:)` 同口径）——
+     * 优先「初始续播那一集」（若正好是这一季且在库）、否则这一季第一个没看的在库集、
+     * 再次第一个在库集、最后第一集。只换季不换集的话，播放键会拿「第 3 季 + 第 1 季的那一集」
+     * 去起播，服务端找不到就退回第一季——现象与用户报的完全一致。
+     */
     fun selectSeason(season: Int) {
         _selectedSeason.value = season
+        val list = episodesBySeason[season].orEmpty()
+        val picked = seedUnit?.takeIf { it.season == season && list.any { e -> e.episodeNumber == it.episode && e.owned } }?.episode
+            ?: list.firstOrNull { !it.played && it.owned }?.episodeNumber
+            ?: list.firstOrNull { it.owned }?.episodeNumber
+            ?: list.firstOrNull()?.episodeNumber
+        if (picked != null) _selectedEpisode.value = SelectedUnit(season, picked)
+    }
+
+    /** 点某一集 = 选中它（播放键、续播点、已看、版本都跟着走，iOS 同款） */
+    fun selectEpisode(season: Int, episode: Int) {
+        _selectedEpisode.value = SelectedUnit(season, episode)
     }
 
     /* ---------- 已看 / 收藏（与 Jellyfin 同一个服务，网页同款乐观更新） ---------- */
@@ -225,7 +278,11 @@ class ItemDetailViewModel @Inject constructor(
                 apiFactory.forOrigin(origin)
                     .setPlaybackMarks(PlaybackMarksRequest(mediaItemId = mediaItemId, favorite = next))
                     .dataOrThrow()
-            }.onSuccess { _marks.value = it }
+            }.onSuccess {
+                _marks.value = it
+                // 收藏变了：首页「我的收藏」行与收藏墙立刻重拉（否则那两处还是进页时的快照）
+                io.movieclaw.android.core.model.LibraryMarksBus.bump()
+            }
                 .onFailure {
                     _marks.update { s -> s.copy(isFavorite = !next) }
                     _notice.value = McNotice(friendlyMessage(it), FeedbackTone.Error)
@@ -259,6 +316,8 @@ class ItemDetailViewModel @Inject constructor(
                         episodeNumber = episodeNumber,
                     ).dataOrThrow()
                 }.onSuccess { fresh -> _marks.value = fresh }
+                // 「已看」会影响首页的「接下来继续」与各行的进度，一起让首页重拉
+                io.movieclaw.android.core.model.LibraryMarksBus.bump()
             }.onFailure {
                 _marks.update { s -> s.copy(played = !next) }
                 _notice.value = McNotice(friendlyMessage(it), FeedbackTone.Error)
@@ -273,10 +332,14 @@ fun ItemDetailScreen(
     itemId: Long,
     onBack: () -> Unit,
     onPlay: (PlayTarget) -> Unit,
+    /** 演职员点进「库内影人页」（iOS `LibraryItemDetailView` 的 `AppRoute.person` 同款） */
+    onOpenPerson: (Int) -> Unit = {},
     vm: ItemDetailViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val selectedSeason by vm.selectedSeason.collectAsStateWithLifecycle()
+    /** 选中的单元（季 + 集）：播放键、续播点、已看、版本都以它为准（iOS SelectedEpisode） */
+    val selectedUnit by vm.selectedEpisode.collectAsStateWithLifecycle()
     val marks by vm.marks.collectAsStateWithLifecycle()
     val resume by vm.resume.collectAsStateWithLifecycle()
     val origin = vm.origin
@@ -316,6 +379,7 @@ fun ItemDetailScreen(
                 episodes = s.value.episodes,
                 marks = marks,
                 resume = resume,
+                unit = selectedUnit,
                 onResumeUnitChanged = { season, episode -> vm.loadResume(s.value.item.mediaItemId, season, episode) },
                 onToggleFavorite = { vm.toggleFavorite(s.value.item.mediaItemId) },
                 onTogglePlayed = { season, episode ->
@@ -332,6 +396,9 @@ fun ItemDetailScreen(
                         selected = selectedSeason,
                         episodes = s.value.episodes,
                         onSelect = vm::selectSeason,
+                        // 分集横滚的选中与滚动定位跟着「选中单元」走（受控，不再各存一份）
+                        selectedEpisode = selectedUnit?.takeIf { it.season == selectedSeason }?.episode,
+                        onPickEpisode = { ep -> vm.selectEpisode(selectedSeason ?: 0, ep) },
                         origin = origin,
                         onPlay = onPlay,
                         libraryId = libraryId,
@@ -339,7 +406,7 @@ fun ItemDetailScreen(
                         itemTitle = s.value.item.title,
                     )
                 }
-                CastSection(detail = s.value.item, origin = origin)
+                CastSection(detail = s.value.item, origin = origin, onOpenPerson = onOpenPerson)
                 if (s.value.item.kind != "tv" || s.value.episodes.isEmpty()) {
                     FilesSection(detail = s.value.item)
                 }
@@ -369,20 +436,30 @@ private fun Hero(
     marks: PlaybackMarks,
     /** 续播点与记忆轨（`/playback/resume`）；null = 还没问到，按键先按「播放」渲染 */
     resume: PlaybackStateView?,
+    /** 选中的单元（季 + 集）：播放键、续播点、已看、版本都跟着它（iOS SelectedEpisode） */
+    unit: ItemDetailViewModel.SelectedUnit?,
     onResumeUnitChanged: (Int, Int) -> Unit,
     onToggleFavorite: () -> Unit,
     onTogglePlayed: (Int?, Int?) -> Unit,
     /** 正文其余部分（分集 / 演职员 / 文件）：与简介同用那一块上提 124 的列 */
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val file = detail.files.firstOrNull()
+    // 版本/文件、音轨源、discSource 都跟着**选中的那一集**走（iOS `selectedEpisode.files`）：
+    // 原来一律拿 `detail.files.firstOrNull()`（第 1 季第 1 个文件），选了季也对不上
+    val unitFiles = remember(detail.mediaItemId, unit, episodes) {
+        val ids = unit?.let { u -> episodes[u.season]?.firstOrNull { it.episodeNumber == u.episode }?.fileIds }
+        detail.files.filter { f -> ids?.contains(f.id) == true }.ifEmpty { detail.files }
+    }
+    val file = unitFiles.firstOrNull()
     var expanded by remember { mutableStateOf(false) }
-    // 「标为已看」跟着播放键那一个单元走：电影是整条，剧集是续播那一集
-    val resumeUnit = remember(detail.mediaItemId, episodes) { pickResumeEpisode(detail, episodes) }
+    // 「标为已看」与续播点都跟着选中的单元走：电影是整条（0/0），剧集是选中的那一集
+    val playUnit = if (detail.kind == "tv") unit else null
+    val resumeSeason = playUnit?.season ?: 0
+    val resumeEpisode = playUnit?.episode ?: 0
 
     // 续播点与记忆轨：换单元要重新问（剧集从第 1 集切到第 3 集，续播点跟着变）
-    LaunchedEffect(detail.mediaItemId, resumeUnit.first, resumeUnit.second) {
-        onResumeUnitChanged(resumeUnit.first, resumeUnit.second)
+    LaunchedEffect(detail.mediaItemId, resumeSeason, resumeEpisode) {
+        onResumeUnitChanged(resumeSeason, resumeEpisode)
     }
 
     /* ---------- 音轨 / 字幕的选择 ---------- */
@@ -409,13 +486,18 @@ private fun Hero(
         else -> subtitleOptions.firstOrNull { it.ref == effectiveSubtitle }?.label ?: "${subtitleOptions.size} 条字幕"
     }
 
-    // 播放键三态（iOS `LibraryItemDetailView`）：重新播放 / 继续 mm:ss / 播放
+    // 播放键三态（iOS `LibraryItemDetailView`，v0.31 起同一口径）：继续 / 重新播放 / 播放。
+    // **有续播点就续播**：看完（played）后重看到一半，服务端也记着续播点——
+    // 旧口径 `!played && position>0` 会把这种重看判成「重新播放」，这次的进度就丢了
     val resumeMs = resume?.positionMs ?: 0L
     val finished = resume?.played == true && resumeMs <= 0L
-    val resumable = !finished && resumeMs > 0L
+    val resumable = resumeMs > 0L
+    // 剧集写明续的是哪一集（iOS 42c1751d：只写「继续 46:56」看不出续的第几集）
     val playLabel = when {
+        resumable -> if (detail.kind == "tv") {
+            "继续 第 ${resumeSeason} 季第 ${resumeEpisode} 集 · ${McFormat.clock(resumeMs)}"
+        } else "继续 ${McFormat.clock(resumeMs)}"
         finished -> "重新播放"
-        resumable -> "继续 ${McFormat.clock(resumeMs)}"
         else -> "播放"
     }
     val remainingMs = resume?.durationMs?.takeIf { it > 0 }?.minus(resumeMs)?.takeIf { it > 0 }
@@ -554,7 +636,10 @@ private fun Hero(
             Spacer(Modifier.height(18.dp))
             Button(
                 onClick = {
-                    val (season, episode, subtitle) = pickResumeEpisode(detail, episodes)
+                    // 起播的就是**选中的那一季那一集**（iOS `play(start:)` 带 selectedEpisode 的
+                    // season/episode）；只有还没选中任何单元时才回退到「跨季第一个没看的」（种子）
+                    val (season, episode, subtitle) = detailEpisodeOf(detail, episodes, unit)
+                        ?: pickResumeEpisode(detail, episodes)
                     android.util.Log.i(
                         "McPlayer",
                         "详情页起播 音轨=$effectiveAudio 字幕=$effectiveSubtitle" +
@@ -600,7 +685,7 @@ private fun Hero(
                     marks.isFavorite,
                 ) { onToggleFavorite() }
                 GlassPill("标为已看", Icons.Rounded.CheckCircle, marks.played) {
-                    onTogglePlayed(resumeUnit.first.takeIf { it > 0 }, resumeUnit.second.takeIf { it > 0 })
+                    onTogglePlayed(resumeSeason.takeIf { it > 0 }, resumeEpisode.takeIf { it > 0 })
                 }
             }
 
@@ -832,6 +917,23 @@ private fun RowScope.GlassPill(label: String, icon: ImageVector, active: Boolean
 }
 
 /** 剧集:第一个未看完且在位的分集;电影返回哨兵 (0,0) */
+/**
+ * 选中单元 →（季, 集, 副标题）。没选中（或电影）返回 null，调用方再回退到种子。
+ */
+private fun detailEpisodeOf(
+    detail: LibraryItemDetailView,
+    episodes: Map<Int, List<EpisodeView>>,
+    unit: ItemDetailViewModel.SelectedUnit?,
+): Triple<Int, Int, String?>? {
+    if (detail.kind != "tv" || unit == null) return null
+    val episode = episodes[unit.season]?.firstOrNull { it.episodeNumber == unit.episode } ?: return null
+    return Triple(
+        unit.season,
+        unit.episode,
+        "第 ${unit.episode} 集" + (episode.name?.let { " · $it" } ?: ""),
+    )
+}
+
 private fun pickResumeEpisode(
     detail: LibraryItemDetailView,
     episodes: Map<Int, List<EpisodeView>>,
@@ -854,27 +956,32 @@ private fun pickResumeEpisode(
  * `<thumb>`；没有照片就渲染姓名首字。
  */
 @Composable
-private fun CastSection(detail: LibraryItemDetailView, origin: String?) {
+private fun CastSection(detail: LibraryItemDetailView, origin: String?, onOpenPerson: (Int) -> Unit) {
     val meta = detail.localMeta ?: return
+    // 一格 = 姓名 / 身份 / 头像 / 影人 id（id 非空才可点，进库内影人页——iOS 同款）
+    data class Person(val name: String, val role: String, val avatar: String?, val personId: Int?)
     val people = buildList {
         // 导演：库内人物关系（带头像）优先；老条目没有关系表就退回 NFO 里的姓名占位
         if (meta.directorCredits.isNotEmpty()) {
             meta.directorCredits.forEach { director ->
-                if (director.name.isNotBlank()) add(Triple(director.name, "导演", director.thumbUrl))
+                if (director.name.isNotBlank()) {
+                    add(Person(director.name, "导演", director.thumbUrl, director.tmdbPersonId))
+                }
             }
         } else {
             meta.directors.forEach { name ->
-                if (name.isNotBlank()) add(Triple(name, "导演", null as String?))
+                if (name.isNotBlank()) add(Person(name, "导演", null, null))
             }
         }
         meta.actors.forEach { actor ->
             actor.name?.takeIf { it.isNotBlank() }?.let { name ->
                 add(
-                    Triple(
+                    Person(
                         name,
                         actor.role?.takeIf { it.isNotBlank() }?.let { "饰 $it" } ?: "演员",
                         // 服务端给的是 `thumb_url`（TMDB 图床的绝对地址）
                         actor.thumbUrl,
+                        actor.tmdbPersonId,
                     ),
                 )
             }
@@ -894,12 +1001,17 @@ private fun CastSection(detail: LibraryItemDetailView, origin: String?) {
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            items(people, key = { "${it.first}-${it.second}" }) { (name, role, avatar) ->
-                Column(Modifier.width(104.dp)) {
+            items(people, key = { "${it.name}-${it.role}" }) { person ->
+                Column(
+                    Modifier
+                        .width(104.dp)
+                        // 有 TMDB 影人 id 才可点（进库内影人页）；老条目只有姓名时保持静态（iOS 同款）
+                        .clickable(enabled = person.personId != null) { person.personId?.let(onOpenPerson) },
+                ) {
                     val initials: @Composable () -> Unit = {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text(
-                                name.trim().take(1),
+                                io.movieclaw.android.core.designsystem.ImageInitials.of(person.name),
                                 fontSize = 26.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = Color.White.copy(alpha = 0.3f),
@@ -914,23 +1026,23 @@ private fun CastSection(detail: LibraryItemDetailView, origin: String?) {
                             .background(Color.White.copy(alpha = 0.05f)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        if (avatar.isNullOrBlank()) {
+                        if (person.avatar.isNullOrBlank()) {
                             initials()
                         } else {
                             // 头像多是 TMDB 图床的绝对地址；**加载失败也回落首字**，
                             // 不能留一块空黑（网页同款兜底）
                             RemoteImage(
-                                avatar,
+                                person.avatar,
                                 origin,
-                                contentDescription = name,
+                                contentDescription = person.name,
                                 modifier = Modifier.fillMaxSize(),
                                 fallback = initials,
                             )
                         }
                     }
                     Spacer(Modifier.height(6.dp))
-                    Text(name, style = McType.subSemibold, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(role, style = McType.micro, color = TextFaint, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(person.name, style = McType.subSemibold, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(person.role, style = McType.micro, color = TextFaint, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
@@ -953,6 +1065,9 @@ private fun SeasonSection(
     selected: Int?,
     episodes: Map<Int, List<EpisodeView>>,
     onSelect: (Int) -> Unit,
+    /** 选中的集号（受控：来自 VM 的选中单元，不再各存一份） */
+    selectedEpisode: Int?,
+    onPickEpisode: (Int) -> Unit,
     origin: String?,
     onPlay: (PlayTarget) -> Unit,
     libraryId: Long,
@@ -970,49 +1085,57 @@ private fun SeasonSection(
         ) {
             Text("分集", style = McType.title3)
             Spacer(Modifier.width(10.dp))
+            // 季选择器（iOS `SeasonEpisodesSection` 同款）：多季才给胶囊菜单（每项标「未入库」），
+            // 只有一季时就是一行小字——单选的下拉菜单没有意义；缺省落在当前季，不再有「选择季」占位
             var seasonMenu by remember { mutableStateOf(false) }
-            Box {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(GlassCapsule)
-                        .border(1.dp, LineSoft, RoundedCornerShape(999.dp))
-                        .clickable { seasonMenu = true }
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                ) {
-                    Text(
-                        selected?.let(seasonLabel) ?: "选择季",
-                        style = McType.subSemibold,
-                        color = TextPrimary,
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Icon(
-                        Icons.Rounded.UnfoldMore,
-                        contentDescription = null,
-                        tint = TextMuted,
-                        modifier = Modifier.size(15.dp),
-                    )
-                }
-                androidx.compose.material3.DropdownMenu(
-                    expanded = seasonMenu,
-                    onDismissRequest = { seasonMenu = false },
-                    containerColor = Color(0xFF1E212B),
-                    modifier = Modifier.heightIn(max = 340.dp),
-                ) {
-                    seasons.sorted().forEach { season ->
-                        androidx.compose.material3.DropdownMenuItem(
-                            text = {
-                                Text(
-                                    seasonLabel(season),
-                                    style = McType.sub,
-                                    color = if (season == selected) Accent else TextPrimary,
-                                )
-                            },
-                            onClick = { seasonMenu = false; onSelect(season) },
+            val activeSeason = selected ?: seasons.firstOrNull()
+            if (seasons.size > 1) {
+                Box {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(GlassCapsule)
+                            .border(1.dp, LineSoft, RoundedCornerShape(999.dp))
+                            .clickable { seasonMenu = true }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Text(
+                            activeSeason?.let(seasonLabel) ?: "第 1 季",
+                            style = McType.subSemibold,
+                            color = TextPrimary,
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            Icons.Rounded.UnfoldMore,
+                            contentDescription = "选择季",
+                            tint = TextMuted,
+                            modifier = Modifier.size(15.dp),
                         )
                     }
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = seasonMenu,
+                        onDismissRequest = { seasonMenu = false },
+                        containerColor = Color(0xFF1E212B),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.heightIn(max = 340.dp),
+                    ) {
+                        seasons.sorted().forEach { season ->
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        seasonLabel(season),
+                                        style = McType.sub,
+                                        color = if (season == activeSeason) Accent else TextPrimary,
+                                    )
+                                },
+                                onClick = { seasonMenu = false; onSelect(season) },
+                            )
+                        }
+                    }
                 }
+            } else {
+                Text(activeSeason?.let(seasonLabel) ?: "", style = McType.sub, color = TextMuted)
             }
             // 「在库 X / Y 集」（网页/iOS 都有这一行）：一眼看出这一季收了多少
             val seasonEpisodes = episodes[selected].orEmpty()
@@ -1026,13 +1149,10 @@ private fun SeasonSection(
             }
         }
 
-        // 分集横滚卡：一季一屏，点一集只切换选中（网页行为——播放是详情页那颗播放键）
+        // 分集横滚卡：一季一屏，点一集 = 选中它（播放是详情页那颗播放键，选中的集就是它要播的）
         val list = episodes[selected] ?: emptyList()
-        var picked by remember(selected) {
-            mutableStateOf(list.firstOrNull { it.progressPercent != null && it.progressPercent > 0 && !it.played }
-                ?.episodeNumber ?: list.firstOrNull()?.episodeNumber)
-        }
-        Spacer(Modifier.height(8.dp))
+        val picked = selectedEpisode ?: list.firstOrNull()?.episodeNumber
+        Spacer(Modifier.height(12.dp))
         val strip = rememberLazyListState()
         // 进页/换季时把选中那一集滚到可见处（续播进来的那一集常常在列表深处，
         // 不滚的话得手动滑几十屏；网页/iOS 同样会滚到当前集）
@@ -1051,7 +1171,7 @@ private fun SeasonSection(
                     episode = episode,
                     selected = episode.episodeNumber == picked,
                     origin = origin,
-                    onSelect = { picked = episode.episodeNumber },
+                    onSelect = { onPickEpisode(episode.episodeNumber) },
                 )
             }
         }

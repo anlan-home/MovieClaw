@@ -2,8 +2,10 @@ package io.movieclaw.android.core.api
 
 import io.movieclaw.android.core.model.AgentAttachment
 import io.movieclaw.android.core.model.AgentSessionStart
+import io.movieclaw.android.core.model.FsBrowseView
 import io.movieclaw.android.core.model.HandoffPrompt
 import io.movieclaw.android.core.model.HandoffRequest
+import io.movieclaw.android.core.model.LibraryGalleryGroupView
 import io.movieclaw.android.core.model.ActivePlaybackSession
 import io.movieclaw.android.core.model.BootstrapStatus
 import io.movieclaw.android.core.model.CastMember
@@ -131,6 +133,12 @@ interface McApi {
     @GET("auth/devices")
     suspend fun devices(@Query("all") all: Boolean? = null): McEnvelope<List<LoginDevice>>
 
+    /** 清理长期没用的设备：dry_run 只列出（确认框用），真跑就是注销。服务端永远不清当前这台和连着的转码器 */
+    @POST("auth/devices/cleanup")
+    suspend fun cleanupDevices(
+        @Body body: io.movieclaw.android.core.model.DeviceCleanupRequest,
+    ): McEnvelope<io.movieclaw.android.core.model.DeviceCleanupView>
+
     @PATCH("auth/devices/{deviceId}")
     suspend fun renameDevice(
         @Path("deviceId") deviceId: String,
@@ -169,6 +177,10 @@ interface McApi {
 
     @GET("system/logs/{day}")
     suspend fun logContent(@Path("day") day: String): McEnvelope<LogContent>
+
+    /** 列出服务器上某个目录下有哪些子目录（只读；服务端 `fs.browse`） */
+    @GET("fs/browse")
+    suspend fun fsBrowse(@Query("path") path: String? = null): McEnvelope<FsBrowseView>
 
     @GET("network/config")
     suspend fun networkConfig(): McEnvelope<NetworkConfig>
@@ -225,6 +237,24 @@ interface McApi {
     @PUT("playback/policy")
     suspend fun updatePlaybackPolicy(@Body body: PlaybackPolicyPatchFull): McEnvelope<PlaybackPolicy>
 
+    /** 批准设备登录：按配对码取一条待批准的接入请求（批准页数据源） */
+    @GET("auth/devices/requests/{userCode}")
+    suspend fun deviceRequest(
+        @Path("userCode", encoded = true) userCode: String,
+    ): McEnvelope<io.movieclaw.android.core.model.DeviceRequestView>
+
+    /** 批准接入（此刻才签发令牌，令牌归属批准者） */
+    @POST("auth/devices/requests/{userCode}/approve")
+    suspend fun approveDeviceRequest(
+        @Path("userCode", encoded = true) userCode: String,
+    ): McEnvelope<JsonElement>
+
+    /** 拒绝接入 */
+    @POST("auth/devices/requests/{userCode}/deny")
+    suspend fun denyDeviceRequest(
+        @Path("userCode", encoded = true) userCode: String,
+    ): McEnvelope<JsonElement>
+
     @DELETE("auth/devices/current")
     suspend fun logoutCurrentDevice(): McEnvelope<JsonElement>
 
@@ -234,6 +264,19 @@ interface McApi {
         @Path("libraryId") libraryId: Long,
         @Query("v") version: String? = null,
     ): okhttp3.ResponseBody
+
+    /** 创建媒体库（该类型首个库自动成为默认，并自动开始首次扫描） */
+    @POST("libraries")
+    suspend fun createLibrary(
+        @Body body: io.movieclaw.android.core.model.LibraryPayload,
+    ): McEnvelope<LibraryView>
+
+    /** 更新媒体库（类型创建后不可改；变更根路径时要求库空闲） */
+    @PUT("libraries/{libraryId}")
+    suspend fun updateLibrary(
+        @Path("libraryId") libraryId: Long,
+        @Body body: io.movieclaw.android.core.model.LibraryPayload,
+    ): McEnvelope<LibraryView>
 
     @GET("libraries")
     suspend fun libraries(): McEnvelope<List<LibraryView>>
@@ -348,6 +391,12 @@ interface McApi {
     ): McEnvelope<io.movieclaw.android.core.model.LibraryKindSummaryView>
 
     /** 按类型的跨库海报墙（首页类型行 + 点「查看全部」进去的那面墙）；每格自带落点库 */
+    /** 首页「按类型找电影 / 剧集」色块：一个 TMDB 类型 + 跨库部数 + 最近入库的封面剧照 */
+    @GET("libraries/kinds/{kind}/genres")
+    suspend fun libraryKindGenres(
+        @Path("kind") kind: String,
+    ): McEnvelope<List<io.movieclaw.android.core.model.LibraryKindGenreView>>
+
     @GET("libraries/kinds/{kind}/items")
     suspend fun libraryKindItems(
         @Path("kind") kind: String,
@@ -356,6 +405,8 @@ interface McApi {
         @Query("limit") limit: Int = 60,
         @Query("offset") offset: Int = 0,
         @Query("w") watch: String? = null,
+        /** TMDB genre id（逗号分隔，维内 OR）——色块点进来带 g=value 开墙 */
+        @Query("g") genres: String? = null,
     ): McEnvelope<List<LibraryItemView>>
 
     /** 筛选面板候选值与计数(与 /items 共用同一组筛选参数) */
@@ -433,6 +484,19 @@ interface McApi {
         @Query("sort") sort: String? = null,
         @Query("order") order: String? = null,
     ): McEnvelope<io.movieclaw.android.core.model.FavoritesPageView>
+
+    /**
+     * 「我的收藏」图廊（图床浏览模式）：与 [favorites] 同一份名单与顺序（sort / order 传同一个值），
+     * 一组 = 一部作品的全部图（海报 / 剧照 / 分集剧照 / 章节场景图），**按作品分页**。
+     * 没有任何图的作品也占一组，一页的组数恒等于作品数。
+     */
+    @GET("playback/favorites/gallery")
+    suspend fun favoritesGallery(
+        @Query("limit") limit: Int = 24,
+        @Query("offset") offset: Int = 0,
+        @Query("sort") sort: String? = null,
+        @Query("order") order: String? = null,
+    ): McEnvelope<List<LibraryGalleryGroupView>>
 
     /**
      * 合集列表。返回的是**数组**（`data: CollectionView[]`，不是分页对象）。
@@ -558,6 +622,20 @@ interface McApi {
     @GET("search/library-items")
     suspend fun searchLibraryItems(@Query("keyword") keyword: String): McEnvelope<List<LibrarySearchGroup>>
 
+    /**
+     * 媒体库搜索（v0.31 起三端同一份）：相关度排序、人物单独成行、命中原因、
+     * 游标分页。旧的 `/search/library-items` 已被服务端**删除**——连老接口的客户端
+     * 在 v0.31 服务器上会直接 404。
+     */
+    @GET("search/library")
+    suspend fun searchLibrary(
+        @Query("q") q: String,
+        /** 选定人物（点人物行下钻：只看这个人的库内作品） */
+        @Query("person_id") personId: Int? = null,
+        @Query("limit") limit: Int = 24,
+        @Query("cursor") cursor: String? = null,
+    ): McEnvelope<io.movieclaw.android.core.model.LibrarySearchView>
+
     @GET("search/history")
     suspend fun searchHistory(): McEnvelope<List<SearchHistoryItem>>
 
@@ -615,7 +693,14 @@ interface McApi {
     suspend fun subscriptions(): McEnvelope<List<SubscriptionView>>
 
     @GET("subscriptions/today-arrivals")
-    suspend fun todayArrivalsFull(): McEnvelope<List<io.movieclaw.android.core.model.TodayArrivalFull>>
+    suspend fun todayArrivalsFull(
+        /**
+         * focus=只回最近有安排的那一天（网页首页「今日可能入库」）；
+         * week=整周按日期原样返回——订阅首页的 Hero 轮播与「日程」日期条都要整周，
+         * iOS 订阅首页用的就是 `window: "week"`（服务端 `subscriptions.list-today-arrivals`）
+         */
+        @Query("window") window: String = "week",
+    ): McEnvelope<List<io.movieclaw.android.core.model.TodayArrivalFull>>
 
     @GET("subscriptions/recent-arrivals")
     suspend fun recentArrivals(

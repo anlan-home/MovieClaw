@@ -41,6 +41,7 @@ class MainActivity : ComponentActivity() {
         )
         requestNotificationPermissionIfNeeded()
         deepLinkBus.parse(intent?.dataString)?.let(deepLinkBus::publish)
+        handleNotificationTab(intent)
         setContent {
             MovieClawTheme {
                 MovieClawRoot()
@@ -52,6 +53,23 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         deepLinkBus.parse(intent.dataString)?.let(deepLinkBus::publish)
+        handleNotificationTab(intent)
+    }
+
+    /** 通知点按落点：有具体条目就投路由（AppNav 消费），否则退到底栏页（见 core/notify） */
+    private fun handleNotificationTab(intent: Intent?) {
+        intent?.getStringExtra("mc_route")?.takeIf { it.isNotBlank() }?.let {
+            io.movieclaw.android.core.notify.NotifyRouteBus.publish(it)
+            return
+        }
+        when (intent?.getStringExtra("mc_tab")) {
+            "ACTIVITY" -> io.movieclaw.android.feature.root.MainTabBus.open(
+                io.movieclaw.android.feature.root.MainTab.ACTIVITY,
+            )
+            "SUBSCRIPTIONS" -> io.movieclaw.android.feature.root.MainTabBus.open(
+                io.movieclaw.android.feature.root.MainTab.SUBSCRIPTIONS,
+            )
+        }
     }
 
     /** 自动画中画:播放中按 Home/切走时进入 PiP(对齐视频应用习惯) */

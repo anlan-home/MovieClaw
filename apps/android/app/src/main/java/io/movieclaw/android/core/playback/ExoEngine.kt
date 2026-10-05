@@ -83,6 +83,18 @@ class ExoEngine(
     fun measuredBps(windowMs: Long = 30_000L): Double? = transferMeter.measuredBps(windowMs)
 
     init {
+        // 加载速度读数（iOS `LoadingSpeedMeter` 的近似物）：直接取 Exo 的带宽估计（bits/s），
+        // 等待态那行「↓ x.x MB/s」用它——和播放器自己选码率用的是同一个量
+        player.addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+            override fun onBandwidthEstimate(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                elapsedMs: Int,
+                bytes: Long,
+                bitrateEstimate: Long,
+            ) {
+                bandwidthBps = bitrateEstimate.takeIf { it > 0 }
+            }
+        })
         player.addListener(object : Player.Listener {
             /**
              * 轨道解析出来之后把**计划里的那条音轨**落下（iOS `selectInitialAudio` 的对应物）。
@@ -201,6 +213,11 @@ class ExoEngine(
     }
 
     override fun positionMs(): Long = runCatching { player.currentPosition }.getOrDefault(0L)
+
+    /** 带宽估计（bits/s），没采样到就是 null；等待态显示「↓ x.x MB/s」（iOS 同一种读数） */
+    @Volatile
+    var bandwidthBps: Long? = null
+        private set
 
     override fun durationMs(): Long = runCatching { player.duration }.getOrDefault(0L).takeIf { it > 0 } ?: 0L
 

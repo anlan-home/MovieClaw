@@ -1,5 +1,7 @@
 package io.movieclaw.android.core.playback
 
+import io.movieclaw.android.core.AppScopes
+
 import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -35,7 +37,7 @@ class PlaybackQoe @Inject constructor(
     private val json: Json,
 ) {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = AppScopes.io("PlaybackQoe")
 
     /** 一次播放尝试的累计数据 */
     class Attempt(

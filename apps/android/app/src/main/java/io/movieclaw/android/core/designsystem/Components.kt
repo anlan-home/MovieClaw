@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.CircularProgressIndicator
@@ -430,6 +431,8 @@ fun ContinueWatchingCard(
     remainingEpisodes: Int? = null,
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
+    /** 右上角 ✕：把这条从「接下来继续」里叉掉（本机偏好；null = 不显示 ✕） */
+    onClose: (() -> Unit)? = null,
 ) {
     Column(
         modifier = modifier.width(200.dp).then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
@@ -442,6 +445,26 @@ fun ContinueWatchingCard(
                 .background(Placeholder),
         ) {
             RemoteImage(imageUrl, origin, contentDescription = title, modifier = Modifier.fillMaxSize())
+            // 右上角 ✕：叉掉这条（iOS 46e425f0；暗底圆钮，避免和整卡点击混在一起）
+            if (onClose != null) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .clickable(onClick = onClose),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    androidx.compose.material3.Icon(
+                        Icons.Rounded.Close,
+                        contentDescription = "从接下来继续中隐藏",
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
             Box(
                 Modifier
                     .align(Alignment.BottomCenter)

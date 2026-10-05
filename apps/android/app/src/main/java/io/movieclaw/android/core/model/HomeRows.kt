@@ -132,6 +132,8 @@ object HomeRows {
         data object UpNext : Kind
         data class Favorites(val sort: String, val reversed: Boolean) : Kind
         data object Libraries : Kind
+        /** 「按类型找电影 / 剧集」类型色块行（出厂布局内置；id `genres:<kind>`，与 Web/iOS 同名同形） */
+        data class Genres(val kind: String, val libraries: List<LibraryView>) : Kind
         data class Library(
             val library: LibraryView,
             val sort: String,
@@ -172,6 +174,7 @@ object HomeRows {
                 Kind.UpNext -> "接下来继续"
                 is Kind.Favorites -> "我的收藏"
                 Kind.Libraries -> "我的媒体库"
+                is Kind.Genres -> if (k.kind == "tv") "按类型找剧集" else "按类型找电影"
                 is Kind.Library -> if (k.name.isEmpty()) preset(k.sort).name(k.library.name, k.reversed) else k.name
                 is Kind.Collection -> if (k.name.isEmpty()) k.collection.name else k.name
             }
@@ -182,6 +185,7 @@ object HomeRows {
                 Kind.UpNext -> "内置 · 我正在看的"
                 is Kind.Favorites -> "内置 · ${favoritesPreset(k.sort).name("", k.reversed)}"
                 Kind.Libraries -> "内置 · 管理页的库顺序"
+                is Kind.Genres -> "内置 · 每个类型一格（${k.libraries.size} 个库）"
                 is Kind.Library -> listOfNotNull(
                     "${k.library.name}库",
                     preset(k.sort).short(k.reversed),
@@ -205,19 +209,32 @@ object HomeRows {
                 else -> ""
             }
 
-        /** 能否删除：只有自加的行（row:）能删，内置行与每库默认行只能藏 */
-        val removable: Boolean get() = id.startsWith("row:")
+        /** 能否删除：自加的行（row:）与老版本存下的类型行（kind:）能删，内置行与每库默认行只能藏 */
+        val removable: Boolean get() = id.startsWith("row:") || id.startsWith("kind:")
     }
 
     /* ---------------- 合并 ---------------- */
 
-    /** 出厂布局：接下来继续 → 我的收藏 → 我的媒体库 → 每个库一行「最近添加」 */
+    /** 有类型色块行的库类型：TMDB 的类型表只分电影与剧集 */
+    private val genreKinds = listOf("movie", "tv")
+
+    /** 类型色块行（每种有库的类型一条），出厂布局里紧跟「我的媒体库」 */
+    private fun genreRows(libraries: List<LibraryView>): List<Row> = genreKinds.mapNotNull { kind ->
+        val libs = libraries.filter { it.kind == kind }
+        if (libs.isEmpty()) null else Row("genres:$kind", false, Kind.Genres(kind, libs))
+    }
+
+    /**
+     * 出厂布局：接下来继续 → 我的收藏 → 我的媒体库 → 按类型找电影 → 按类型找剧集 → 每个库一行「最近添加」。
+     *
+     * 不带类型行（「全部电影」）：它要用户在自定义页里主动添加才出现（上游 2db658de 的口径）。
+     */
     private fun defaultRows(libraries: List<LibraryView>): List<Row> =
         listOf(
             Row("up-next", false, Kind.UpNext),
             Row("favorites", false, Kind.Favorites("unwatched_first", false)),
             Row("libraries", false, Kind.Libraries),
-        ) + libraries.filter { !it.excludeFromHome }.map {
+        ) + genreRows(libraries) + libraries.filter { !it.excludeFromHome }.map {
             Row(
                 "lib:${it.id}", false,
                 Kind.Library(it, "added_at", false, false, "", builtin = true),
@@ -253,12 +270,21 @@ object HomeRows {
             seen.add(pref.id)
             rows.add(row)
         }
-        // 没存过的内置行追加在末尾（版本升级新增的入口不能消失）
+        // 没存过的内置行追加在末尾（版本升级新增的入口不能消失）；类型色块行与库行另有落点
         for (row in defaults) {
             if (row.kind is Kind.Library) continue
+            if (row.kind is Kind.Genres) continue
             if (row.id in seen) continue
             seen.add(row.id)
             rows.add(row)
+        }
+        // 没存过的类型色块行（版本升级新增）插在「我的媒体库」之后，与出厂布局同一位置
+        // ——追加到队尾会落在一长串库行、合集行后面，老用户几乎看不到
+        val missingGenres = defaults.filter { it.kind is Kind.Genres && it.id !in seen }
+        if (missingGenres.isNotEmpty()) {
+            missingGenres.forEach { seen.add(it.id) }
+            val at = rows.indexOfFirst { it.kind == Kind.Libraries }.let { if (it >= 0) it + 1 else rows.size }
+            rows.addAll(at.coerceIn(0, rows.size), missingGenres)
         }
         // 没存过的库补一条默认行，插在最后一条库行之后（没有库行时插在「我的媒体库」之后）
         val missing = defaults.filter { it.kind is Kind.Library && it.id !in seen }
@@ -269,7 +295,11 @@ object HomeRows {
                 at = last + 1
             } else {
                 val libs = rows.indexOfFirst { it.kind == Kind.Libraries }
-                if (libs >= 0) at = libs + 1
+                if (libs >= 0) {
+                    at = libs + 1
+                    // 出厂布局里类型色块行紧跟「我的媒体库」，库行在它们之后
+                    while (at < rows.size && rows[at].kind is Kind.Genres) at++
+                }
             }
             rows.addAll(at.coerceIn(0, rows.size), missing)
         }
@@ -297,6 +327,13 @@ object HomeRows {
             val library = libById[id] ?: return null
             if (library.excludeFromHome) return null
             return libraryRow(pref, library, builtin = true)
+        }
+        if (pref.id.startsWith("genres:")) {
+            val kind = pref.id.removePrefix("genres:")
+            if (kind !in genreKinds) return null
+            val libs = libById.values.filter { it.kind == kind }
+            if (libs.isEmpty()) return null
+            return Row(pref.id, hidden, Kind.Genres(kind, libs))
         }
         if (!pref.id.startsWith("row:")) return null
         val cid = pref.collectionId

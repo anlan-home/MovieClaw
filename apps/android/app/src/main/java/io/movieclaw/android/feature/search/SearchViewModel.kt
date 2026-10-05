@@ -109,8 +109,10 @@ class SearchViewModel @Inject constructor(
         val done: SearchStreamDone? = null,
         // 标题搜索
         val titles: List<DiscoveredTitle> = emptyList(),
-        // 库内搜索
-        val libraryGroups: List<Pair<String, List<LibraryItemView>>> = emptyList(),
+        // 库内搜索（v0.31 /search/library：相关度平铺 + 人物行 + 命中原因 + 游标分页）
+        val librarySearch: io.movieclaw.android.core.model.LibrarySearchView? = null,
+        /** 人物下钻中（点人物行：只看这个人的库内作品） */
+        val libraryPerson: io.movieclaw.android.core.model.LibrarySearchPerson? = null,
         val history: List<SearchHistoryItem> = emptyList(),
         val submitting: String? = null,
         // ── 下载 / 手动选种（batch 3）──────────────
@@ -203,7 +205,8 @@ class SearchViewModel @Inject constructor(
                 blocks = emptyList(),
                 done = null,
                 titles = emptyList(),
-                libraryGroups = emptyList(),
+                librarySearch = null,
+                libraryPerson = null,
             )
         }
         when (state.mode) {
@@ -229,17 +232,55 @@ class SearchViewModel @Inject constructor(
         searchJob = viewModelScope.launch {
             val origin = origin ?: return@launch
             runCatching {
-                apiFactory.forOrigin(origin).searchLibraryItems(keyword).dataOrThrow()
+                apiFactory.forOrigin(origin).searchLibrary(q = keyword).dataOrThrow()
             }
-                .onSuccess { groups ->
-                    _ui.update {
-                        it.copy(
-                            libraryGroups = groups.map { group -> group.libraryName to group.items },
-                            searching = false,
-                        )
-                    }
-                }
+                .onSuccess { view -> _ui.update { it.copy(librarySearch = view, libraryPerson = null, searching = false) } }
                 .onFailure { e -> _ui.update { it.copy(error = friendlyMessage(e), searching = false) } }
+        }
+    }
+
+    /** 点人物行下钻：只看这个人的库内作品 */
+    fun drillPerson(person: io.movieclaw.android.core.model.LibrarySearchPerson) {
+        val keyword = _ui.value.query
+        searchJob = viewModelScope.launch {
+            val origin = origin ?: return@launch
+            _ui.update { it.copy(searching = true, error = null) }
+            runCatching {
+                apiFactory.forOrigin(origin).searchLibrary(q = keyword, personId = person.id).dataOrThrow()
+            }
+                .onSuccess { view -> _ui.update { it.copy(librarySearch = view, libraryPerson = person, searching = false) } }
+                .onFailure { e -> _ui.update { it.copy(error = friendlyMessage(e), searching = false) } }
+        }
+    }
+
+    /** 从人物下钻回到整页结果 */
+    fun exitPerson() {
+        submit()
+    }
+
+    /** 游标续页：把新的一页追加在后面（没有 next_cursor 就不动） */
+    fun loadMoreLibrary() {
+        val state = _ui.value
+        val view = state.librarySearch ?: return
+        val cursor = view.nextCursor ?: return
+        if (state.searching) return
+        viewModelScope.launch {
+            val origin = origin ?: return@launch
+            _ui.update { it.copy(searching = true) }
+            runCatching {
+                apiFactory.forOrigin(origin).searchLibrary(
+                    q = view.query,
+                    personId = view.personId,
+                    cursor = cursor,
+                ).dataOrThrow()
+            }.onSuccess { page ->
+                _ui.update {
+                    it.copy(
+                        searching = false,
+                        librarySearch = page.copy(items = view.items + page.items),
+                    )
+                }
+            }.onFailure { _ui.update { s -> s.copy(searching = false) } }
         }
     }
 

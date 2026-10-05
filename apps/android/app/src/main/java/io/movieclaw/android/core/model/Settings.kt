@@ -99,3 +99,27 @@ data class MemberPasswordReset(
     val username: String = "",
     val password: String = "",
 )
+
+/** 「清理长期没用的设备」请求/响应（v0.31 POST /auth/devices/cleanup） */
+@Serializable
+data class DeviceCleanupRequest(
+    /** 注销多少天没用过的设备（1~3650） */
+    val inactiveDays: Int,
+    /** 超管：清理全部成员的设备（否则只清自己的） */
+    val all: Boolean = false,
+    /** 只列出会被注销的设备，不真的注销（确认框用） */
+    val dryRun: Boolean = false,
+)
+
+@Serializable
+data class DeviceCleanupView(
+    /** 会被（或已被）注销的设备 */
+    val devices: List<DeviceCleanupItem> = emptyList(),
+)
+
+@Serializable
+data class DeviceCleanupItem(
+    val id: String = "",
+    val name: String = "",
+    val ownerNickname: String = "",
+)

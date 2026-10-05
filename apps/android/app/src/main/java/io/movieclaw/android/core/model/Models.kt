@@ -138,3 +138,15 @@ data class UpNextItem(
 
 @Serializable
 data class UpNextView(val items: List<UpNextItem> = emptyList())
+
+/** `GET /fs/browse` 的一条子目录（服务端 schemas/fs.py；只含目录） */
+@Serializable
+data class FsEntry(val name: String, val path: String)
+
+/** `GET /fs/browse` 的结果：当前位置 + 上级（根目录为 null）+ 子目录列表（按名排序） */
+@Serializable
+data class FsBrowseView(
+    val path: String,
+    val parent: String? = null,
+    val entries: List<FsEntry> = emptyList(),
+)

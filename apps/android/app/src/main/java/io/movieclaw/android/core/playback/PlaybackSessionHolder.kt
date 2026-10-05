@@ -1,5 +1,7 @@
 package io.movieclaw.android.core.playback
 
+import io.movieclaw.android.core.AppScopes
+
 import io.movieclaw.android.core.designsystem.FeedbackBus
 import android.content.ComponentName
 import android.content.Context
@@ -45,7 +47,7 @@ class PlaybackSessionHolder @Inject constructor(
         data class Failed(val message: String, val suggestion: String? = null) : State
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope = AppScopes.main("PlaybackSessionHolder")
 
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
@@ -60,6 +62,9 @@ class PlaybackSessionHolder @Inject constructor(
     private var rememberedQualityNotice: String? = null
 
     fun open(target: PlayTarget) {
+        // 起播分段计时从这里起算（iOS `PlaybackStartupTrace`：用户说起播慢时先看这一行）
+        PlaybackStartupTrace.start()
+        PlaybackStartupTrace.mark("点击")
         val origin = sessionRepository.ui.value.origin
         if (origin == null) {
             _state.value = State.Failed("尚未连接服务器")
@@ -70,7 +75,8 @@ class PlaybackSessionHolder @Inject constructor(
         controller = null
         _state.value = State.Preparing
         scope.launch {
-            val api = apiFactory.forOrigin(origin)
+            // 播放链路走专用连接池（协商/进度/心跳/停止都在它上面，不排在页面请求后面）
+            val api = apiFactory.playbackForOrigin(origin)
             val created = PlaybackController(
                 context = context.applicationContext,
                 endpoint = MemberPlaybackEndpoint(api),
@@ -92,7 +98,9 @@ class PlaybackSessionHolder @Inject constructor(
                     .takeIf { it > 0 }
                     ?.let { "${it}p(${networkOf().label})" }
             }
-            handle(created.negotiate())
+            val negotiation = created.negotiate()
+            PlaybackStartupTrace.mark("决策+会话")
+            handle(negotiation)
         }
     }
 
@@ -105,6 +113,7 @@ class PlaybackSessionHolder @Inject constructor(
                 _state.value = State.Consent(negotiation.reason, negotiation.costHint)
             is PlaybackController.Negotiation.Ready -> {
                 active.start(negotiation.session)
+                PlaybackStartupTrace.mark("引擎")
                 _state.value = State.Playing(active, negotiation.session)
                 connectMediaController()
                 rememberedQualityNotice?.let { choice ->
@@ -137,7 +146,7 @@ class PlaybackSessionHolder @Inject constructor(
         controller = null
         _state.value = State.Preparing
         scope.launch {
-            val api = apiFactory.forOrigin(origin)
+            val api = apiFactory.playbackForOrigin(origin)
             val created = PlaybackController(
                 context = context.applicationContext,
                 endpoint = GuestPlaybackEndpoint(api, slug),

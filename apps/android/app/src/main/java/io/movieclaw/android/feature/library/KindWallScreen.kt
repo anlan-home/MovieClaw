@@ -112,7 +112,9 @@ class KindWallViewModel @Inject constructor(
     private val repository: SessionRepository,
 ) : ViewModel() {
 
-    val kind: String = savedStateHandle.get<String>("kind").orEmpty().ifBlank { "movie" }
+    val kind: String = savedStateHandle.get<String>("kind").orEmpty().ifBlank { "movie" }
+    /** TMDB genre id（首页色块点进来带的）；null = 不过滤 */
+    val genre: String? = savedStateHandle.get<String>("genre")
 
     data class UiState(
         val loading: Boolean = true,
@@ -144,6 +146,7 @@ class KindWallViewModel @Inject constructor(
                     sort = _ui.value.sort,
                     limit = PAGE_SIZE,
                     offset = 0,
+                    genres = genre,
                 ).dataOrThrow()
                 _ui.update {
                     it.copy(
@@ -177,6 +180,7 @@ class KindWallViewModel @Inject constructor(
                     sort = state.sort,
                     limit = PAGE_SIZE,
                     offset = state.items.size,
+                    genres = genre,
                 ).dataOrThrow()
             }
                 .onSuccess { more -> _ui.update { it.copy(loadingMore = false, items = it.items + more) } }

@@ -1,6 +1,7 @@
 package io.movieclaw.android.feature.subscriptions
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.EaseInOut
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -15,6 +16,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,12 +49,20 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -74,6 +84,8 @@ import io.movieclaw.android.core.playback.PlayTarget
 import io.movieclaw.android.core.api.McApi
 import io.movieclaw.android.core.designsystem.Accent
 import io.movieclaw.android.core.designsystem.Bg
+import io.movieclaw.android.core.designsystem.ImageAspect
+import io.movieclaw.android.core.designsystem.ImageWidth
 import io.movieclaw.android.core.designsystem.LineSoft
 import io.movieclaw.android.core.designsystem.McMetrics
 import io.movieclaw.android.core.designsystem.McTabBarContentPadding
@@ -86,6 +98,7 @@ import io.movieclaw.android.core.designsystem.TextMuted
 import io.movieclaw.android.core.designsystem.TextPrimary
 import io.movieclaw.android.core.designsystem.Warn
 import io.movieclaw.android.core.discovery.rememberAmbientColor
+import io.movieclaw.android.core.model.DownloadTask
 import io.movieclaw.android.core.model.MediaBrief
 import io.movieclaw.android.core.model.RecentArrivalView
 import io.movieclaw.android.core.model.SubscriptionView
@@ -93,10 +106,15 @@ import io.movieclaw.android.core.model.TodayArrivalFull
 import io.movieclaw.android.core.session.SessionRepository
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import androidx.compose.material3.pulltorefresh.pullToRefresh
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.OffsetDateTime
@@ -120,14 +138,109 @@ data class SubsHeroSlide(
     val footnote: String? = null,
     val play: PlayTarget? = null,
     val resumePercent: Int? = null,
+    /** 下载中：下载器给的平均进度 0..1（iOS 组内下载中单元的平均值）；没有就不画实段 */
+    val progress: Double? = null,
 )
+
+/** 日程一行：一部订阅当天的全部更新合成一行（同一部剧当天多集 →「S01E01–E03」，iOS ArrivalGroup 同口径），
+ *  组内一切「时刻 / 状态」以完成最慢的那一集为准 */
+data class SubsScheduleEntry(
+    val subscriptionId: Long,
+    val mediaTitle: String,
+    val mediaKind: String,
+    /** 「S01E01–E03」/「电影」 */
+    val episodeLabel: String,
+    val presentation: ArrivalPresentation,
+    /** 组内下载中单元的进度 0..1（没在下载就 null） */
+    val progress: Double?,
+)
+
+/** 预告行按（订阅, 日期）合成的一批（iOS `ArrivalGroup`）：整组共用一条进度、一个入库时刻 */
+internal data class ArrivalGroup(
+    val subscriptionId: Long,
+    val daysAhead: Int,
+    val expectedDay: String?,
+    val mediaTitle: String,
+    val mediaKind: String,
+    val units: List<TodayArrivalFull>,
+    /** 匹配到的下载器任务（按 info_hash，iOS `taskByHash`） */
+    val task: DownloadTask?,
+    val presentation: ArrivalPresentation,
+    val progress: Double?,
+) {
+    val episodeLabel: String
+        get() = if (mediaKind == "movie") {
+            "电影"
+        } else {
+            units.groupBy { it.seasonNumber }.toSortedMap()
+                .map { (season, eps) -> "S%02d%s".format(season, episodeRanges(eps.map { it.episodeNumber })) }
+                .joinToString(" · ")
+        }
+
+    /** 组内代表集（时刻文案用）：最慢的一集 */
+    val representative: TodayArrivalFull get() = units.first()
+}
+
+/** 集号压成区间：[1,2,3,5] →「E01–E03、E05」（iOS TodayArrivals.episodeRanges） */
+internal fun episodeRanges(episodes: List<Int>): String {
+    val ranges = mutableListOf<Pair<Int, Int>>()
+    episodes.toSortedSet().forEach { ep ->
+        val last = ranges.lastOrNull()
+        if (last != null && ep == last.second + 1) ranges[ranges.size - 1] = last.first to ep
+        else ranges += ep to ep
+    }
+    return ranges.joinToString("、") { (a, b) ->
+        if (a == b) "E%02d".format(a) else "E%02d–E%02d".format(a, b)
+    }
+}
+
+/** 预告行按（订阅, 日期）分组并套上下载器的实时进度 / ETA（iOS `SubscriptionsHomeModel.arrivalGroups`） */
+internal fun arrivalGroups(
+    arrivals: List<TodayArrivalFull>,
+    tasks: List<DownloadTask>,
+    now: java.time.LocalDateTime = java.time.LocalDateTime.now(),
+): List<ArrivalGroup> {
+    val taskByHash = tasks.filter { it.infoHash.isNotBlank() }.associateBy { it.infoHash.lowercase() }
+    val order = mutableListOf<Pair<Long, Int>>()
+    val rows = mutableMapOf<Pair<Long, Int>, MutableList<TodayArrivalFull>>()
+    arrivals.forEach { arr ->
+        val key = arr.subscriptionId to arr.daysAhead
+        if (!rows.containsKey(key)) order += key
+        rows.getOrPut(key) { mutableListOf() } += arr
+    }
+    return order.mapNotNull { key ->
+        val units = rows[key] ?: return@mapNotNull null
+        val first = units.firstOrNull() ?: return@mapNotNull null
+        val task = first.infoHash?.lowercase()?.let { taskByHash[it] }
+        ArrivalGroup(
+            subscriptionId = key.first,
+            daysAhead = key.second,
+            expectedDay = first.expectedDay,
+            mediaTitle = first.mediaTitle,
+            mediaKind = first.mediaKind,
+            units = units,
+            task = task,
+            presentation = SubsHomeViewModel.groupPresentation(units, task, now),
+            progress = SubsHomeViewModel.groupProgress(units, task),
+        )
+    }
+}
 
 data class SubsDay(
     val date: LocalDate,
     val label: String,
     val dayNum: Int,
     val isToday: Boolean,
-    val entries: List<TodayArrivalFull>,
+    val entries: List<SubsScheduleEntry>,
+)
+
+/** 日程一行的展示口径：状态文字 + 左侧时刻（nil = 待定）+ 语气色（iOS `TodayArrivalPresentation`） */
+data class ArrivalPresentation(
+    val statusLabel: String,
+    val timeText: String?,
+    val tone: Color,
+    /** 「正在发生」（下载中 / 整理中）：日期条小圆点用语气色、状态行的小点呼吸 */
+    val glows: Boolean,
 )
 
 data class SubsHomeState(
@@ -166,6 +279,26 @@ class SubsHomeViewModel @Inject constructor(
 
     private var lastSeenRevision = SubscriptionEvents.revision
 
+    /** 下拉刷新转圈（iOS `.refreshable` 的对应物） */
+    private val _refreshing = MutableStateFlow(false)
+    val refreshing: kotlinx.coroutines.flow.StateFlow<Boolean> = _refreshing.asStateFlow()
+
+    /** 下拉刷新：内容留着，转圈到新数据到齐 */
+    fun pullRefresh() {
+        if (_refreshing.value) return
+        viewModelScope.launch {
+            _refreshing.value = true
+            try {
+                load()
+                kotlinx.coroutines.withTimeoutOrNull(12_000) {
+                    _ui.first { !it.loading }
+                }
+            } finally {
+                _refreshing.value = false
+            }
+        }
+    }
+
     fun load() {
         viewModelScope.launch {
             val origin = origin
@@ -176,19 +309,26 @@ class SubsHomeViewModel @Inject constructor(
                 val subs: List<SubscriptionView>
                 val arrivals: List<TodayArrivalFull>
                 val recent: List<RecentArrivalView>
+                val tasks: List<DownloadTask>
                 coroutineScope {
                     val a = async { runCatching { api.subscriptions().dataOrThrow() }.getOrDefault(emptyList()) }
                     val b = async { runCatching { api.todayArrivalsFull().dataOrThrow() }.getOrDefault(emptyList()) }
                     val c = async { runCatching { api.recentArrivals().dataOrThrow() }.getOrDefault(emptyList()) }
-                    subs = a.await(); arrivals = b.await(); recent = c.await()
+                    // 下载器的实时进度 / ETA（iOS 订阅首页同一份任务快照）：按 info_hash 对到预告行上；
+                    // 拉不到就当作没有，不挡页面
+                    val d = async {
+                        runCatching { api.downloadTasks().dataOrThrow().items }.getOrDefault(emptyList())
+                    }
+                    subs = a.await(); arrivals = b.await(); recent = c.await(); tasks = d.await()
                 }
                 val now = LocalDate.now()
+                val groups = arrivalGroups(arrivals, tasks)
                 _ui.update {
                     it.copy(
                         loading = false,
-                        slides = buildSlides(subs, arrivals, recent),
+                        slides = buildSlides(subs, groups, recent),
                         recent = recent,
-                        days = buildDays(arrivals, now),
+                        days = buildDays(groups, now),
                         tv = subs.filter { s -> s.media.kind == "tv" },
                         movie = subs.filter { s -> s.media.kind == "movie" },
                         all = subs,
@@ -203,39 +343,37 @@ class SubsHomeViewModel @Inject constructor(
     /** 入库管线：下载中 → 整理中 → 刚入库 → 今天 → 排期；全空时回退「在追的前三」 */
     private fun buildSlides(
         subs: List<SubscriptionView>,
-        arrivals: List<TodayArrivalFull>,
+        groups: List<ArrivalGroup>,
         recent: List<RecentArrivalView>,
     ): List<SubsHeroSlide> {
         val slides = mutableListOf<SubsHeroSlide>()
         val byId = subs.associateBy { it.id }
         val now = java.time.LocalDateTime.now()
 
-        arrivals.forEach { arr ->
+        groups.forEach { group ->
+            val arr = group.representative
+            val pres = group.presentation
             val media = byId[arr.subscriptionId]?.media ?: MediaBrief(title = arr.mediaTitle, kind = arr.mediaKind)
-            val label = if (arr.mediaKind == "tv") "S%02dE%02d".format(arr.seasonNumber, arr.episodeNumber) else null
-            val downloading = arr.grabbedAt != null && arr.downloadedAt == null
-            val organizing = arr.downloadedAt != null
+            val label = if (arr.mediaKind == "tv") group.episodeLabel else null
             when {
-                downloading -> {
-                    val eta = (arr.estimatedDownloadToImportMinutes ?: arr.estimatedReleaseToImportMinutes)
-                        ?.let { now.plusMinutes(it.toLong()) }
-                    slides += if (eta != null) SubsHeroSlide(
+                pres.statusLabel.startsWith("下载中") -> {
+                    // 时刻与进度都来自下载器任务（iOS：`task.etaSeconds` + 「下载完成 → 入库」中位耗时）
+                    slides += SubsHeroSlide(
                         arr.subscriptionId, media, SubsStage.Downloading,
                         eyebrow = "下载中", eyebrowDot = Color(0xFF7FB0FF),
                         clockLabel = if (arr.mediaKind == "movie") "预计可看" else "$label · 预计可看",
-                        clock = clockText(eta),
-                    ) else SubsHeroSlide(
-                        arr.subscriptionId, media, SubsStage.Downloading,
-                        eyebrow = "下载中", eyebrowDot = Color(0xFF7FB0FF),
-                        detail = if (arr.mediaKind == "movie") "正在下载" else "$label · 正在下载",
-                        footnote = "下载完成后自动整理入库",
+                        clock = pres.timeText?.takeIf { it != "稍后" }?.let { "约 $it" },
+                        detail = if (pres.timeText == "稍后" || pres.timeText == null)
+                            (if (arr.mediaKind == "movie") "正在下载" else "$label · 正在下载") else null,
+                        footnote = if (pres.timeText == "稍后" || pres.timeText == null) "下载完成后自动整理入库" else null,
+                        progress = group.progress,
                     )
                 }
-                organizing -> slides += SubsHeroSlide(
+                pres.statusLabel == "整理中" -> slides += SubsHeroSlide(
                     arr.subscriptionId, media, SubsStage.Organizing,
                     eyebrow = "整理中", eyebrowDot = Ok,
                     clockLabel = if (arr.mediaKind == "movie") "下载完成" else "$label · 下载完成",
-                    clock = "马上就好",
+                    clock = if (pres.timeText == "即将") "马上就好" else pres.timeText,
                 )
                 arr.daysAhead > 0 -> slides += SubsHeroSlide(
                     arr.subscriptionId, media, SubsStage.Upcoming,
@@ -247,7 +385,7 @@ class SubsHomeViewModel @Inject constructor(
                     arr.subscriptionId, media, SubsStage.Today,
                     eyebrow = "今天更新", eyebrowDot = Color(0xFFD9D6FF),
                     clockLabel = "$label · 预计入库",
-                    clock = arr.estimatedReleaseToImportMinutes?.let { clockText(now.plusMinutes(it.toLong())) },
+                    clock = pres.timeText,
                 )
             }
         }
@@ -288,12 +426,15 @@ class SubsHomeViewModel @Inject constructor(
                 )
             }
         }
-        return slides
+        // iOS SubsHomeState.maxHeroSlides：轮播最多 5 张，且按订阅去重——
+        // 同一部剧既在预告又在「刚刚入库」时只留最要紧的那张（前面的优先级高，去重保先出现的）
+        return slides.distinctBy { it.subscriptionId }.take(5)
     }
 
-    private fun buildDays(arrivals: List<TodayArrivalFull>, today: LocalDate): List<SubsDay> {
+    /** 一周的日期条：今天起 7 天（第 8 天有安排才补），每天挂着**合成好的**当天议程（iOS scheduleDays） */
+    private fun buildDays(groups: List<ArrivalGroup>, today: LocalDate): List<SubsDay> {
         val days = (0..6L).map { today.plusDays(it) }
-        val extra = arrivals.mapNotNull { a -> a.expectedDay?.let { runCatching { LocalDate.parse(it) }.getOrNull() } }
+        val extra = groups.mapNotNull { g -> g.expectedDay?.let { runCatching { LocalDate.parse(it) }.getOrNull() } }
             .filter { it.isAfter(today.plusDays(6)) }
         return (days + extra).map { date ->
             SubsDay(
@@ -301,7 +442,16 @@ class SubsHomeViewModel @Inject constructor(
                 label = if (date == today) "今天" else chineseWeekday(date),
                 dayNum = date.dayOfMonth,
                 isToday = date == today,
-                entries = arrivals.filter { it.expectedDay == date.toString() },
+                entries = groups.filter { it.expectedDay == date.toString() }.map { g ->
+                    SubsScheduleEntry(
+                        subscriptionId = g.subscriptionId,
+                        mediaTitle = g.mediaTitle,
+                        mediaKind = g.mediaKind,
+                        episodeLabel = g.episodeLabel,
+                        presentation = g.presentation,
+                        progress = g.progress,
+                    )
+                },
             )
         }
     }
@@ -323,6 +473,86 @@ class SubsHomeViewModel @Inject constructor(
                 else -> eta.format(DateTimeFormatter.ofPattern("M/d HH:mm"))
             }
         }
+
+        /** ISO 时间串 → 本机 LocalDateTime（服务端的 grabbed/downloaded/next_probe_at 都是 UTC ISO） */
+        private fun parseIso(value: String?): java.time.LocalDateTime? =
+            value?.let { runCatching { OffsetDateTime.parse(it).atZoneSameInstant(ZoneId.systemDefault()).toLocalDateTime() }.getOrNull() }
+
+        /**
+         * 日程一行的「状态 + 时刻 + 语气」（iOS `TodayArrivals.presentation`）：
+         * 整理中 → 下载完成时刻 + 本订阅读书「下载完成 → 入库」中位耗时（过去了就「即将」）；
+         * 下载中 → 下载器 ETA + 同一耗时算出的入库时刻（下载器给不出就「稍后」）+ 实时进度写进状态；
+         * 还没抓到 → 按出种预测算预计入库时刻，预测已过就是「等待资源」。
+         */
+        fun arrivalPresentation(
+            arr: TodayArrivalFull,
+            task: DownloadTask? = null,
+            now: java.time.LocalDateTime = java.time.LocalDateTime.now(),
+        ): ArrivalPresentation {
+            val importMinutes = (arr.estimatedDownloadToImportMinutes ?: 0).toLong()
+            if (arr.status == "downloaded" || arr.downloadedAt != null) {
+                val readyAt = parseIso(arr.downloadedAt)?.plusMinutes(importMinutes)
+                return ArrivalPresentation(
+                    statusLabel = "整理中",
+                    timeText = readyAt?.takeIf { it.isAfter(now) }?.format(DateTimeFormatter.ofPattern("HH:mm")) ?: "即将",
+                    tone = Ok,
+                    glows = true,
+                )
+            }
+            if (arr.status == "grabbed" || arr.grabbedAt != null) {
+                val eta = task?.etaSeconds?.takeIf { task.state == "downloading" && it >= 0 }
+                val estimated = eta?.let { now.plusSeconds(it).plusMinutes(importMinutes) }
+                val percent = task?.progress?.let { (it * 100).toInt().coerceIn(0, 100) }
+                return ArrivalPresentation(
+                    statusLabel = if (percent != null) "下载中 $percent%" else "下载中",
+                    timeText = estimated?.format(DateTimeFormatter.ofPattern("HH:mm")) ?: "稍后",
+                    tone = Color(0xFF7FB0FF),
+                    glows = true,
+                )
+            }
+            val forecast = arr.releaseForecast
+            val predicted = forecast?.get("predicted_at")?.jsonPrimitive?.contentOrNull?.let { parseIso(it) }
+            val volatile = forecast?.get("confidence")?.jsonPrimitive?.contentOrNull == "volatile"
+            val delay = (arr.estimatedReleaseToImportMinutes ?: 0).toLong()
+            var estimated: java.time.LocalDateTime? = null
+            if (predicted != null && !volatile) {
+                val initial = predicted.plusMinutes(delay)
+                estimated = if (!initial.isBefore(now)) initial else {
+                    // 预测时刻过去了就顺延到下一次探测（iOS estimatedWantedArrival 同口径）
+                    val probe = parseIso(arr.nextProbeAt)?.takeIf { it.isAfter(now) } ?: now
+                    probe.plusMinutes(delay)
+                }
+            }
+            val waiting = predicted != null && !predicted.isAfter(now)
+            return ArrivalPresentation(
+                statusLabel = if (waiting) "等待资源" else "预计入库",
+                timeText = estimated?.format(DateTimeFormatter.ofPattern("HH:mm")),
+                tone = if (waiting) Warn else TextMuted,
+                glows = false,
+            )
+        }
+
+        /** 组口径：以完成最慢的一集为准（整理中 > 下载中 > 其余；同级取最晚的入库时刻），iOS ArrivalGroup.presentation */
+        fun groupPresentation(
+            units: List<TodayArrivalFull>,
+            task: DownloadTask?,
+            now: java.time.LocalDateTime = java.time.LocalDateTime.now(),
+        ): ArrivalPresentation {
+            fun stageOrder(p: ArrivalPresentation) = when (p.statusLabel) {
+                "下载中" -> 1
+                "整理中" -> 2
+                else -> 0
+            }
+            return units.map { arrivalPresentation(it, task, now) }
+                .sortedWith(compareByDescending<ArrivalPresentation> { stageOrder(it) })
+                .firstOrNull() ?: ArrivalPresentation("预计入库", null, TextMuted, glows = false)
+        }
+
+        /** 组内下载中单元的进度（同一组的几集共用同一个任务，所以直接取任务的进度） */
+        fun groupProgress(units: List<TodayArrivalFull>, task: DownloadTask?): Double? =
+            if (units.any { it.status == "grabbed" || (it.grabbedAt != null && it.downloadedAt == null) }) {
+                task?.progress?.toDouble()
+            } else null
 
         fun weekday(day: String?): String? {
             val d = day?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: return null
@@ -353,6 +583,7 @@ class SubsHomeViewModel @Inject constructor(
 private val Dots = mapOf("ok" to Ok, "warn" to Warn, "live" to Color(0xFF7FB0FF), "today" to Color(0xFFD9D6FF))
 
 @Composable
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 fun SubsHomeScreen(
     onOpenSubscription: (Long) -> Unit,
     onPlay: (PlayTarget) -> Unit,
@@ -364,6 +595,7 @@ fun SubsHomeScreen(
     vm: SubsHomeViewModel = hiltViewModel(),
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
+    val refreshing by vm.refreshing.collectAsStateWithLifecycle()
     // 订阅数据在别处被改动（详情页取消订阅 / 新建订阅）后，回到这里要能看到最新结果
     androidx.compose.runtime.LaunchedEffect(SubscriptionEvents.revision) {
         vm.reloadIfChanged(SubscriptionEvents.revision)
@@ -400,6 +632,13 @@ fun SubsHomeScreen(
         Column(
             Modifier
                 .fillMaxSize()
+                // 下拉刷新（iOS `.refreshable`）：**必须排在 verticalScroll 之前**（修饰符自外向内包，
+                // 挂在内侧收不到滚动节点的嵌套滚动事件——发现页就是这么「没生效」的）
+                .pullToRefresh(
+                    isRefreshing = refreshing,
+                    state = rememberPullToRefreshState(),
+                    onRefresh = { vm.pullRefresh() },
+                )
                 .verticalScroll(scroll)
                 .padding(bottom = McTabBarContentPadding),
         ) {
@@ -420,6 +659,9 @@ fun SubsHomeScreen(
                 SubsHero(
                     slides = state.slides,
                     scrollValue = scroll.value,
+                    // 订阅的图是服务端相对路径，不留 origin 就一张都画不出来
+                    // （实机报「hero 大图没了」的根因）
+                    origin = vm.origin,
                     onPlay = onPlay,
                     onOpenSubscription = onOpenSubscription,
                 )
@@ -445,7 +687,13 @@ fun SubsHomeScreen(
 
                 val dayWithEntries = state.days.firstOrNull { it.entries.isNotEmpty() }
                 if (dayWithEntries != null) {
-                    ScheduleSection(days = state.days, default = dayWithEntries, onOpenSubscription = onOpenSubscription)
+                    ScheduleSection(
+                        days = state.days,
+                        default = dayWithEntries,
+                        subs = state.all,
+                        origin = vm.origin,
+                        onOpenSubscription = onOpenSubscription,
+                    )
                     Spacer(Modifier.height(36.dp))
                 }
 
@@ -458,12 +706,16 @@ fun SubsHomeScreen(
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = McMetrics.pagePadding),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        items(active, key = { it.id }) { sub -> SubCard(sub, dim = false) { onOpenSubscription(sub.id) } }
+                        items(active, key = { it.id }) { sub -> SubCard(sub, dim = false, origin = vm.origin) { onOpenSubscription(sub.id) } }
                         if (resting.isNotEmpty()) {
                             item(key = "div-tv") { RestingDivider(restingLabel(resting), height = 189.dp) }
-                            items(resting, key = { "r-${it.id}" }) { sub -> SubCard(sub, dim = true) { onOpenSubscription(sub.id) } }
+                            items(resting, key = { "r-${it.id}" }) { sub -> SubCard(sub, dim = true, origin = vm.origin) { onOpenSubscription(sub.id) } }
                         }
-                        item(key = "seeall-tv") { SeeAllCard(state.tv.size) { onOpenWall("tv") } }
+                        // 「查看全部」卡只在**一排放不下**（iOS `if hidden > 0`）时才出现——
+                        // 订阅少的时候末尾不该多一张大卡（用户反馈）
+                        if (state.tv.size > 20) {
+                            item(key = "seeall-tv") { SeeAllCard(state.tv.size) { onOpenWall("tv") } }
+                        }
                     }
                     Spacer(Modifier.height(36.dp))
                 }
@@ -477,12 +729,14 @@ fun SubsHomeScreen(
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = McMetrics.pagePadding),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        items(active, key = { it.id }) { sub -> SubCard(sub, dim = false) { onOpenSubscription(sub.id) } }
+                        items(active, key = { it.id }) { sub -> SubCard(sub, dim = false, origin = vm.origin) { onOpenSubscription(sub.id) } }
                         if (resting.isNotEmpty()) {
                             item(key = "div-mv") { RestingDivider(restingLabel(resting), height = 189.dp) }
-                            items(resting, key = { "rm-${it.id}" }) { sub -> SubCard(sub, dim = true) { onOpenSubscription(sub.id) } }
+                            items(resting, key = { "rm-${it.id}" }) { sub -> SubCard(sub, dim = true, origin = vm.origin) { onOpenSubscription(sub.id) } }
                         }
-                        item(key = "seeall-mv") { SeeAllCard(state.movie.size) { onOpenWall("movie") } }
+                        if (state.movie.size > 20) {
+                            item(key = "seeall-mv") { SeeAllCard(state.movie.size) { onOpenWall("movie") } }
+                        }
                     }
                 }
             }
@@ -494,18 +748,34 @@ fun SubsHomeScreen(
 private fun SubsHero(
     slides: List<SubsHeroSlide>,
     scrollValue: Int,
+    origin: String?,
     onPlay: (PlayTarget) -> Unit,
     onOpenSubscription: (Long) -> Unit,
 ) {
     val pager = rememberPagerState(pageCount = { slides.size })
-    // 自动轮播：8s 前进一屏
-    LaunchedEffect(pager, slides.size) {
-        while (slides.size > 1) {
-            kotlinx.coroutines.delay(8000)
-            pager.animateScrollToPage((pager.currentPage + 1) % slides.size)
-        }
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current.density
+    // 轮播节奏同 iOS `SubsHomeHero.interval`：一张停 8s，期间把指示条线性填满，满了再切。
+    // 键必须用 `settledPage`：翻页动画过半时 `currentPage` 就会变，拿它当键会把效果协程重启、
+    // 把进行中的翻页动画取消掉，轮播就卡在「左右各半张」（实机反馈）。
+    // settledPage 只在滚动停稳后才更新——手动滑动也会因此自然重新计时（同 iOS）。
+    val fill = remember { Animatable(0f) }
+    LaunchedEffect(pager.settledPage, slides.size) {
+        fill.snapTo(0f)
+        if (slides.size <= 1) return@LaunchedEffect
+        fill.animateTo(1f, tween(8000, easing = LinearEasing))
+        // 用户正在拖的时候让位；停稳后本次效果会重排，再重新计时
+        if (pager.isScrollInProgress) return@LaunchedEffect
+        pager.animateScrollToPage(
+            (pager.settledPage + 1) % slides.size,
+            animationSpec = tween(800, easing = EaseInOut),
+        )
     }
     val fade = (1f - scrollValue / 260f).coerceIn(0f, 1f)
+    // 临时诊断（查「hero 不轮播」）：张数与当前页，定位后删
+    LaunchedEffect(slides.size, pager.currentPage) {
+        android.util.Log.i("McPerf", "订阅hero：${slides.size} 张，当前第 ${pager.currentPage + 1} 张")
+    }
     Box(Modifier.fillMaxWidth().height(500.dp)) {
         HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
             val s = slides[page]
@@ -517,18 +787,61 @@ private fun SubsHero(
                     zoom.animateTo(1.1f, tween(12000, easing = LinearEasing))
                 } else zoom.snapTo(1f)
             }
-            Box(Modifier.fillMaxSize().graphicsLayer { translationY = scrollValue * 0.15f }) {
-                RemoteImage(
-                    url = s.media.backdropUrl ?: s.media.posterUrl,
-                    origin = null,
-                    contentDescription = s.media.title,
-                    modifier = Modifier.fillMaxSize().graphicsLayer {
-                        scaleX = zoom.value; scaleY = zoom.value
-                    },
-                    contentScale = ContentScale.Crop,
-                )
-                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.5f), 0.26f to Color.Transparent)))
-                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.36f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.5f))))
+            // 整屏可点进订阅详情（iOS SubsHomeHeroSlideView：点哪都进）；
+            // 无涟漪——一张大图上扫过水波很出戏
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { onOpenSubscription(s.subscriptionId) }
+                    // clipToBounds：视差下移的剧照裁在 Hero 内，不压到下面的板块
+                    .clipToBounds(),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        // 视差两档（iOS ImmersiveHeroBackdrop）：画面跟 0.4、文字跟 0.15
+                        .graphicsLayer {
+                            translationY = scrollValue * 0.4f
+                            // DstIn 渐隐遮罩必须限定在本图层内：不限定会连下面的氛围渐变一起「挖掉」，
+                            // 上下滚动时底边出现一块流动的跳变（实机反馈的「hero 底部跳动」）
+                            compositingStrategy = CompositingStrategy.Offscreen
+                        }
+                        .drawWithContent {
+                            drawContent()
+                            // 底部渐隐进页面氛围色：不渐隐的话 Hero 下沿会在氛围色上切出一道横线
+                            drawRect(
+                                brush = Brush.verticalGradient(
+                                    0f to Color.Black,
+                                    0.56f to Color.Black,
+                                    0.8f to Color.Black.copy(alpha = 0.6f),
+                                    1f to Color.Transparent,
+                                ),
+                                blendMode = BlendMode.DstIn,
+                            )
+                        },
+                ) {
+                    RemoteImage(
+                        // 剧照：TMDB 图先升到 original 档再经代理按 Hero 需要的宽度缩
+                        // （iOS SubsHomeHeroImage.url）——发现接口给的 w1280 铺 500dp 高的框会糊；
+                        // 没有剧照退回海报铺满
+                        url = tmdbOriginal(s.media.backdropUrl) ?: s.media.posterUrl,
+                        origin = origin,
+                        contentDescription = s.media.title,
+                        // 竖框铺 16:9 剧照按高算 + 慢推 1.1 倍预放大（iOS phoneHero 同口径）
+                        aspect = ImageAspect.backdrop,
+                        zoom = 1.1f,
+                        modifier = Modifier.fillMaxSize().graphicsLayer {
+                            scaleX = zoom.value; scaleY = zoom.value
+                        },
+                        contentScale = ContentScale.Crop,
+                    )
+                    // 压暗层留在渐隐遮罩里（iOS 注释：压暗层若在遮罩外，Hero 底边比氛围色暗一截，切出一道横线）
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.5f), 0.26f to Color.Transparent)))
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.36f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.5f))))
+                }
                 Column(
                     Modifier
                         .fillMaxSize()
@@ -540,8 +853,10 @@ private fun SubsHero(
                     if (!s.media.logoUrl.isNullOrBlank()) {
                         RemoteImage(
                             url = s.media.logoUrl!!,
-                            origin = null,
+                            origin = origin,
                             contentDescription = null,
+                            // iOS：Logo 等比装进 240×88 的框，按框宽取图
+                            widthHint = ImageWidth.pixels(240f, density),
                             modifier = Modifier.fillMaxWidth().height(88.dp),
                             contentScale = ContentScale.Fit,
                         )
@@ -583,8 +898,19 @@ private fun SubsHero(
                         )
                     }
                     if (s.stage == SubsStage.Downloading && s.play == null) {
+                        // 发丝进度线（iOS SubsHomeProgressLine，168 宽）：下载器给得出进度才画实段
                         Spacer(Modifier.height(10.dp))
-                        Box(Modifier.width(168.dp).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.2f)))
+                        Box(Modifier.width(168.dp).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.2f))) {
+                            s.progress?.let { p ->
+                                Box(
+                                    Modifier
+                                        .width(168.dp * p.toFloat().coerceIn(0f, 1f))
+                                        .height(3.dp)
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(Color(0xFF7FB0FF)),
+                                )
+                            }
+                        }
                     }
                     Spacer(Modifier.height(20.dp))
                     val play = s.play
@@ -622,23 +948,47 @@ private fun SubsHero(
                 }
             }
         }
-        // 指示器：底部居中；单屏不显示
+        // 指示器：底部居中、单屏不显示。当前颗是「底胶囊 + 进度填充」（iOS ImmersiveHeroIndicator），
+        // 其余小圆点可点跳页
         if (slides.size > 1) {
             Row(
-                Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
+                Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp).graphicsLayer { alpha = fade },
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 slides.indices.forEach { i ->
                     if (i == pager.currentPage) {
-                        Box(Modifier.width(26.dp).height(5.dp).clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.26f)))
+                        Box(
+                            Modifier.width(26.dp).height(5.dp).clip(RoundedCornerShape(999.dp))
+                                .background(Color.White.copy(alpha = 0.26f)),
+                        ) {
+                            Box(
+                                Modifier.width(26.dp * fill.value).height(5.dp)
+                                    .clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.95f)),
+                            )
+                        }
                     } else {
-                        Box(Modifier.size(5.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.34f)))
+                        Box(
+                            Modifier.size(5.dp).clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.34f))
+                                .clickable {
+                                    scope.launch {
+                                        pager.animateScrollToPage(i, animationSpec = tween(600, easing = EaseInOut))
+                                    }
+                                }
+                                .semantics { contentDescription = "切换到《${slides[i].media.title}》" },
+                        )
                     }
                 }
             }
         }
     }
 }
+
+/** TMDB 图升到 original 档（iOS `originalTMDBImageURL`）：代理不替你换档，源图只有 w1280 时铺 Hero 会糊 */
+private val tmdbWidthSegment = Regex("/t/p/w\\d+/")
+
+private fun tmdbOriginal(raw: String?): String? = raw?.replace(tmdbWidthSegment, "/t/p/original/")
 
 /** 状态小签推导（iOS SubsHomeShelfItem.chip 的简化口径） */
 internal fun subChip(sub: SubscriptionView): Pair<String, Color> = when {
@@ -811,23 +1161,43 @@ private fun ArrivalCard(
 }
 
 @Composable
-private fun ScheduleSection(days: List<SubsDay>, default: SubsDay, onOpenSubscription: (Long) -> Unit) {
+private fun ScheduleSection(
+    days: List<SubsDay>,
+    default: SubsDay,
+    subs: List<SubscriptionView>,
+    origin: String?,
+    onOpenSubscription: (Long) -> Unit,
+) {
     var selected by remember { mutableIntStateOf(days.indexOfFirst { it.date == default.date }.coerceAtLeast(0)) }
+    val now = java.time.LocalDateTime.now()
+    val density = LocalDensity.current.density
+    val subsById = remember(subs) { subs.associateBy { it.id } }
+    val current = days.getOrNull(selected) ?: days.firstOrNull()
     Column {
         Row(Modifier.padding(horizontal = McMetrics.pagePadding), verticalAlignment = Alignment.CenterVertically) {
             Text("日程", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
             Spacer(Modifier.weight(1f))
-            Text("${default.date.monthValue}月${default.date.dayOfMonth}日 · ${default.entries.size} 部", fontSize = 13.sp, color = TextMuted)
+            // 计数跟着**选中的那天**走（iOS SubsHomeSectionHeader 的 trailing）
+            current?.let { day ->
+                val label = "${day.date.monthValue}月${day.date.dayOfMonth}日"
+                Text(
+                    if (day.entries.isEmpty()) label else "$label · ${day.entries.size} 部",
+                    fontSize = 13.sp, color = TextMuted,
+                )
+            }
         }
         Spacer(Modifier.height(12.dp))
         Row(Modifier.padding(horizontal = McMetrics.pagePadding), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             days.forEach { day ->
+                val on = day == current
+                // 日期条小圆点：当天有正在发生的（下载 / 整理）就亮状态色，否则中性白（iOS dotColor）
+                val glow = day.entries.firstOrNull { it.presentation.glows }?.presentation?.tone
                 Column(
                     Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(15.dp))
-                        .background(if (day == days[selected]) Color.White else Color.White.copy(alpha = 0.05f))
-                        .border(1.dp, if (day == days[selected]) Color.Transparent else Color.White.copy(alpha = 0.07f), RoundedCornerShape(15.dp))
+                        .background(if (on) Color.White else Color.White.copy(alpha = 0.05f))
+                        .border(1.dp, if (on) Color.Transparent else Color.White.copy(alpha = 0.07f), RoundedCornerShape(15.dp))
                         .clickable(enabled = day.entries.isNotEmpty()) { selected = days.indexOf(day) }
                         .alpha(if (day.entries.isEmpty()) 0.36f else 1f)
                         .padding(vertical = 9.dp),
@@ -836,18 +1206,18 @@ private fun ScheduleSection(days: List<SubsDay>, default: SubsDay, onOpenSubscri
                     Text(
                         day.label,
                         fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                        color = if (day == days[selected]) Color.Black.copy(alpha = 0.55f) else TextMuted,
+                        color = if (on) Color.Black.copy(alpha = 0.55f) else TextMuted,
                     )
                     Text(
                         "${day.dayNum}",
-                        fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
-                        color = if (day == days[selected]) Color(0xFF000000) else TextPrimary,
+                        fontSize = 19.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium,
+                        color = if (on) Color(0xFF000000) else TextPrimary,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.height(4.dp)) {
                         day.entries.take(3).forEach {
                             Box(
                                 Modifier.size(4.dp).clip(CircleShape)
-                                    .background(if (day == days[selected]) Color.Black.copy(alpha = 0.4f) else Color.White.copy(alpha = 0.45f)),
+                                    .background(if (on) Color.Black.copy(alpha = 0.4f) else glow ?: Color.White.copy(alpha = 0.45f)),
                             )
                         }
                     }
@@ -863,11 +1233,17 @@ private fun ScheduleSection(days: List<SubsDay>, default: SubsDay, onOpenSubscri
                 .background(Color.White.copy(alpha = 0.045f))
                 .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(22.dp)),
         ) {
-            val entries = days.getOrNull(selected)?.entries.orEmpty()
+            // 排序：正在发生的（下载 / 整理）在前，其余按时刻排（iOS 日程同口径）
+            val entries = current?.entries.orEmpty()
+                .sortedWith(
+                    compareByDescending<SubsScheduleEntry> { it.presentation.glows }
+                        .thenBy { it.presentation.timeText ?: "99" },
+                )
             if (entries.isEmpty()) {
                 Text("这一天没有入库安排", fontSize = 13.sp, color = TextFaint, modifier = Modifier.padding(14.dp))
             }
             entries.forEachIndexed { i, e ->
+                val pres = e.presentation
                 if (i > 0) Box(
                     Modifier.padding(start = 86.dp).fillMaxWidth().height(1.dp)
                         .background(Color.White.copy(alpha = 0.06f)),
@@ -876,30 +1252,54 @@ private fun ScheduleSection(days: List<SubsDay>, default: SubsDay, onOpenSubscri
                     Modifier.clickable { onOpenSubscription(e.subscriptionId) }.padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // 左列 62 宽：上「待定/稍后」，下「● 状态」（iOS：状态在时间下方，不在右侧）
+                    // 左列 62 宽：上「时刻 / 待定」，下「● 状态」（iOS：状态在时间下方，不在右侧）
                     Column(Modifier.width(62.dp)) {
                         Text(
-                            if (e.grabbedAt != null) "稍后" else "待定",
+                            pres.timeText ?: "待定",
                             fontSize = 20.sp,
-                            fontWeight = if (e.grabbedAt != null) FontWeight.SemiBold else FontWeight.Normal,
-                            color = if (e.grabbedAt != null) TextPrimary else TextFaint,
+                            fontWeight = if (pres.timeText != null) FontWeight.SemiBold else FontWeight.Normal,
+                            color = if (pres.timeText != null) TextPrimary else TextFaint,
                         )
                         Spacer(Modifier.height(3.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(5.dp).clip(CircleShape).background(if (e.status == "wanted") Warn else TextMuted))
+                            Box(Modifier.size(5.dp).clip(CircleShape).background(pres.tone))
                             Spacer(Modifier.width(4.dp))
-                            Text("预计入库", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Warn)
+                            Text(pres.statusLabel, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = pres.tone, maxLines = 1)
                         }
                     }
                     Spacer(Modifier.width(12.dp))
-                    Spacer(Modifier.width(92.dp).height(52.dp))
+                    // 剧照 92×52（iOS 同尺寸）：画面取订阅条目的剧照，没有就海报；下载中底部内嵌发丝进度线
+                    val media = subsById[e.subscriptionId]?.media
+                    Box(Modifier.width(92.dp).height(52.dp).clip(RoundedCornerShape(9.dp))) {
+                        RemoteImage(
+                            url = media?.backdropUrl ?: media?.posterUrl,
+                            origin = origin,
+                            widthHint = ImageWidth.pixels(92f, density),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        e.progress?.let { p ->
+                            Box(
+                                Modifier
+                                    .align(Alignment.BottomStart)
+                                    .padding(start = 6.dp, end = 6.dp, bottom = 5.dp)
+                                    .fillMaxWidth().height(2.5.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(Color.White.copy(alpha = 0.25f)),
+                            ) {
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth(p.toFloat().coerceIn(0f, 1f))
+                                        .height(2.5.dp)
+                                        .background(Color(0xFF7FB0FF)),
+                                )
+                            }
+                        }
+                    }
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text(e.mediaTitle, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            if (e.mediaKind == "tv") "S%02dE%02d".format(e.seasonNumber, e.episodeNumber) else "电影",
-                            fontSize = 13.sp, color = TextMuted, maxLines = 1,
-                        )
+                        Text(e.episodeLabel, fontSize = 13.sp, color = TextMuted, maxLines = 1)
                     }
                     Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null, tint = TextFaint, modifier = Modifier.size(14.dp))
                 }
@@ -951,7 +1351,7 @@ private fun SeeAllCard(total: Int, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SubCard(sub: SubscriptionView, dim: Boolean, onClick: () -> Unit) {
+private fun SubCard(sub: SubscriptionView, dim: Boolean, origin: String?, onClick: () -> Unit) {
     Column(Modifier.width(126.dp).clickable(onClick = onClick)) {
         Box(
             Modifier
@@ -963,7 +1363,9 @@ private fun SubCard(sub: SubscriptionView, dim: Boolean, onClick: () -> Unit) {
         ) {
             RemoteImage(
                 url = sub.media.posterUrl,
-                origin = null,
+                // 必须给 origin：服务端海报是相对路径（/images/assets/…），传 null 会直接回落占位图
+                // ——「电影订阅没有封面图」就是这么来的（剧集那条恰好是 TMDB 绝对地址才蒙对）
+                origin = origin,
                 contentDescription = sub.media.title,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,

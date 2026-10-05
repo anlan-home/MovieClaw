@@ -225,7 +225,8 @@ class PlayerViewModel @Inject constructor(
         // 而 ResponseBody.bytes() 是阻塞读取 —— 主线程上会抛 NetworkOnMainThreadException（实机踩过）
         return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching {
-                apiFactory.forOrigin(origin).subtitleContent(fileId = fileId, track = track, token = token).bytes()
+                // 走播放专用通道：字幕整轨可达几 MB，别和页面请求互相排队
+                apiFactory.playbackForOrigin(origin).subtitleContent(fileId = fileId, track = track, token = token).bytes()
             }.onFailure {
             // 之前这里静默吞异常，导致"取不到字幕"完全没线索（实机踩过）
                 android.util.Log.w("McAss", "取字幕失败 file=$fileId track=$track: ${it::class.java.simpleName}: ${it.message}")

@@ -84,6 +84,8 @@ class SubscriptionWallViewModel @Inject constructor(
         val loading: Boolean = true,
         val error: String? = null,
         val items: List<SubscriptionView> = emptyList(),
+        /** 海报是服务端相对路径，画图要拿它拼绝对地址（实机报「进入后没封面图」的根因） */
+        val origin: String? = null,
     )
 
     private val _ui = MutableStateFlow(UiState())
@@ -95,7 +97,7 @@ class SubscriptionWallViewModel @Inject constructor(
         viewModelScope.launch {
             val origin = repository.ui.value.origin
             if (origin == null) { _ui.update { it.copy(loading = false, error = "尚未连接服务器") }; return@launch }
-            _ui.update { it.copy(loading = true, error = null) }
+            _ui.update { it.copy(loading = true, error = null, origin = origin) }
             try {
                 val all = apiFactory.forOrigin(origin).subscriptions().dataOrThrow()
                 _ui.update { it.copy(loading = false, items = all.filter { s -> s.media.kind == kind }) }
@@ -146,9 +148,9 @@ fun SubscriptionWallScreen(
                             modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
                         )
                     }
-                    section("进行中", active, onOpenSubscription)
-                    section("已暂停", paused, onOpenSubscription)
-                    section(if (isMovie) "已入库" else "已收齐", done, onOpenSubscription)
+                    section("进行中", active, state.origin, onOpenSubscription)
+                    section("已暂停", paused, state.origin, onOpenSubscription)
+                    section(if (isMovie) "已入库" else "已收齐", done, state.origin, onOpenSubscription)
                 }
             }
         }
@@ -166,6 +168,7 @@ fun SubscriptionWallScreen(
 private fun LazyGridScope.section(
     name: String,
     items: List<SubscriptionView>,
+    origin: String?,
     onOpenSubscription: (Long) -> Unit,
 ) {
     if (items.isEmpty()) return
@@ -177,13 +180,13 @@ private fun LazyGridScope.section(
         }
     }
     items(items, key = { it.id }) { sub ->
-        WallSubCard(sub = sub, dim = name != "进行中") { onOpenSubscription(sub.id) }
+        WallSubCard(sub = sub, dim = name != "进行中", origin = origin) { onOpenSubscription(sub.id) }
     }
 }
 
 /** 墙上一格：海报（2:3）+ 状态签 + 片名 + 进度的同一套口径（与首页 SubCard 视觉同源） */
 @Composable
-private fun WallSubCard(sub: SubscriptionView, dim: Boolean, onClick: () -> Unit) {
+private fun WallSubCard(sub: SubscriptionView, dim: Boolean, origin: String?, onClick: () -> Unit) {
     Column(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
         Box(
             Modifier
@@ -194,7 +197,7 @@ private fun WallSubCard(sub: SubscriptionView, dim: Boolean, onClick: () -> Unit
         ) {
             RemoteImage(
                 url = sub.media.posterUrl,
-                origin = null,
+                origin = origin,
                 contentDescription = sub.media.title,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,

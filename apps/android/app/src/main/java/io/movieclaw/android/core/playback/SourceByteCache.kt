@@ -37,12 +37,44 @@ object SourceByteCache {
 
     @Volatile private var instance: Cache? = null
 
+    /**
+     * 上限按**剩余空间**降档（iOS `NativeStoragePlan` 的对应物：存储紧张时收小、再紧不落盘）：
+     * ≥24GB 给满 1.5GB；<24GB 收到 768MB；<8GB 收到 256MB；<2GB 基本不缓存（留 1MB 给 SimpleCache 建起来）。
+     */
+    private fun capBytes(context: Context): Long {
+        val free = runCatching { context.applicationContext.cacheDir.usableSpace }.getOrDefault(Long.MAX_VALUE)
+        val mb = 1024L * 1024
+        return when {
+            free < 2L * 1024 * mb -> 1L * mb
+            free < 8L * 1024 * mb -> 256L * mb
+            free < 24L * 1024 * mb -> 768L * mb
+            else -> MAX_BYTES
+        }
+    }
+
     fun cache(context: Context): Cache = instance ?: synchronized(this) {
-        instance ?: SimpleCache(
-            File(context.applicationContext.cacheDir, DIR),
-            LeastRecentlyUsedCacheEvictor(MAX_BYTES),
-            StandaloneDatabaseProvider(context.applicationContext),
-        ).also { instance = it }
+        instance ?: run {
+            val cap = capBytes(context)
+            android.util.Log.i("McPlayer", "片源字节缓存 上限=${cap / 1024 / 1024}MB（按剩余空间定档）")
+            SimpleCache(
+                File(context.applicationContext.cacheDir, DIR),
+                LeastRecentlyUsedCacheEvictor(cap),
+                StandaloneDatabaseProvider(context.applicationContext),
+            ).also { instance = it }
+        }
+    }
+
+    /** 退出登录 / 移除账号时清空（跨账号共用的字节不该留着） */
+    fun clear(context: Context) {
+        synchronized(this) {
+            val dir = File(context.applicationContext.cacheDir, DIR)
+            runCatching { instance?.release() }
+            instance = null
+            // 用 Media3 的静态删除：连元数据一起收干净（只删目录会留下指向空文件的索引）
+            runCatching {
+                SimpleCache.delete(dir, StandaloneDatabaseProvider(context.applicationContext))
+            }
+        }
     }
 
     /** 缓存键：文件 id + 大小（`fileId` 为 0 或大小未知时不下缓存） */

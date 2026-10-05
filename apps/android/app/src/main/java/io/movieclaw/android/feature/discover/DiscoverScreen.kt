@@ -36,6 +36,7 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import io.movieclaw.android.core.designsystem.statusLabel
 import io.movieclaw.android.feature.subscriptions.SubscriptionIndex
@@ -98,6 +99,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.jsonObject
@@ -168,6 +170,28 @@ class DiscoverViewModel @Inject constructor(
         refresh()
     }
 
+    /** 下拉刷新转圈（iOS `.refreshable` 的对应物） */
+    private val _refreshing = MutableStateFlow(false)
+    val refreshing: kotlinx.coroutines.flow.StateFlow<Boolean> = _refreshing.asStateFlow()
+
+    /** 下拉刷新：首页板块或筛选网格各自重拉一份，转圈到页面自己的加载态落下去 */
+    fun pullRefresh() {
+        if (_refreshing.value) return
+        viewModelScope.launch {
+            _refreshing.value = true
+            try {
+                refresh()
+                // 筛选态有 300ms 防抖：让它先过去，加载态立起来再等
+                kotlinx.coroutines.delay(450)
+                kotlinx.coroutines.withTimeoutOrNull(12_000) {
+                    _ui.first { !it.loading && !it.filteredLoading }
+                }
+            } finally {
+                _refreshing.value = false
+            }
+        }
+    }
+
     /** 媒体类型 / 数据源 / 条件变化后的统一入口：按是否处于筛选态决定拉哪一份数据 */
     private fun refresh() {
         if (isFiltering(_ui.value)) {
@@ -215,7 +239,8 @@ class DiscoverViewModel @Inject constructor(
                     _ui.update {
                         it.copy(
                             filteredLoading = false,
-                            filtered = parseTitles(raw),
+                            // 按 ref 去重：网格用 ref 当 key，重复一条就会崩（服务端排序不稳时也可能重复）
+                            filtered = parseTitles(raw).distinctBy { it.ref },
                             filteredPage = raw["page"]?.jsonPrimitive?.intOrNull ?: 1,
                             filteredTotalPages = raw["total_pages"]?.jsonPrimitive?.intOrNull ?: 1,
                             filteredTotal = raw["total_results"]?.jsonPrimitive?.intOrNull ?: 0,
@@ -232,6 +257,10 @@ class DiscoverViewModel @Inject constructor(
     fun loadMoreFiltered() {
         val s = _ui.value
         if (s.filteredLoading || s.filteredPage >= s.filteredTotalPages || !isFiltering(s)) return
+        // 记下这一轮的条件代号：换筛选条件（loadFiltered 会 ++filteredSeq 并清空列表）后，
+        // 在飞的这一页回来必须作废——原来没有这道守卫，旧条件的一页会混进新列表，
+        // 撞上重复 ref 就是「Key … was already used」闪退（实机抓到过）
+        val seq = filteredSeq
         viewModelScope.launch {
             val origin = origin ?: return@launch
             val next = s.filteredPage + 1
@@ -249,15 +278,17 @@ class DiscoverViewModel @Inject constructor(
                 ).dataOrThrow().jsonObject
             }
                 .onSuccess { raw ->
+                    if (seq != filteredSeq) return@onSuccess
                     _ui.update {
                         it.copy(
                             filteredLoading = false,
                             filteredPage = next,
-                            filtered = it.filtered + parseTitles(raw),
+                            filtered = (it.filtered + parseTitles(raw)).distinctBy { t -> t.ref },
                         )
                     }
                 }
                 .onFailure { e ->
+                    if (seq != filteredSeq) return@onFailure
                     _ui.update { it.copy(filteredLoading = false, filteredError = friendlyMessage(e)) }
                 }
         }
@@ -328,6 +359,7 @@ class DiscoverViewModel @Inject constructor(
 
 /** 发现页:搜索入口 + 电影/剧集 + 服务端板块 + 继续观看 + 资料库 */
 @Composable
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 fun DiscoverScreen(
     onOpenLibrary: (Long, String) -> Unit,
     onOpenItem: (Long, Long) -> Unit,
@@ -341,6 +373,7 @@ fun DiscoverScreen(
     vm: DiscoverViewModel = hiltViewModel(),
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
+    val refreshing by vm.refreshing.collectAsStateWithLifecycle()
     val origin = vm.origin
     // 全站订阅索引：hero 与每张卡片的「订阅影片 / 已订阅 · 状态」都由它判断，
     // 不再拿"是否在库里"冒充"是否已订阅"
@@ -385,6 +418,27 @@ fun DiscoverScreen(
             scrollPx = scroll.value.toFloat(),
             modifier = Modifier.fillMaxSize(),
         )
+        // 下拉刷新（iOS `.refreshable`）：**必须用官方 PullToRefreshBox 包在滚动之外**——
+        // 之前把 `Modifier.pullToRefresh` 挂在滚动同一个节点上，划了没反应（实机反馈）。
+        // 指示器再加一段 offset：这一页的顶栏是悬浮的（盖在内容上），默认位置的转圈正好被它挡住，
+        // 「刷新了但屏幕上什么都看不见」也是看起来没反应的来源之一。
+        val pullState = rememberPullToRefreshState()
+        androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = { vm.pullRefresh() },
+            state = pullState,
+            modifier = Modifier.fillMaxSize(),
+            indicator = {
+                androidx.compose.material3.pulltorefresh.PullToRefreshDefaults.Indicator(
+                    state = pullState,
+                    isRefreshing = refreshing,
+                    containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = topBarTotal + 6.dp),
+                )
+            },
+        ) {
         Column(
             Modifier
                 .fillMaxSize()
@@ -554,6 +608,7 @@ fun DiscoverScreen(
                     }
                 }
             }
+        }
         }
     }
 

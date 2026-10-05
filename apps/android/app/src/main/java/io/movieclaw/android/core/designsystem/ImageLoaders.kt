@@ -40,4 +40,10 @@ class ImageLoaders @Inject constructor(
                 .build()
         }
         .build()
+
+    /** 退出登录 / 移除账号时清空（内存 + 磁盘）：iOS 那边快照按账号存、退出即删，我的缓存不分账号，整份清才不串号 */
+    suspend fun clear() {
+        runCatching { loader.memoryCache?.clear() }
+        runCatching { loader.diskCache?.clear() }
+    }
 }

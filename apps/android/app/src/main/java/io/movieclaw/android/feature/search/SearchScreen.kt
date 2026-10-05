@@ -290,7 +290,7 @@ fun SearchScreen(
                 CategoryChips(selected = state.category, onSelect = vm::onCategory)
             }
 
-            if (state.history.isNotEmpty() && state.blocks.isEmpty() && state.titles.isEmpty() && state.libraryGroups.isEmpty()) {
+            if (state.history.isNotEmpty() && state.blocks.isEmpty() && state.titles.isEmpty() && state.librarySearch?.items.isNullOrEmpty()) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -323,7 +323,7 @@ fun SearchScreen(
             // 空词时该做的就是把片名打进去；资源分区空词时给的是分类，不占这一行）
             if (state.history.isEmpty() && state.query.isBlank() &&
                 state.mode != SearchMode.TORRENTS &&
-                state.titles.isEmpty() && state.libraryGroups.isEmpty()
+                state.titles.isEmpty() && state.librarySearch?.items.isNullOrEmpty()
             ) {
                 Text(
                     "还没有搜索记录。" + when (state.mode) {
@@ -409,10 +409,50 @@ fun SearchScreen(
                 }
 
                 if (state.mode == SearchMode.LIBRARY) {
-                    // 媒体库垂直：**两列海报格**，按库分区（网页 `library-search-results` /
-                    // iOS `LibrarySearchResultsView` 同款）。此前是一条 44x66 的迷你行，
-                    // 与「影视」垂直的海报卡完全不是一档（用户报「卡片太小」）。
-                    if (state.searching && state.libraryGroups.isEmpty()) {
+                    // 媒体库（v0.31 /search/library）：相关度平铺的两列海报格 + 顶部人物行 +
+                    // 每格注明命中原因（「演员：史蒂芬·朗」）。旧接口按库分组、组内拼音排，
+                    // 人物带出的片会沉底，v0.31 起服务端已删除。
+                    val lib = state.librarySearch
+                    // 人物行：点头像下钻这个人的库内作品；下钻态给「返回全部」
+                    if (lib != null && lib.people.isNotEmpty() && state.libraryPerson == null) {
+                        item(key = "library-people") {
+                            Column {
+                                Row(Modifier.fillMaxWidth().padding(horizontal = McMetrics.pagePadding, vertical = 8.dp)) {
+                                    // 只有「人物」一个标题（iOS LibrarySearchResultsView 同款）
+                                    Text("人物", style = McType.headline, color = TextPrimary)
+                                }
+                                LazyRow(
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = McMetrics.pagePadding),
+                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                ) {
+                                    items(lib.people, key = { "p-${it.id}" }) { person ->
+                                        PersonSearchChip(person = person, origin = origin, onClick = { vm.drillPerson(person) })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (state.libraryPerson != null) {
+                        item(key = "library-person-bar") {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = McMetrics.pagePadding, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    state.libraryPerson?.name ?: "",
+                                    style = McType.subSemibold, color = TextPrimary,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .background(Color.White.copy(alpha = 0.08f))
+                                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text("只看 TA 的作品 · ", style = McType.caption, color = TextFaint)
+                                Text("返回全部", style = McType.caption, color = Accent, modifier = Modifier.clickable { vm.exitPerson() })
+                            }
+                        }
+                    }
+                    if (state.searching && state.librarySearch?.items.isNullOrEmpty()) {
                         // 加载骨架：格宽与结果一致（网页 7 块 / iOS 6 块，这里三行两列）
                         item(key = "library-skeleton") {
                             Column(Modifier.padding(horizontal = McMetrics.pagePadding)) {
@@ -432,55 +472,69 @@ fun SearchScreen(
                             }
                         }
                     }
-                    val total = state.libraryGroups.sumOf { it.second.size }
+                    val total = lib?.items?.size ?: 0
                     if (!state.searching && total == 0 && state.query.isNotBlank()) {
                         // 空态：出口指向「影视」——库里没有 ≈ 想要但还没入手（网页/iOS 原话）
                         item(key = "library-empty") {
                             LibraryEmptyState { vm.onMode(SearchMode.TITLES); vm.submit() }
                         }
                     }
-                    state.libraryGroups.forEach { (libraryName, items) ->
-                        item(key = "library-tag-$libraryName") {
-                            Row(
-                                Modifier.fillMaxWidth().padding(
-                                    start = McMetrics.pagePadding,
-                                    end = McMetrics.pagePadding,
-                                    top = 16.dp,
-                                    bottom = 4.dp,
-                                ),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
+                    // 相关度平铺：每行两格，格下多一行命中原因（非片名命中才解释，同 iOS）
+                    val hits = lib?.items.orEmpty()
+                    if (total > 0) {
+                        item(key = "library-count") {
+                            Text(
+                                "共 $total 条结果 · 按相关度排序",
+                                style = McType.sub, color = TextMuted,
+                                modifier = Modifier.padding(horizontal = McMetrics.pagePadding, vertical = 8.dp),
+                            )
+                        }
+                    }
+                    items(hits.chunked(2), key = { row -> "lib-row-${row.firstOrNull()?.item?.mediaItemId}" }) { row ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = McMetrics.pagePadding, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        ) {
+                            row.forEach { hit ->
+                                LibraryResultCell(
+                                    item = hit.item,
+                                    origin = origin,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { onOpenLibraryItem(
+                                        hit.item.libraryId ?: hit.libraryIds.firstOrNull() ?: -1L,
+                                        hit.item.mediaItemId,
+                                    ) },
+                                    // 命中原因抑制规则照 iOS：只在「纯片名文本匹配」时不显示
+                                    //（`person_id == nil && source_field == "title" && type 以 text 开头`），
+                                    // 其余场景（演员 / 导演 / 别名…）都要把原因写出来
+                                    matchLabel = hit.match.label.takeIf {
+                                        it.isNotBlank() && !(
+                                            hit.match.personId == null &&
+                                                hit.match.sourceField == "title" &&
+                                                hit.match.type.startsWith("text")
+                                            )
+                                    },
+                                )
+                            }
+                            if (row.size == 1) Spacer(Modifier.weight(1f))
+                        }
+                    }
+                    // 游标续页：滚到接近底部再取下一页
+                    if (lib?.nextCursor != null) {
+                        item(key = "library-more") {
+                            Box(Modifier.fillMaxWidth().padding(vertical = 14.dp), contentAlignment = Alignment.Center) {
+                                // 分页按钮照 iOS/Web：正常「更多结果」、取下一页时「正在加载…」且不可点
+                                val loadingMore = state.searching
                                 Text(
-                                    libraryName,
-                                    style = McType.caption,
-                                    color = Accent,
+                                    if (loadingMore) "正在加载…" else "更多结果",
+                                    style = McType.sub,
+                                    color = if (loadingMore) TextFaint else Accent,
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(999.dp))
-                                        .background(Color.Black.copy(alpha = 0.3f))
-                                        .padding(horizontal = 10.dp, vertical = 3.dp),
+                                        .border(1.dp, LineSoft, RoundedCornerShape(999.dp))
+                                        .clickable(enabled = !loadingMore) { vm.loadMoreLibrary() }
+                                        .padding(horizontal = 16.dp, vertical = 8.dp),
                                 )
-                                Spacer(Modifier.width(10.dp))
-                                Text("共 ${items.size} 条结果", style = McType.sub, color = TextMuted)
-                            }
-                        }
-                        // 每行两格：格宽 = (屏宽 - 两侧页边距 - 16 间距) / 2，与单库海报墙同宽
-                        items(
-                            items.chunked(2),
-                            key = { row -> "lib-row-$libraryName-${row.firstOrNull()?.mediaItemId}" },
-                        ) { row ->
-                            Row(
-                                Modifier.fillMaxWidth().padding(horizontal = McMetrics.pagePadding, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                            ) {
-                                row.forEach { item ->
-                                    LibraryResultCell(
-                                        item = item,
-                                        origin = origin,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { onOpenLibraryItem(item.libraryId ?: -1L, item.mediaItemId) },
-                                    )
-                                }
-                                if (row.size == 1) Spacer(Modifier.weight(1f))
                             }
                         }
                     }
@@ -787,6 +841,8 @@ private fun LibraryResultCell(
     origin: String?,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
+    /** 为什么命中（「演员：史蒂芬·朗」）；片名直接命中的不给 */
+    matchLabel: String? = null,
 ) {
     Column(modifier.clickable(onClick = onClick)) {
         Box(
@@ -828,6 +884,60 @@ private fun LibraryResultCell(
             Spacer(Modifier.height(2.dp))
             Text(footnote, style = McType.caption, color = TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+        if (matchLabel != null) {
+            Spacer(Modifier.height(2.dp))
+            Text(
+                matchLabel,
+                style = McType.caption, color = Accent,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** 人物行的一格：圆头像 72 + 名字 + 「库内 N 部」，整格 96 宽（iOS LibrarySearchPeopleRow 同尺寸） */
+@Composable
+private fun PersonSearchChip(
+    person: io.movieclaw.android.core.model.LibrarySearchPerson,
+    origin: String?,
+    onClick: () -> Unit,
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.width(96.dp).clickable(onClick = onClick),
+    ) {
+        Box(
+            Modifier
+                .size(72.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(Placeholder),
+        ) {
+            RemoteImage(
+                url = person.avatarUrl ?: person.profilePath,
+                origin = origin,
+                contentDescription = person.name,
+                modifier = Modifier.fillMaxSize(),
+                fallback = {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            person.name.take(1),
+                            fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                            color = Color.White.copy(alpha = 0.35f),
+                        )
+                    }
+                },
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            person.name,
+            style = McType.sub.copy(fontWeight = FontWeight.Medium), color = TextPrimary,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            "库内 ${person.itemCount} 部",
+            style = McType.caption, color = TextFaint,
+        )
     }
 }
 

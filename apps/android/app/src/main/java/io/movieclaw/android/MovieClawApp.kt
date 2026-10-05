@@ -1,5 +1,7 @@
 package io.movieclaw.android
 
+import io.movieclaw.android.core.AppScopes
+
 import android.app.Application
 import dagger.hilt.android.HiltAndroidApp
 import io.movieclaw.android.core.designsystem.ImageLoaders
@@ -26,7 +28,7 @@ class MovieClawApp : Application() {
     @Inject
     lateinit var session: SessionRepository
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = AppScopes.default("MovieClawApp")
 
     override fun onCreate() {
         super.onCreate()

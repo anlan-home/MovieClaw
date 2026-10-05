@@ -1,6 +1,8 @@
 package io.movieclaw.android.feature.reels
 
 import android.content.Context
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material.icons.rounded.Pause
@@ -50,6 +53,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -57,8 +61,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -316,7 +323,12 @@ class ReelsViewModel @Inject constructor(
                     .setPlaybackMarks(PlaybackMarksRequest(mediaItemId = t.mediaItemId, favorite = next))
                     .dataOrThrow()
             }.isSuccess
-            if (!ok) _ui.update { it.copy(favorites = it.favorites + (item.id to !next)) }   // 失败改回去
+            if (!ok) {
+                _ui.update { it.copy(favorites = it.favorites + (item.id to !next)) }   // 失败改回去
+            } else {
+                // 收藏变了：媒体库首页的「我的收藏」行与收藏墙立刻重拉
+                io.movieclaw.android.core.model.LibraryMarksBus.bump()
+            }
         }
     }
 
@@ -339,7 +351,12 @@ class ReelsViewModel @Inject constructor(
                     )
                 ).dataOrThrow()
             }.isSuccess
-            if (!ok) _ui.update { it.copy(playeds = it.playeds + (item.id to !next)) }
+            if (!ok) {
+                _ui.update { it.copy(playeds = it.playeds + (item.id to !next)) }
+            } else {
+                // 「已看」影响首页「接下来继续」与各行进度，一起让首页重拉
+                io.movieclaw.android.core.model.LibraryMarksBus.bump()
+            }
         }
     }
 
@@ -485,6 +502,9 @@ fun ReelsScreen(
                     players = players,
                     favorite = vm.isFavorite(item),
                     played = vm.isPlayed(item),
+                    qualityCap = state.qualityCap,
+                    qualityLabel = { vm.qualityLabel(it) },
+                    onQuality = { vm.setQuality(it) },
                     onEvent = { kind, watched, wait, pos, detail ->
                         vm.event(item, kind, watchedMs = watched, waitMs = wait, positionMs = pos, detail = detail)
                     },
@@ -508,7 +528,9 @@ fun ReelsScreen(
             }
         }
 
-        // 顶栏：返回箭头 + 标题「片段」+ 右上筛选胶囊（全屏时收掉）
+        // 顶栏（iOS `ReelTitle`）：左上玻璃返回键、正中「在播片名 + 年份」的玻璃胶囊
+        //（点了去详情页；加载中 / 空态只写「片段」、不能点）、右上筛选胶囊（全屏时收掉）。
+        // 胶囊占满返回键与筛选键之间：宽度固定，换条只换文字，长片名在里面截断
         if (!fullscreen) {
             Row(
                 Modifier
@@ -522,9 +544,36 @@ fun ReelsScreen(
                     contentDescription = "返回",
                     onClick = { vm.flushEvents(); onBack() },
                 )
-                Spacer(Modifier.width(10.dp))
-                Text("片段", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(Color.White.copy(alpha = 0.16f))
+                            .clickable(enabled = current != null) {
+                                current?.let { item ->
+                                    vm.event(item, "detail")
+                                    onOpenItem(item.title.libraryId, item.title.mediaItemId)
+                                }
+                            },
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                current?.title?.name ?: "片段",
+                                fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color.White,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                            current?.title?.year?.let {
+                                Text("$it", fontSize = 11.sp, color = Color.White.copy(alpha = 0.6f))
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
                 Row(
                     Modifier
                         .clip(RoundedCornerShape(999.dp))
@@ -553,9 +602,6 @@ fun ReelsScreen(
         ReelFilterSheet(
             filter = state.filter,
             facets = state.facets,
-            qualityCap = state.qualityCap,
-            qualityLabel = { vm.qualityLabel(it) },
-            onQuality = { vm.setQuality(it) },
             onApply = { vm.applyFilter(it); filterOpen = false },
             onDismiss = { filterOpen = false },
         )
@@ -639,6 +685,10 @@ private fun ReelPage(
     players: ReelsPlayers,
     favorite: Boolean,
     played: Boolean,
+    /** 片段自己的画质档位（原画 / 720p，按家里 / 外网各记一份） */
+    qualityCap: Int,
+    qualityLabel: (Int) -> String,
+    onQuality: (Int) -> Unit,
     onEvent: (String, Long?, Long?, Long?, String?) -> Unit,
     onToggleFavorite: () -> Unit,
     onTogglePlayed: () -> Unit,
@@ -737,12 +787,37 @@ private fun ReelPage(
                         // iOS 用 .fit：横带里整张封面完整可见，两侧留黑
                         contentScale = ContentScale.Fit,
                     )
+                    // iOS：等画面时封面压暗 0.3（出画后整块收掉，免得从视频黑边里透出来）
                     if (isCurrent && failMessage == null) {
-                        androidx.compose.material3.CircularProgressIndicator(
-                            color = Color.White.copy(alpha = 0.7f),
-                            modifier = Modifier.size(26.dp),
-                            strokeWidth = 2.5.dp,
-                        )
+                        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.3f)))
+                    }
+                    if (isCurrent && failMessage == null) {
+                        // 转圈 + 实时加载速度（iOS `loadingIndicator`：`↓ 3.2 MB/s`，等同一路读数）
+                        var speedBps by remember(item.id) { mutableStateOf<Long?>(null) }
+                        LaunchedEffect(item.id) {
+                            while (true) {
+                                speedBps = players.bandwidthBps()
+                                kotlinx.coroutines.delay(800)
+                            }
+                        }
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                color = Color.White.copy(alpha = 0.7f),
+                                modifier = Modifier.size(26.dp),
+                                strokeWidth = 2.5.dp,
+                            )
+                            speedBps?.takeIf { it > 0 }?.let { bps ->
+                                Text(
+                                    "↓ ${"%.1f".format(bps / 8.0 / 1024.0 / 1024.0)} MB/s",
+                                    fontSize = 11.sp,
+                                    color = Color.White.copy(alpha = 0.7f),
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                        }
                     }
                 }
                 // 字幕：窗口抽取的那一小段，本地解析后按与正片同一套叠层画
@@ -807,33 +882,80 @@ private fun ReelPage(
             }
 
             if (!fullscreen) {
-                // ── 「全屏观看」：按钮中心落在横带下沿 28dp 处（iOS 同值）──
-                Box(
+                // ── 横带下方一行（iOS 同序）：画质胶囊在左、「全屏观看」在右，间隔 10、
+                //    行中心落在横带下沿约 28dp 处。播放 / 起播 / 缓冲时整行调暗到 30%
+                //    （iOS `controlsAlpha`：只有暂停、放完、放不出才恢复全亮）──
+                val rowDim = isCurrent && (playing || (!ended && failMessage == null && !frameReady))
+                val rowAlpha = if (rowDim) 0.3f else 1f
+                Row(
                     Modifier
-                        .padding(start = 16.dp)
+                        .align(Alignment.TopCenter)
                         .offset(y = bandTop + bandHeight + 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // 画质胶囊：与「全屏观看」同一种描边样式，写着当前档（原画 / 720p）；
+                    // 按家里 / 外网各记一份、竖屏与全屏共用，选了当前这条按新画质重开
+                    var qualityMenu by remember { mutableStateOf(false) }
+                    Box {
+                        Row(
+                            Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .border(1.dp, Color.White.copy(alpha = 0.35f * rowAlpha), RoundedCornerShape(999.dp))
+                                .clickable { qualityMenu = true }
+                                .padding(horizontal = 14.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                qualityLabel(qualityCap),
+                                fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                                color = Color.White.copy(alpha = 0.92f * rowAlpha),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Icon(
+                                Icons.Rounded.UnfoldMore, contentDescription = "画质",
+                                tint = Color.White.copy(alpha = 0.85f * rowAlpha),
+                                modifier = Modifier.size(13.dp),
+                            )
+                        }
+                        androidx.compose.material3.DropdownMenu(
+                            expanded = qualityMenu,
+                            onDismissRequest = { qualityMenu = false },
+                            containerColor = Color(0xFF22252C),
+                        ) {
+                            ReelsQuality.options.forEach { (cap, label) ->
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = { Text(label, fontSize = 14.sp, color = Color.White) },
+                                    onClick = { qualityMenu = false; onQuality(cap) },
+                                )
+                            }
+                        }
+                    }
+                    // 「全屏观看」：描边小胶囊；这一段交给整屏的片段模式，从当前位置接着放
                     Row(
                         Modifier
                             .clip(RoundedCornerShape(999.dp))
-                            .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(999.dp))
+                            .border(1.dp, Color.White.copy(alpha = 0.35f * rowAlpha), RoundedCornerShape(999.dp))
                             .clickable(enabled = isCurrent) { onFullscreen() }
                             .padding(horizontal = 14.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(
                             Icons.Rounded.Fullscreen, contentDescription = null,
-                            tint = Color.White.copy(alpha = 0.92f), modifier = Modifier.size(14.dp),
+                            tint = Color.White.copy(alpha = 0.92f * rowAlpha), modifier = Modifier.size(14.dp),
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
                             "全屏观看", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            color = Color.White.copy(alpha = 0.92f),
+                            color = Color.White.copy(alpha = 0.92f * rowAlpha),
                         )
                     }
                 }
 
-                // ── 底部：四行信息 + 右侧图标列 + 进度行（常显）──
+                // ── 底部（iOS 同序）：左下导演 + 简介、右侧图标列、最底一条细进度线。
+                //    进度线平时不显示、只在暂停时淡入，也不写时间（2026-09-30 用户要求，同抖音；
+                //    全屏的片段模式才有完整时间轴）──
+                val showProgress = isCurrent && !playing && !ended && failMessage == null && frameReady
                 Column(
                     Modifier
                         .align(Alignment.BottomStart)
@@ -856,8 +978,8 @@ private fun ReelPage(
                         ReelActions(
                             favorite = favorite,
                             played = played,
+                            onOpenDetail = onOpenDetail,
                             onToggleFavorite = onToggleFavorite,
-                            onPlay = onPlayFull,
                             onTogglePlayed = onTogglePlayed,
                             onShare = onShare,
                         )
@@ -867,6 +989,8 @@ private fun ReelPage(
                         positionMs = positionMs,
                         durationMs = item.segment.durationMs,
                         progress = clipProgress(item, positionMs),
+                        showTime = false,
+                        visible = showProgress,
                         modifier = Modifier.padding(horizontal = 16.dp),
                     )
                 }
@@ -1025,11 +1149,12 @@ private fun CenterGlyph(
 /* ══════════════════════ 左下信息 / 右下图标 / 进度行 ══════════════════════ */
 
 /**
- * 左下四行，层级从强到弱（iOS `ReelsView.info`）：
- * ① 导演（剧集是主创）：24dp 圆头像 + 15 半粗名字 + 15 的「导演 / 主创」
- * ② 片名（17 粗体）+ 剧集「第N季·第N集」（15, 70%）
- * ③ 年份 · ★评分 · 类型（13, 70%）
- * ④ 一行简介（13, 85%）：放不下时给「展开」，点开最多 6 行
+ * 左下信息（iOS `ReelsView.info`）：**只放导演与简介**——片名、年份在顶部的标题胶囊里，
+ * 评分与类型不再显示在这一页（类型在右上角的筛选里）。
+ * ① 导演（剧集是主创）：32dp 圆头像 + 15 半粗名字 + 15 的「导演 / 主创」
+ *    （32dp 是 iOS 2026-09-30 实测定稿：24dp 只比名字那行字高一点、显小），点了进人物页
+ * ② 简介（13, 85%）：剧集前面半粗「第 N 季第 N 集「集名」」；收起 3 行、放不下给「展开」，
+ *    点开最多 8 行
  */
 @Composable
 private fun ReelInfo(
@@ -1044,7 +1169,7 @@ private fun ReelInfo(
     val shadow = Shadow(color = Color.Black.copy(alpha = 0.55f), offset = androidx.compose.ui.geometry.Offset(0f, 1f), blurRadius = 3f)
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         title.directors.firstOrNull()?.let { lead ->
             Row(
@@ -1057,7 +1182,7 @@ private fun ReelInfo(
                     url = lead.avatarUrl,
                     origin = origin,
                     modifier = Modifier
-                        .size(24.dp)
+                        .size(32.dp)
                         .clip(CircleShape)
                         .border(0.5.dp, Color.White.copy(alpha = 0.25f), CircleShape),
                     contentDescription = null,
@@ -1077,71 +1202,46 @@ private fun ReelInfo(
                 )
             }
         }
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(
-                    title.name,
-                    fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color.White,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    style = TextStyle(shadow = shadow),
-                )
-                title.episode?.let { ep ->
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        "第${ep.season}季·第${ep.episode}集",
-                        fontSize = 15.sp, color = Color.White.copy(alpha = 0.7f),
-                        maxLines = 1,
-                        style = TextStyle(shadow = shadow),
-                    )
+        // 简介（iOS `caption`）：剧集前面是「第 N 季第 N 集「集名」」（季集放在这里，
+        // 顶部胶囊只写片名和年份），优先用分集简介
+        val body = (title.episode?.overview ?: title.overview)?.takeIf { it.isNotBlank() }
+        val episode = title.episode
+        val head = episode?.let { ep ->
+            "第 ${ep.season} 季第 ${ep.episode} 集" +
+                (ep.name?.takeIf { it.isNotBlank() }?.let { "「$it」" } ?: "")
+        }
+        if (head != null || body != null) {
+            var overflowed by remember(item.id) { mutableStateOf(false) }
+            val caption = remember(item.id, head, body, expanded) {
+                buildAnnotatedString {
+                    if (head != null) {
+                        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(head) }
+                    }
+                    body?.let { append(it) }
+                    if (expanded) {
+                        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append("  收起") }
+                    }
                 }
             }
-            val meta = buildList {
-                title.year?.let { add("$it") }
-                title.rating?.takeIf { it > 0f }?.let { add("★ %.1f".format(it)) }
-                if (title.genres.isNotEmpty()) add(title.genres.take(2).joinToString(" / "))
-            }.joinToString(" · ")
-            if (meta.isNotEmpty()) {
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onToggleExpanded() },
+            ) {
                 Text(
-                    meta, fontSize = 13.sp, color = Color.White.copy(alpha = 0.7f),
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    text = caption,
+                    fontSize = 13.sp, color = Color.White.copy(alpha = 0.85f),
+                    maxLines = if (expanded) 8 else 3,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 19.sp,
                     style = TextStyle(shadow = shadow),
+                    onTextLayout = { overflowed = it.hasVisualOverflow },
                 )
-            }
-        }
-        // 简介：剧集前面放集名（「打个车吧｜……」），优先用分集简介
-        val caption = run {
-            val overview = item.title.episode?.overview ?: item.title.overview
-            val name = item.title.episode?.name?.takeIf { it.isNotBlank() }
-            when {
-                name != null && !overview.isNullOrBlank() -> "$name｜$overview"
-                !overview.isNullOrBlank() -> overview
-                name != null -> name
-                else -> null
-            }
-        }
-        if (caption != null) {
-            var overflowed by remember(item.id) { mutableStateOf(false) }
-            Column {
-                Box(
-                    Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { onToggleExpanded() },
-                ) {
+                if (!expanded && overflowed) {
                     Text(
-                        text = if (expanded) "$caption  收起" else caption,
-                        fontSize = 13.sp, color = Color.White.copy(alpha = 0.85f),
-                        maxLines = if (expanded) 6 else 1,
-                        overflow = TextOverflow.Ellipsis,
-                        lineHeight = 19.sp,
-                        style = TextStyle(shadow = shadow),
-                        onTextLayout = { overflowed = it.hasVisualOverflow },
+                        "展开", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        color = Color.White, modifier = Modifier.align(Alignment.BottomEnd),
                     )
-                    if (!expanded && overflowed) {
-                        Text(
-                            "展开", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            color = Color.White, modifier = Modifier.align(Alignment.BottomEnd),
-                        )
-                    }
                 }
             }
         }
@@ -1149,20 +1249,20 @@ private fun ReelInfo(
 }
 
 /**
- * 右下角一列无底色图标（图标 26、标签 11，同 iOS ReelActionLabel）。
- * 「播放」= 从当前位置转正片页；长按可选「从头看」（同 iOS 的 contextMenu）。
+ * 右下角一列无底色图标（图标 26、标签 11，同 iOS `ReelActionLabel`）：收藏 / 详情 / 已看 / 分享。
+ * iOS 2026-09-30 起「详情」替换了原来的「播放」——刷到感兴趣的片最常做的是看详细信息，
+ * 想看整部走全屏里的「看全片」。胶片图标是宽矩形，同字号下显大，缩到 21 才与其余视觉等重（iOS 同款）。
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun ReelActions(
     favorite: Boolean,
     played: Boolean,
+    onOpenDetail: () -> Unit,
     onToggleFavorite: () -> Unit,
-    onPlay: (Boolean) -> Unit,
     onTogglePlayed: () -> Unit,
     onShare: () -> Unit,
 ) {
-    var menuOpen by remember { mutableStateOf(false) }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(18.dp),
@@ -1174,27 +1274,7 @@ private fun ReelActions(
             tint = if (favorite) Color(0xFFFF4459) else Color.White,
             onClick = onToggleFavorite,
         )
-        Box {
-            ReelIcon(
-                Icons.Rounded.PlayArrow, "播放",
-                onClick = { onPlay(false) },
-                onLongClick = { menuOpen = true },
-            )
-            androidx.compose.material3.DropdownMenu(
-                expanded = menuOpen,
-                onDismissRequest = { menuOpen = false },
-                containerColor = Color(0xFF22252C),
-            ) {
-                androidx.compose.material3.DropdownMenuItem(
-                    text = { Text("从这里接着看", fontSize = 14.sp, color = Color.White) },
-                    onClick = { menuOpen = false; onPlay(false) },
-                )
-                androidx.compose.material3.DropdownMenuItem(
-                    text = { Text("从头看", fontSize = 14.sp, color = Color.White) },
-                    onClick = { menuOpen = false; onPlay(true) },
-                )
-            }
-        }
+        ReelIcon(Icons.Rounded.Movie, "详情", iconSize = 21.dp, onClick = onOpenDetail)
         ReelIcon(
             Icons.Rounded.CheckCircle,
             "已看",
@@ -1211,6 +1291,8 @@ private fun ReelIcon(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     tint: Color = Color.White,
+    /** 图标字号：宽扁的符号要小一号，一列按钮视觉上才一样重（iOS 同款） */
+    iconSize: androidx.compose.ui.unit.Dp = 26.dp,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
 ) {
@@ -1224,7 +1306,7 @@ private fun ReelIcon(
         ) {
             Icon(
                 icon, contentDescription = label, tint = tint,
-                modifier = Modifier.size(26.dp),
+                modifier = Modifier.size(iconSize),
             )
         }
         Spacer(Modifier.height(4.dp))
@@ -1242,18 +1324,22 @@ private fun ReelIcon(
 }
 
 /**
- * 进度行：细线 + 右侧时间（iOS `ReelProgressRow`）。
- * 时间是「**在整片/整集里**放到哪 / 整片多长」——让人知道这一段出自片子的什么位置。
- * 竖屏页与全屏共用；常显。
+ * 进度行：细线 + 可选时间（iOS `ReelProgressRow`）。
+ * 竖屏（本页）**只留一条 2dp 细线、不写时间**，而且平时不显示、只在暂停时淡入
+ * （2026-09-30 用户要求，同抖音——原来右边写着「这一段放到哪 / 多长」，后来整段去掉）；
+ * 全屏的片段模式照旧有完整时间轴（`showTime = true`）。
  */
 @Composable
 private fun ReelProgressRow(
     positionMs: Long,
     durationMs: Long?,
     progress: Float,
+    showTime: Boolean = true,
+    visible: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
-    Row(modifier = modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    val rowAlpha by animateFloatAsState(if (visible) 1f else 0f, tween(200), label = "reelProgress")
+    Row(modifier = modifier.fillMaxWidth().alpha(rowAlpha), verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier
                 .weight(1f)
@@ -1269,20 +1355,22 @@ private fun ReelProgressRow(
                     .background(Color.White.copy(alpha = 0.9f)),
             )
         }
-        Spacer(Modifier.width(10.dp))
-        Text(
-            timeText(positionMs, durationMs),
-            fontSize = 11.sp, fontWeight = FontWeight.Medium,
-            fontFamily = FontFamily.Monospace,
-            color = Color.White.copy(alpha = 0.78f),
-            style = TextStyle(
-                shadow = Shadow(
-                    color = Color.Black.copy(alpha = 0.5f),
-                    offset = androidx.compose.ui.geometry.Offset(0f, 1f),
-                    blurRadius = 2f,
+        if (showTime) {
+            Spacer(Modifier.width(10.dp))
+            Text(
+                timeText(positionMs, durationMs),
+                fontSize = 11.sp, fontWeight = FontWeight.Medium,
+                fontFamily = FontFamily.Monospace,
+                color = Color.White.copy(alpha = 0.78f),
+                style = TextStyle(
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.5f),
+                        offset = androidx.compose.ui.geometry.Offset(0f, 1f),
+                        blurRadius = 2f,
+                    ),
                 ),
-            ),
-        )
+            )
+        }
     }
 }
 
@@ -1313,16 +1401,13 @@ private fun clock(seconds: Double, long: Boolean): String {
  * 否则勾了「动画」其他类型全变 0，多选就废了），为 0 的档置灰不可点（「永不空货架」）。
  * 「其他」池子（`filterable=false`）收起类型 / 题材 / 地区 / 年代 / 评分 / 片长，只留观看状态。
  *
- * 末尾多一组**「画质」**（本端独有）：局域网原画直出、外网默认 720p，按网络环境各记一份。
+ * 画质不在这张面板里：它是横带下方「全屏观看」左边的独立胶囊（iOS 2026-09-30 的位置）。
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun ReelFilterSheet(
     filter: ReelFilter,
     facets: ReelFacetsView?,
-    qualityCap: Int,
-    qualityLabel: (Int) -> String,
-    onQuality: (Int) -> Unit,
     onApply: (ReelFilter) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1350,32 +1435,6 @@ private fun ReelFilterSheet(
                 DimensionRow("片长", facets?.runtimes.orEmpty(), draft.runtimes) { draft = draft.copy(runtimes = it) }
             }
             DimensionRow("观看", facets?.watch.orEmpty(), draft.watch) { draft = draft.copy(watch = it) }
-
-            // 画质：档位按网络环境记一份；「自动」= 局域网原画直出、外网 720p
-            Text(
-                "画质", fontSize = 12.sp, color = Color.White.copy(alpha = 0.5f),
-                modifier = Modifier.padding(top = 10.dp, bottom = 6.dp),
-            )
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(ReelsQuality.options) { (cap, label) ->
-                    val on = qualityCap == cap
-                    Box(
-                        Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(if (on) Color.White.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.06f))
-                            .clickable { onQuality(cap) }
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                    ) {
-                        Text(label, fontSize = 12.5.sp, color = Color.White)
-                    }
-                }
-            }
-            Text(
-                "「${qualityLabel(qualityCap)}」· 按网络环境各记一份；非原画档借正片的转码会话（外人看会起一路转码）",
-                fontSize = 11.sp, color = Color.White.copy(alpha = 0.4f),
-                modifier = Modifier.padding(top = 6.dp),
-                lineHeight = 16.sp,
-            )
 
             Spacer(Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {

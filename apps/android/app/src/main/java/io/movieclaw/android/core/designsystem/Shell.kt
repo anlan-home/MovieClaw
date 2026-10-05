@@ -37,6 +37,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -214,6 +216,9 @@ fun McTopBar(
     }
 }
 
+/** 底栏页签上的状态点：颜色 + 读屏用的状态说明（iOS `TabBarDotBridge.Dot` 的对应物） */
+data class TabDot(val color: androidx.compose.ui.graphics.Color, val label: String)
+
 /**
  * 悬浮胶囊底栏 —— 实测：348×54（左右各 21、距底 22），圆角 999，
  * 底色 rgba(62,62,66,.4)，5 格各 68×48，当前格背后一枚白 15% 药丸。
@@ -228,8 +233,8 @@ fun McCapsuleTabBar(
     modifier: Modifier = Modifier,
     /** 最后一格是账号头像（直径 25、白底、深色首字母 11/700） */
     avatarInitials: String? = null,
-    /** 需要提示红点的格下标 */
-    dotIndex: Int? = null,
+    /** 要挂状态点的格下标 → 点（iOS：活动页签三色状态点、头像页签「有可用更新」蓝点） */
+    dots: Map<Int, TabDot> = emptyMap(),
 ) {
     val count = icons.size
     // HTML：.tabbar{transition:transform .35s cubic-bezier(.32,.9,.3,1), opacity .3s}
@@ -344,14 +349,16 @@ fun McCapsuleTabBar(
                             modifier = Modifier.size(23.dp),
                         )
                     }
-                    if (dotIndex == i) {
+                    dots[i]?.let { dot ->
                         Box(
                             Modifier
                                 .align(Alignment.TopCenter)
                                 .offset(y = 8.dp, x = 10.dp)
                                 .size(6.dp)
                                 .clip(CircleShape)
-                                .background(Ok),
+                                .background(dot.color)
+                                // 读屏念状态说明（iOS `TabBarDotBridge.Dot.label` 同款），别只念出个圆点
+                                .semantics { stateDescription = dot.label },
                         )
                     }
                 }

@@ -30,6 +30,12 @@ class MpvEngine(private val context: Context) : PlayerEngine {
     val surfaceView: SurfaceView = SurfaceView(context)
 
     private var handle = 0L
+
+    /** 引擎自己的字幕渲染：默认关（字幕一律交本机叠层）；只有光盘镜像才翻成开 */
+    private var subtitleRendering = false
+
+    /** 这个文件是否已经补落过字幕可见性（见 positionMs 的说明） */
+    private var visibilityAppliedForFile = false
     private var surfaceReady = false
     private val pending = ArrayDeque<(Surface) -> Unit>()
     private val cacheDir = File(context.cacheDir, "mpv_stream_cache").apply { mkdirs() }
@@ -75,6 +81,12 @@ class MpvEngine(private val context: Context) : PlayerEngine {
     private fun applyCoreOptions() {
         setProperty("vo", "gpu-next")
         setProperty("gpu-context", "android")
+        // 字幕一律由本机叠层画（`SubtitleCues` 解析成纯文本 cue，字号/位置/背景按用户设置）：
+        // mpv 默认会自动选中内封字幕轨并用 libass 再画一层——实机反馈「一大一小两个字幕、还重叠」
+        // （4K HDR10 走 mpv 时抓到：mpv 选 --sid=1 渲染 + 本机叠层同时画）。
+        // 只压可见性不动 sid：光盘镜像（PGS/盘内文本轨）那条路径要靠 mpv 自己渲染，
+        // `setEngineSubtitleRendering(true)` 翻回 `sub-visibility=yes` 就能接上。
+        setProperty("sub-visibility", "no")
         setProperty("hwdec", "mediacodec,mediacodec-copy")
         setProperty("osc", "no")
         setProperty("tone-mapping", "auto")
@@ -107,6 +119,7 @@ class MpvEngine(private val context: Context) : PlayerEngine {
 
     override fun open(source: EngineSource, sidecars: List<Sidecar>) {
         // sidecars:MPV 侧外挂字幕走 sub-add,在 M1c 轨道管线统一接;当前忽略
+        visibilityAppliedForFile = false
         runWhenSurface { surface ->
             if (handle == 0L) {
                 handle = MpvNative.nativeCreate(surface)
@@ -126,8 +139,19 @@ class MpvEngine(private val context: Context) : PlayerEngine {
                     if (source.startPositionMs > 0) "${source.startPositionMs / 1000.0}" else "none",
                 )
                 MpvNative.nativeCommand(handle, "loadfile \"${source.url}\" replace")
+                // 关键时序：`sub-visibility` 是 mpv 的**每文件选项**——loadfile 时会被配置默认值
+                // （yes）重置，所以「建句柄时设一次」保不住（实机：灵魂摆渡仍被 mpv 画了一层，
+                // 和本机叠层叠成两个）。加载之后立刻再落一次，按粘住的开关值来。
+                applySubtitleVisibility()
             }
         }
+    }
+
+    /** 引擎自己的字幕渲染开关（外挂叠层接管时为 false）——句柄没建也记住，建好/加载后补上 */
+    private fun applySubtitleVisibility() {
+        if (handle == 0L) return
+        MpvNative.nativeSetProperty(handle, "sub-visibility", if (subtitleRendering) "yes" else "no")
+        android.util.Log.i("McMpv", "字幕渲染=${if (subtitleRendering) "引擎（光盘镜像）" else "本机叠层"}")
     }
 
     private fun runWhenSurface(block: (Surface) -> Unit) {
@@ -147,7 +171,18 @@ class MpvEngine(private val context: Context) : PlayerEngine {
             (seconds * 1000).toLong()
         }
 
-    override fun positionMs(): Long = getSecondsMs("time-pos")
+    override fun positionMs(): Long {
+        val ms = getSecondsMs("time-pos")
+        // 字幕可见性要在**文件真正打开之后**才落得住：`sub-visibility` 是 mpv 的每文件选项，
+        // 重置发生在打开文件那一刻，而不是 loadfile 刚返回时（实机时序：我 56.789 落、
+        // mpv 57.662 才打开并重置——落早了就被冲掉，屏幕上仍是 mpv + 本机叠层两层字幕）。
+        // duration 有值 = 文件已打开，这时候补一次，每个文件只补一次。
+        if (!visibilityAppliedForFile && durationMs() > 0) {
+            visibilityAppliedForFile = true
+            applySubtitleVisibility()
+        }
+        return ms
+    }
 
     override fun durationMs(): Long = getSecondsMs("duration")
 
@@ -209,9 +244,10 @@ class MpvEngine(private val context: Context) : PlayerEngine {
     }
 
     override fun setSubtitleRendering(enabled: Boolean) {
-        if (handle != 0L) {
-            MpvNative.nativeSetProperty(handle, "sub-visibility", if (enabled) "yes" else "no")
-        }
+        subtitleRendering = enabled
+        // 句柄还没建（surface 未挂）时不能丢：记住值，open/建句柄后会补上（原来是 `if (handle != 0L)`
+        // 静默丢弃——实机里调用发生在 surface 挂上之前 0.4 秒，开关等于没生效）
+        applySubtitleVisibility()
     }
 
     override fun selectAudioIndex(index: Int) {

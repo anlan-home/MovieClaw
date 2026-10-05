@@ -1,5 +1,7 @@
 package io.movieclaw.android.core.playback
 
+import io.movieclaw.android.core.AppScopes
+
 import android.app.PendingIntent
 import android.content.Intent
 import android.os.Looper
@@ -37,7 +39,7 @@ class PlaybackService : MediaSessionService() {
     lateinit var holder: PlaybackSessionHolder
 
     private var mediaSession: MediaSession? = null
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope = AppScopes.main("PlaybackService")
     private var observeJob: Job? = null
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession {

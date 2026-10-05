@@ -193,8 +193,14 @@ data class TodayArrivalFull(
     val daysAhead: Int = 0,
     val grabbedAt: String? = null,
     val downloadedAt: String? = null,
+    /** 下载器任务的 info hash：订阅首页据此把实时进度 / ETA 套到这一行上（iOS `taskByHash`） */
+    val infoHash: String? = null,
     val estimatedReleaseToImportMinutes: Int? = null,
     val estimatedDownloadToImportMinutes: Int? = null,
+    /** 出种预测原始 JSON（服务端 `release_forecast`：predicted_at / confidence）；日程据此判「等待资源」 */
+    val releaseForecast: kotlinx.serialization.json.JsonObject? = null,
+    /** 下一次有效预测探测时间（ISO）：给不出入库时刻时的兜底文案「HH:mm 探测」 */
+    val nextProbeAt: String? = null,
 )
 
 /** GET /subscriptions/recent-arrivals —— 订阅首页「刚刚入库」卡片 */

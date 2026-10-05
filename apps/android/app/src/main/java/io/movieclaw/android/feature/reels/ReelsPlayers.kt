@@ -170,6 +170,8 @@ class ReelsPlayers(
         val seq = settleSeq
         leaveCurrent(deferTeardown = true)
         val impressionAt = android.os.SystemClock.elapsedRealtime()
+        // 逐段计时（与播放器页同一套，日志 `McPlayer: 起播分段`）：点/滑到这条 → 决策+会话 → 引擎 → 首帧
+        io.movieclaw.android.core.playback.PlaybackStartupTrace.start()
         onEvent(item, "impression", null, null, item.segment.startMs, null)
 
         val ready = standby?.takeIf { it.item.id == item.id && it.source.playerStartMs >= 0 }
@@ -198,10 +200,17 @@ class ReelsPlayers(
                     android.util.Log.i("McReels", "作废一次换条（已滑走）：${item.title.name}")
                     return@launch
                 }
+                io.movieclaw.android.core.playback.PlaybackStartupTrace.mark("决策+会话")
+                lastOpenWasTranscoded = source.sessionId != null
                 val engine = ExoEngine(context, BufferProfile.Normal)
                 val clip = Clip(item = item, engine = engine, source = source)
                 current = clip
                 currentEngine = engine
+                // 换条时先把显示位置归到新片段的窗口起点：引擎本来就会被 seek 到这里（playerStartMs），
+                // 但外网起播要等几秒才报第一个位置，这期间字幕叠层与进度条会拿**上一条**的旧值去查
+                // ——实机日志：王国的位置还是 968176（疑犯追踪的起点）、瑞克和莫蒂的还是 1703702（王国的起点），
+                // 一条 cue 都命不中
+                positionMs = item.segment.startMs
                 frameReadyId = null
                 failMessage = null
                 ended = false
@@ -212,6 +221,8 @@ class ReelsPlayers(
                         "起=${source.playerStartMs}ms 停=${source.playerEndMs}ms " +
                         "url=${source.url.substringBefore('?').take(90)}",
                 )
+                // 冷起播补两段：和引擎的打开、探测并行（iOS `boostColdStart`）
+                boostColdStart(item, source)
                 engine.open(engineSource(source, item), emptyList())
                 // **这里必须把播放状态置真**：引擎是 autoplay 起播的，漏了这一步就会
                 // 「画面在放、状态却是暂停」——一进页面就顶着暂停键，全屏里点一下还弹不起来
@@ -264,13 +275,31 @@ class ReelsPlayers(
             val url = if (raw.startsWith("http")) raw else origin.trimEnd('/') + raw
             // 服务端也可能直出（源本来就在上限之内）：没有 session_id 就是直出语义
             val direct = view.sessionId == null
-            val hls = view.timeline == "file" || url.substringBefore('?').endsWith(".m3u8")
+            // 时间轴两种语义（服务端 `PlaybackSessionView.timeline`）：
+            //  · session = 流从 0 起，「文件时间 = 服务端 start_ms + 播放位置」；
+            //  · file    = VOD 预生成列表，分片时间戳就是文件绝对时间——**客户端要自己
+            //              seek 到片段起点**（服务端字段说明原话：「前端应把播放器 seek 到这里」）。
+            // 原来这里不论哪种都按 0 起播：file 模式下会从片子开头放，还把 fileOffset 重复
+            // 计进显示位置（外网片段的失败就卡在这条路上）。
+            val fileTimeline = view.timeline == "file"
+            val engineStartMs = if (direct || fileTimeline) item.segment.startMs else 0L
+            val engineEndMs =
+                if (direct || fileTimeline) item.segment.endMs else (item.segment.endMs - item.segment.startMs)
+            android.util.Log.i(
+                "McReels",
+                "会话 ${item.title.name}：时间轴=${view.timeline} 服务端起点=${view.startMs}ms " +
+                    "起=${engineStartMs}ms 停=${engineEndMs}ms 会话=${view.sessionId ?: "直出"} " +
+                    "硬件=${view.hwBackend ?: "软转"} 源=${view.source?.resolution ?: "?"}·" +
+                    "${view.source?.videoCodec ?: "?"}" +
+                    (view.source?.hdr?.takeIf { it.isNotBlank() }?.let { "·$it" } ?: "") +
+                    "·" + (view.source?.bitRate?.let { "${it / 1000}kbps" } ?: "码率?"),
+            )
             ReelSource(
                 url = url,
-                hls = hls,
-                playerStartMs = if (direct) item.segment.startMs else 0L,
-                playerEndMs = if (direct) item.segment.endMs else (item.segment.endMs - item.segment.startMs),
-                fileOffsetMs = if (direct) 0L else item.segment.startMs,
+                hls = fileTimeline || url.substringBefore('?').endsWith(".m3u8"),
+                playerStartMs = engineStartMs,
+                playerEndMs = engineEndMs,
+                fileOffsetMs = if (direct || fileTimeline) 0L else item.segment.startMs,
                 cacheKey = if (direct) SourceByteCache.key(item.segment.fileId, item.play.sizeBytes) else null,
                 audioRef = item.play.audioOrdinal?.let { "embedded:$it" },
                 sessionId = view.sessionId,
@@ -309,6 +338,8 @@ class ReelsPlayers(
                     "McReels",
                     "出画 ${clip.item.title.name}：等 ${clip.startedAtMs - impressionAt}ms",
                 )
+                io.movieclaw.android.core.playback.PlaybackStartupTrace.mark("首帧")
+                io.movieclaw.android.core.playback.PlaybackStartupTrace.finish()
                 val index = pendingItems.indexOfFirst { it.id == clip.item.id }
                 if (index >= 0) afterFirstFrame(clip.item, index, pendingItems)
             }
@@ -440,6 +471,9 @@ class ReelsPlayers(
     // 从当前位置「看全片」：给正片播放器的起点（原片时间）
     fun filePositionMs(): Long = current?.let { it.engine.positionMs() + it.source.fileOffsetMs } ?: 0L
 
+    /** 当前条的带宽估计（bits/s）：等待态那行「↓ x.x MB/s」用（iOS 同一个读数） */
+    fun bandwidthBps(): Long? = current?.engine?.bandwidthBps
+
     /* ---------------- 收尾 ---------------- */
 
     /** 页面切走 / 退出：停声、拆引擎、停会话、取消预取 */
@@ -484,9 +518,14 @@ class ReelsPlayers(
 
     /* ---------------- 字节预取 ---------------- */
 
+    /** 最近一次打开是不是走了转码：预取范围对转码没用（服务端读原文件），对直出才有用 */
+    private var lastOpenWasTranscoded = false
+
     private fun schedulePrefetch(index: Int) {
-        // 转码档位下这些范围没用（服务端自己读原文件），跳过
-        if (ReelsQuality.effectiveCap(qualityCap, network) != null) return
+        // 原来这里只看档位（外网=有转码档就整段跳过），但**服务端会话满时会拒建、客户端回落直出**
+        // （实机日志：灵笼在外网就是直出），那种条目跳过预取就要等 2.4 秒才出画。
+        // 改成按最近一次的真实落法判断：真在转码才跳过。
+        if (lastOpenWasTranscoded) return
         val window = if (isMetered()) 1 else 3
         val targets = pendingItems.drop(index + 1).take(window)
         val keep = targets.map { it.id }.toSet()
@@ -510,6 +549,27 @@ class ReelsPlayers(
                 SourceByteCache.prefetch(context, url, cacheKey, ranges)
             }
         }
+    }
+
+    /**
+     * 冷起播补两段（iOS `boostColdStart` 的对应物）：这一条**没有任何预取**时就地补——
+     * 各开一个请求把「索引」与「起点头 1MB」下进片源字节缓存，和引擎的打开、探测并行；
+     * 引擎随后要读的那两段已经在本地。只补原文件直出（转码走服务端，补不进这条缓存），
+     * 也只在真冷起播时补（预起/预取过的条目已经在缓存里了）。
+     *
+     * 不登记进 `prefetchJobs`：那是「下一条」的调度表，`schedulePrefetch` 会把它不在
+     * 窗口里的条目取消掉——补当前条的动作要躲开那轮清理。
+     */
+    private fun boostColdStart(item: ReelItemView, source: ReelSource) {
+        val cacheKey = source.cacheKey ?: return
+        if (prefetchJobs.containsKey("${item.id}#full") || prefetchJobs.containsKey("${item.id}#light")) return
+        val indexRanges = item.play.prefetch.filter { it.purpose == "index" }.map { it.offset to it.length }
+        val startRanges = item.play.prefetch
+            .filter { it.purpose == "start" }
+            .map { it.offset to it.length.coerceAtMost(1L * 1024 * 1024) }
+        val ranges = indexRanges + startRanges
+        if (ranges.isEmpty()) return
+        scope.launch { SourceByteCache.prefetch(context, source.url, cacheKey, ranges) }
     }
 
     private fun isMetered(): Boolean {

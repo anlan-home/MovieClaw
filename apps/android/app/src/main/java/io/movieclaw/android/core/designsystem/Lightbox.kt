@@ -27,6 +27,9 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -67,6 +70,13 @@ fun Lightbox(
     images: List<MediaImage>,
     title: String,
     initialIndex: Int = 0,
+    /** 服务端相对图的来源：图廊的图很多是相对路径，不给 origin 缩略图条与主图都画不出来 */
+    origin: String? = null,
+    /** 收藏态与切换（图廊模式顶栏那颗心，与详情页同一颗）；null = 不显示心 */
+    favorite: Boolean? = null,
+    onToggleFavorite: (() -> Unit)? = null,
+    /** 有值就显示「详情」按钮（跳这一组的条目详情）；null = 不显示 */
+    onOpenDetail: (() -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     if (images.isEmpty()) return
@@ -88,6 +98,7 @@ fun Lightbox(
         ) { page ->
             ZoomableImage(
                 image = images[page],
+                origin = origin,
                 onSingleTap = { chromeVisible = !chromeVisible },
             )
         }
@@ -126,6 +137,20 @@ fun Lightbox(
                     IconButton(onClick = onDismiss, modifier = Modifier.size(44.dp)) {
                         Icon(Icons.Rounded.Close, contentDescription = "关闭", tint = Color.White)
                     }
+                    if (onOpenDetail != null) {
+                        IconButton(onClick = onOpenDetail, modifier = Modifier.size(44.dp)) {
+                            Icon(Icons.Rounded.Info, contentDescription = "详情", tint = Color.White)
+                        }
+                    }
+                    if (favorite != null && onToggleFavorite != null) {
+                        IconButton(onClick = onToggleFavorite, modifier = Modifier.size(44.dp)) {
+                            Icon(
+                                if (favorite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                contentDescription = if (favorite) "取消收藏" else "收藏",
+                                tint = if (favorite) Accent else Color.White,
+                            )
+                        }
+                    }
                 }
                 Spacer(Modifier.weight(1f))
                 if (images.size > 1) {
@@ -162,7 +187,7 @@ fun Lightbox(
                                 ) {
                                     RemoteImage(
                                         url = images[index].previewUrl,
-                                        origin = null,
+                                        origin = origin,
                                         contentDescription = null,
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier.fillMaxSize(),
@@ -178,7 +203,7 @@ fun Lightbox(
 }
 
 @Composable
-private fun ZoomableImage(image: MediaImage, onSingleTap: () -> Unit) {
+private fun ZoomableImage(image: MediaImage, origin: String?, onSingleTap: () -> Unit) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var containerSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
@@ -239,7 +264,7 @@ private fun ZoomableImage(image: MediaImage, onSingleTap: () -> Unit) {
             // 预览图(未出全图前轻微模糊,避免放大后糊一片)
             RemoteImage(
                 url = image.previewUrl.ifEmpty { image.fullUrl },
-                origin = null,
+                origin = origin,
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
@@ -248,7 +273,8 @@ private fun ZoomableImage(image: MediaImage, onSingleTap: () -> Unit) {
             )
             if (image.fullUrl.isNotEmpty() && image.fullUrl != image.previewUrl) {
                 AsyncImage(
-                    model = image.fullUrl,
+                    // 全图同样要按 iOS 的口径解析（远程图走代理、相对图补来源 + w=），否则相对路径的原图出不来
+                    model = resolveImageUrl(image.fullUrl, origin?.trimEnd('/'), null),
                     imageLoader = remember(context.applicationContext) {
                         (context.applicationContext as io.movieclaw.android.MovieClawApp).imageLoaders.loader
                     },

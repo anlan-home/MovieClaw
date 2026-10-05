@@ -1,5 +1,7 @@
 package io.movieclaw.android.core.designsystem
 
+import io.movieclaw.android.core.AppScopes
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -72,7 +74,7 @@ class FeedbackBus @Inject constructor() {
         val onAction: (() -> Unit)? = null,
     )
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope = AppScopes.main("Feedback")
     private val counter = AtomicLong(0)
 
     private val _toasts = MutableStateFlow<List<Toast>>(emptyList())

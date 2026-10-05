@@ -167,6 +167,8 @@ fun TitleDetailScreen(
     onOpenItem: (Long, Long) -> Unit,
     onPlay: (PlayTarget) -> Unit,
     onSearch: (String) -> Unit = {},
+    /** 演职员点进「TMDB 影人页」（iOS `MediaDetailView` 的 `.discoveredPerson`；与库内影人页是两个页面） */
+    onOpenPerson: (Int) -> Unit = {},
     vm: TitleDetailViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -426,8 +428,16 @@ fun TitleDetailScreen(
                         contentPadding = PaddingValues(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        items(details.metadata.cast.take(12)) { member ->
-                            Column(Modifier.width(104.dp), horizontalAlignment = Alignment.Start) {
+                        // iOS 不截断（全量）；有 TMDB 影人 id 的可点进 TMDB 影人页
+                        items(details.metadata.cast) { member ->
+                            Column(
+                                Modifier
+                                    .width(104.dp)
+                                    .clickable(enabled = member.tmdbPersonId != null) {
+                                        member.tmdbPersonId?.let(onOpenPerson)
+                                    },
+                                horizontalAlignment = Alignment.Start,
+                            ) {
                                 Box(Modifier.width(104.dp).height(156.dp).clip(RoundedCornerShape(12.dp))) {
                                     RemoteImage(
                                         url = member.avatarUrl,
@@ -511,7 +521,7 @@ fun TitleDetailScreen(
                         contentPadding = PaddingValues(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        items(details.recommendations, key = { it.titleRef }) { item ->
+                        items(details.recommendations.distinctBy { it.titleRef }, key = { it.titleRef }) { item ->
                             PosterCard(
                                 imageUrl = item.posterUrl,
                                 origin = origin,
@@ -605,6 +615,9 @@ class CollectionViewModel @Inject constructor(
     val ui = _ui.asStateFlow()
 
     private var page = 1
+
+    /** 重查代号：重试/换合集后作废在飞的翻页响应（旧页混进新列表 → 重复 ref → 网格崩，实机抓到过） */
+    private var generation = 0
     val origin: String? get() = sessionRepository.ui.value.origin
 
     init {
@@ -612,6 +625,7 @@ class CollectionViewModel @Inject constructor(
     }
 
     fun load() {
+        val gen = ++generation
         viewModelScope.launch {
             val origin = origin ?: return@launch
             _ui.update { it.copy(loading = true, error = null) }
@@ -620,22 +634,28 @@ class CollectionViewModel @Inject constructor(
                 apiFactory.forOrigin(origin).collectionTitles(collectionRef, limit = 30, page = 1).dataOrThrow()
             }
                 .onSuccess { result: CollectionTitles ->
+                    if (gen != generation) return@onSuccess
                     _ui.update {
                         it.copy(
                             loading = false,
                             info = result.collection,
-                            titles = result.titles,
+                            // 按 titleRef 去重：网格用它当 key，重复一条就会崩
+                            titles = result.titles.distinctBy { t -> t.titleRef },
                             hasMore = result.hasMore,
                         )
                     }
                 }
-                .onFailure { e -> _ui.update { it.copy(loading = false, error = friendlyMessage(e)) } }
+                .onFailure { e ->
+                    if (gen != generation) return@onFailure
+                    _ui.update { it.copy(loading = false, error = friendlyMessage(e)) }
+                }
         }
     }
 
     fun loadMore() {
         val state = _ui.value
         if (state.loadingMore || !state.hasMore) return
+        val gen = generation
         viewModelScope.launch {
             val origin = origin ?: return@launch
             _ui.update { it.copy(loadingMore = true) }
@@ -643,16 +663,19 @@ class CollectionViewModel @Inject constructor(
                 apiFactory.forOrigin(origin).collectionTitles(collectionRef, limit = 30, page = page + 1).dataOrThrow()
             }
                 .onSuccess { result ->
+                    // 重查发生后这一页作废（与发现页 loadMoreFiltered 同一道守卫）
+                    if (gen != generation) return@onSuccess
                     page += 1
                     _ui.update {
                         it.copy(
                             loadingMore = false,
-                            titles = it.titles + result.titles,
+                            titles = (it.titles + result.titles).distinctBy { t -> t.titleRef },
                             hasMore = result.hasMore,
                         )
                     }
                 }
                 .onFailure {
+                    if (gen != generation) return@onFailure
                     _ui.update { it.copy(loadingMore = false) }
                 }
         }
@@ -766,7 +789,10 @@ fun CollectionScreen(
                         (genre == null || it.genres.contains(genre)) &&
                             (query.isBlank() || it.title.contains(query, ignoreCase = true))
                     }
-                    items(shown, key = { it.titleRef.ifEmpty { it.title } }) { item ->
+                    items(
+                        shown.distinctBy { it.titleRef.ifEmpty { it.title } },
+                        key = { it.titleRef.ifEmpty { it.title } },
+                    ) { item ->
                         PosterCard(
                             imageUrl = item.posterUrl,
                             origin = origin,

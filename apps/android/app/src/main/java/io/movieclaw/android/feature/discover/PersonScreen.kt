@@ -176,7 +176,8 @@ fun PersonScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                items(state.titles, key = { it.ref }) { t -> TitleCell(t, vm.origin) { onOpenTitle(t.ref) } }
+                // distinctBy：网格按 ref 做 key，同页里重复一条（如同片挂多个身份）就会崩
+                items(state.titles.distinctBy { it.ref }, key = { it.ref }) { t -> TitleCell(t, vm.origin) { onOpenTitle(t.ref) } }
             }
         }
     }

@@ -85,6 +85,7 @@ fun MovieClawRoot(vm: RootViewModel = hiltViewModel()) {
                     onExit = { vm.dismissShare(shareLink!!.slug) },
                 )
                 state.phase == SessionPhase.BOOTING -> Box(Modifier.fillMaxSize().background(Bg))
+                // 未登录只有登录页：批准设备登录是登录后的事（设置 → 设备管理），iOS 同为登录后入口
                 state.phase == SessionPhase.NEEDS_LOGIN -> LoginScreen(presetUsername = state.presetUsername)
                 else -> AppNav()
             }

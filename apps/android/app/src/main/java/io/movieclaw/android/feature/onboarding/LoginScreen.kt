@@ -1,6 +1,7 @@
 package io.movieclaw.android.feature.onboarding
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.EaseIn
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -198,65 +199,104 @@ private fun WelcomeMasthead(compact: Boolean, hidden: Boolean, lit: Float) {
     }
 }
 
-/** 影史台词轮播：9 秒一句、点一下换；旧句上移虚化淡出、新句从下方浮起 */
+/**
+ * 影史台词轮播（iOS `WelcomeView` 的 `quoteChange` 过渡）：9 秒一句、点一下换。
+ * 旧句先走（0.45 秒上移 14、虚化 6、淡出），新句稍晚 0.25 秒、0.7 秒从下方 14 浮上来——
+ * 两句只短暂交叠，读起来是一句接一句（原先旧句是「啪」地消失、新句才淡入，观感生硬）。
+ * 一轮播完重新打乱顺序（iOS 同款）。
+ */
 @Composable
 private fun FilmQuote() {
-    var index by remember { mutableIntStateOf((0 until QUOTES.size).random()) }
-    var turning by remember { mutableIntStateOf(0) }
+    var order by remember { mutableStateOf(QUOTES.indices.shuffled()) }
+    var index by remember { mutableIntStateOf(0) }
+    var leaving by remember { mutableStateOf<Quote?>(null) }
+    /** 出场进度：0 → 1 = 旧句完全离场 */
+    val out = remember { Animatable(0f) }
+    /** 入场进度：0 → 1 = 新句完全在场 */
     val enter = remember { Animatable(0f) }
-    LaunchedEffect(turning) {
+    var turn by remember { mutableIntStateOf(0) }
+
+    fun next() {
+        leaving = QUOTES[order[index]]
+        index += 1
+        if (index >= order.size) {
+            order = QUOTES.indices.shuffled()
+            index = 0
+        }
+        turn++
+    }
+
+    // 入场：从下方 0.7 秒浮上来（晚 0.25 秒起，首句同样）
+    LaunchedEffect(turn) {
         enter.snapTo(0f)
         enter.animateTo(1f, tween(700, easing = EaseOut, delayMillis = 250))
-        delay(8_000)
-        turning++
-        index = (index + 1) % QUOTES.size
     }
-    val q = QUOTES[index]
+    // 出场：旧句 0.45 秒上移虚化淡出，走完撤下
+    LaunchedEffect(turn) {
+        if (turn == 0) return@LaunchedEffect
+        out.snapTo(0f)
+        out.animateTo(1f, tween(450, easing = EaseIn))
+        leaving = null
+    }
+    // 9 秒一句（iOS `sceneDuration`）
+    LaunchedEffect(turn) {
+        delay(9_000)
+        next()
+    }
+
     Column(
         Modifier
             .fillMaxWidth()
             .height(150.dp)
-            .clickable { turning++; index = (index + 1) % QUOTES.size },
+            .clickable { next() },
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Bottom,
     ) {
-        Column(
-            Modifier
-                .graphicsLayer {
-                    val t = enter.value
-                    alpha = t
-                    translationY = (1f - t) * 14f
-                }
-                .blur((6f * (1f - enter.value)).dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
+        Box(contentAlignment = Alignment.BottomCenter) {
+            leaving?.let { QuoteBlock(it, t = 1f - out.value, upward = true) }
+            QuoteBlock(QUOTES[order[index]], t = enter.value, upward = false)
+        }
+    }
+}
+
+/** 一句台词文本块；`t` = 在场程度 0~1，`upward` = 离场时向上飘（入场从下方来） */
+@Composable
+private fun QuoteBlock(q: Quote, t: Float, upward: Boolean) {
+    Column(
+        Modifier
+            .graphicsLayer {
+                alpha = t
+                translationY = (1f - t) * (if (upward) -14f else 14f)
+            }
+            .blur((6f * (1f - t)).dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            q.line,
+            style = McType.body.copy(
+                fontFamily = FontFamily.Serif,
+                color = TextPrimary,
+                lineHeight = 30.sp,
+                textAlign = TextAlign.Center,
+            ),
+        )
+        q.original?.let {
             Text(
-                q.line,
-                style = McType.body.copy(
+                it,
+                style = McType.caption.copy(
                     fontFamily = FontFamily.Serif,
-                    color = TextPrimary,
-                    lineHeight = 30.sp,
+                    fontStyle = FontStyle.Italic,
+                    color = TextMuted,
+                    lineHeight = 19.sp,
                     textAlign = TextAlign.Center,
                 ),
             )
-            q.original?.let {
-                Text(
-                    it,
-                    style = McType.caption.copy(
-                        fontFamily = FontFamily.Serif,
-                        fontStyle = FontStyle.Italic,
-                        color = TextMuted,
-                        lineHeight = 19.sp,
-                        textAlign = TextAlign.Center,
-                    ),
-                )
-            }
-            Text(
-                "——《${q.film}》${q.year}",
-                style = McType.micro.copy(fontFamily = FontFamily.Serif, color = TextFaint, letterSpacing = 2.sp),
-            )
         }
+        Text(
+            "——《${q.film}》${q.year}",
+            style = McType.micro.copy(fontFamily = FontFamily.Serif, color = TextFaint, letterSpacing = 2.sp),
+        )
     }
 }
 

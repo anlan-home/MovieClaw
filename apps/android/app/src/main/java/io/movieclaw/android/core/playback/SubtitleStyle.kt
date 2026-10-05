@@ -1,5 +1,7 @@
 package io.movieclaw.android.core.playback
 
+import io.movieclaw.android.core.AppScopes
+
 import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -69,7 +71,7 @@ class SubtitleStyleStore @Inject constructor(
     private val json: Json,
 ) {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = AppScopes.io("SubtitleStyle")
     private val _style = MutableStateFlow(SubtitleStyle())
     val style: StateFlow<SubtitleStyle> = _style.asStateFlow()
 

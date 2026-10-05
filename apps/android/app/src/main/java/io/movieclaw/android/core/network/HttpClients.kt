@@ -67,7 +67,9 @@ internal fun authInterceptor(vault: TokenVault) = Interceptor { chain ->
 
 private fun baseClient(vault: TokenVault): OkHttpClient.Builder =
     OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
+        // 连不上要**快**失败：内网地址在蜂窝下根本不可达，15 秒的干等既卡界面又让
+        // 「切错地址 / 不在同一网络」这件事 15 秒后才可见（实机：切账号后每轮请求都要等满 15 秒）
+        .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .addInterceptor(userAgentInterceptor())

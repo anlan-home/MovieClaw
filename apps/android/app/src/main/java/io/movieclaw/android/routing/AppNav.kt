@@ -40,7 +40,12 @@ import io.movieclaw.android.feature.library.FavoritesScreen
 import io.movieclaw.android.feature.library.CollectionsScreen
 import io.movieclaw.android.feature.library.LibraryCollectionScreen
 import io.movieclaw.android.feature.library.LibraryCustomizeScreen
+import io.movieclaw.android.feature.library.LibraryFormScreen
+import io.movieclaw.android.feature.settings.ActivateScreen
 import io.movieclaw.android.feature.library.LibraryManageScreen
+import io.movieclaw.android.feature.library.LibraryPersonScreen
+import io.movieclaw.android.feature.root.MainTab
+import io.movieclaw.android.feature.root.MainTabBus
 import io.movieclaw.android.feature.discover.PersonScreen
 
 @HiltViewModel
@@ -86,6 +91,16 @@ fun AppNav() {
         subscriptions.remove(id)
     }
 
+    // 通知点按带来的路由（core/notify `NotifyRouteBus`）：直接进那一条详情（条目 / 订阅）
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        io.movieclaw.android.core.notify.NotifyRouteBus.requested.collect { route ->
+            if (route != null) {
+                io.movieclaw.android.core.notify.NotifyRouteBus.consume()
+                runCatching { navController.navigate(route) }
+            }
+        }
+    }
+
     NavHost(navController = navController, startDestination = "tabs") {
         composable("tabs") {
             MainTabScreen(
@@ -128,6 +143,7 @@ fun AppNav() {
                 onOpenSettings = { navController.navigate("settings") },
                 onOpenAccounts = { navController.navigate("accounts") },
                 onOpenKind = { kind -> navController.navigate("kind/$kind") },
+                onOpenGenre = { kind, genre -> navController.navigate("kind/$kind?genre=$genre") },
                 onOpenReels = { navController.navigate("reels") },
                 onOpenCustomize = { navController.navigate("libraryCustomize") },
                 onOpenLibraryCollection = { id, name -> navController.navigate("libraryCollection/$id?title=${Uri.encode(name)}") },
@@ -168,6 +184,8 @@ fun AppNav() {
                     io.movieclaw.android.feature.subscriptions.SubscribeSheetHost.open(ref)
                 },
                 onOpenItem = { libraryId, itemId -> navController.navigate("item/$libraryId/$itemId") },
+                // 演职员 → TMDB 影人页（iOS `.discoveredPerson`）
+                onOpenPerson = { tmdbPersonId -> navController.navigate("discoveredPerson/$tmdbPersonId") },
                 onPlay = { target ->
                     navVm.open(target)
                     navController.navigate("player")
@@ -208,7 +226,21 @@ fun AppNav() {
             LibraryManageScreen(
                 onBack = { navController.popBackStack() },
                 onOpenLibrary = { id, name -> navController.navigate("library/$id?name=${Uri.encode(name)}") },
+                // 创建 / 编辑媒体库：原生表单（此前 onOpenWebManage 没接线，点了没反应）
+                onOpenForm = { libraryId ->
+                    if ((libraryId ?: -1L) > 0) navController.navigate("libraryForm?libraryId=$libraryId")
+                    else navController.navigate("libraryForm")
+                },
             )
+        }
+        // 批准设备登录（v0.31 /activate 的对应页）
+        composable("activate") {
+            ActivateScreen(onBack = { navController.popBackStack() })
+        }
+        // 媒体库表单（创建 / 编辑两用；编辑带 libraryId）
+        composable("libraryForm?libraryId={libraryId}") {
+            if (!adminOnly(navController)) return@composable
+            LibraryFormScreen(onBack = { navController.popBackStack() })
         }
         // 自定义首页（媒体库 ⋯ 菜单）：行清单编辑器，保存进 ui.preferences.home.rows
         composable("libraryCustomize") {
@@ -256,7 +288,7 @@ fun AppNav() {
             )
         }
         // 按类型的跨库墙（首页「全部电影」行点「查看全部」进来）
-        composable("kind/{kind}") { entry ->
+        composable("kind/{kind}?genre={genre}") { entry ->
             io.movieclaw.android.feature.library.KindWallScreen(
                 onBack = { navController.popBackStack() },
                 onOpenItem = { libraryId, itemId ->
@@ -271,10 +303,23 @@ fun AppNav() {
                 onOpenSubscription = { id -> navController.navigate("subscription/$id") },
             )
         }
-        composable("person/{tmdbPersonId}") { entry ->
+        // 命名对齐 iOS：`discoveredPerson` = TMDB 影人页（完整履历、带已入库/已订阅斜标）
+        composable("discoveredPerson/{tmdbPersonId}") { entry ->
             PersonScreen(
                 onBack = { navController.popBackStack() },
                 onOpenTitle = { ref -> navController.navigate("title?ref=${Uri.encode(ref)}") },
+            )
+        }
+        // `person` = 库内影人页（iOS `PersonDetailView` / `AppRoute.person`）：只列库里的作品，
+        // 点作品进库内条目详情。与上面的 TMDB 影人页是两个独立页面。
+        composable("person/{tmdbPersonId}") { entry ->
+            LibraryPersonScreen(
+                onBack = { navController.popBackStack() },
+                onOpenItem = { lib, item -> navController.navigate("item/$lib/$item") },
+                onOpenLibrary = {
+                    MainTabBus.open(MainTab.LIBRARY)
+                    navController.popBackStack()
+                },
             )
         }
         // 搜索页带 q/tab 深链：标题详情「搜索资源」带词进来，tab 缺省 = 资源分区
@@ -368,8 +413,16 @@ fun AppNav() {
                         onBack = { navController.popBackStack() },
                         onOpenAccounts = { navController.navigate("accounts") },
                     )
+                io.movieclaw.android.feature.settings.SettingsSection.NOTIFY ->
+                    io.movieclaw.android.feature.settings.NotifySettingsScreen(
+                        onBack = { navController.popBackStack() },
+                    )
                 io.movieclaw.android.feature.settings.SettingsSection.DEVICES ->
-                    DevicesSettingsScreen(onBack = { navController.popBackStack() })
+                    DevicesSettingsScreen(
+                        onBack = { navController.popBackStack() },
+                        // v0.31 /activate：批准设备登录（Apple TV / 转码器配对码）
+                        onOpenActivate = { navController.navigate("activate") },
+                    )
                 io.movieclaw.android.feature.settings.SettingsSection.PLAYBACK ->
                     PlaybackSettingsScreen(onBack = { navController.popBackStack() })
                 io.movieclaw.android.feature.settings.SettingsSection.MEMBERS ->
@@ -403,6 +456,8 @@ fun AppNav() {
                     navVm.open(target)
                     navController.navigate("player")
                 },
+                // 演职员 → 库内影人页（iOS `LibraryItemDetailView` 的 `.person`）
+                onOpenPerson = { tmdbPersonId -> navController.navigate("person/$tmdbPersonId") },
             )
         }
         composable("player") {

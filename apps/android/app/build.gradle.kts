@@ -208,6 +208,9 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
 
+    // 本机通知的周期检查（纯客户端，不动服务端）
+    implementation(libs.androidx.work.runtime)
+
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
     implementation(libs.hilt.navigation.compose)

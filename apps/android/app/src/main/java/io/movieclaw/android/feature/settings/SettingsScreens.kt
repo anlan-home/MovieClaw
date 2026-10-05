@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -33,10 +34,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Storage
@@ -83,6 +86,7 @@ import io.movieclaw.android.core.designsystem.ErrorPane
 import io.movieclaw.android.core.designsystem.GlassCard
 import io.movieclaw.android.core.designsystem.Info
 import io.movieclaw.android.core.designsystem.LineColor
+import io.movieclaw.android.core.designsystem.LocalFeedback
 import io.movieclaw.android.core.designsystem.Loadable
 import io.movieclaw.android.core.designsystem.McFormat
 import io.movieclaw.android.core.designsystem.McType
@@ -135,6 +139,7 @@ enum class SettingsSection(
     val memberVisible: Boolean = false,
 ) {
     PROFILE("个人信息", "昵称、头像、登录密码", "账号", memberVisible = true),
+    NOTIFY("通知", "下载完成、入库、今天有更新时在本机提醒", "账号", memberVisible = true),
     DEVICES("设备管理", "已登录的客户端与播放器,可改名或注销", "账号", memberVisible = true),
     MEMBERS("家庭成员", "成员权限、媒体库可见范围、重置密码", "账号"),
     PLAYBACK("播放", "软件转码、进度预览、转码缓存", "播放与内容"),
@@ -179,7 +184,7 @@ fun SettingsIndexScreen(
                 top = McMetrics.topBarHeight,
                 bottom = 24.dp,
             ),
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().statusBarsPadding(),
         ) {
             sections.groupBy { it.group }.forEach { (group, items) ->
                 item(key = "h-$group") {
@@ -248,6 +253,7 @@ private fun SettingsIndexRow(section: SettingsSection, onClick: () -> Unit) {
 
 private fun sectionIcon(section: SettingsSection) = when (section) {
     SettingsSection.PROFILE -> Icons.Rounded.Person
+    SettingsSection.NOTIFY -> Icons.Rounded.Notifications
     SettingsSection.DEVICES -> Icons.Rounded.Devices
     SettingsSection.MEMBERS -> Icons.Rounded.Badge
     SettingsSection.PLAYBACK -> Icons.Rounded.PlayCircle
@@ -259,11 +265,12 @@ private fun sectionIcon(section: SettingsSection) = when (section) {
 
 /** 子页顶栏（实测：返回钮 36×36 在 x=8，标题 20/600 在 x=48，雾层向下渐隐到 76） */
 @Composable
-private fun SettingsTopBar(title: String, onBack: () -> Unit) {
+internal fun SettingsTopBar(title: String, onBack: () -> Unit, actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {}) {
     McTopBar(
         variant = McTopBarVariant.Sub,
         title = title,
         onBack = onBack,
+        actions = actions,
     )
 }
 
@@ -595,6 +602,45 @@ class DevicesSettingsViewModel @Inject constructor(
         load()
     }
 
+    /** 清理长期没用的设备：真跑（服务端自己挑出超 days 天没用的，当前这台永远不清） */
+    /**
+     * 清理的两段式（iOS `DeviceCleanupSheet` 同款）：先 dry-run 列出「将注销」的名单
+     * 让人看清，再真注销。服务端永远不清当前这台与连着的转码器。
+     */
+    fun cleanupPreview(
+        days: Int,
+        onResult: (List<io.movieclaw.android.core.model.DeviceCleanupItem>?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val origin = origin ?: return@launch onResult(null)
+            val body = io.movieclaw.android.core.model.DeviceCleanupRequest(
+                inactiveDays = days,
+                all = _all.value,
+                dryRun = true,
+            )
+            runCatching { apiFactory.forOrigin(origin).cleanupDevices(body).dataOrThrow() }
+                .onSuccess { onResult(it.devices) }
+                .onFailure { onResult(null) }
+        }
+    }
+
+    /** 真跑清理：成功给注销台数；失败给错误提示 */
+    fun cleanup(days: Int, onDone: (Int?, String?) -> Unit) {
+        viewModelScope.launch {
+            val origin = origin ?: return@launch onDone(null, "还没有连上服务器")
+            val body = io.movieclaw.android.core.model.DeviceCleanupRequest(
+                inactiveDays = days,
+                all = _all.value,
+            )
+            runCatching { apiFactory.forOrigin(origin).cleanupDevices(body).dataOrThrow() }
+                .onSuccess {
+                    load()
+                    onDone(it.devices.size, null)
+                }
+                .onFailure { e -> onDone(null, friendlyMessage(e)) }
+        }
+    }
+
     fun load() {
         viewModelScope.launch {
             val origin = origin ?: return@launch
@@ -631,15 +677,45 @@ class DevicesSettingsViewModel @Inject constructor(
 }
 
 @Composable
-fun DevicesSettingsScreen(onBack: () -> Unit, vm: DevicesSettingsViewModel = hiltViewModel()) {
+fun DevicesSettingsScreen(
+    onBack: () -> Unit,
+    /** v0.31 /activate：批准设备登录（配对码） */
+    onOpenActivate: () -> Unit = {},
+    vm: DevicesSettingsViewModel = hiltViewModel(),
+) {
     val state by vm.state.collectAsStateWithLifecycle()
     val all by vm.all.collectAsStateWithLifecycle()
     var renaming by remember { mutableStateOf<LoginDevice?>(null) }
     var revoking by remember { mutableStateOf<LoginDevice?>(null) }
     var nameDraft by remember { mutableStateOf("") }
+    var cleanupOpen by remember { mutableStateOf(false) }
+    val feedback = LocalFeedback.current
 
     Column(Modifier.fillMaxSize()) {
-        SettingsTopBar(title = "设备管理", onBack = onBack)
+        SettingsTopBar(title = "设备管理", onBack = onBack) { }
+        // 批准设备登录入口（Apple TV / 转码器在别的设备上显示配对码，拿这里批准）
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.White.copy(alpha = 0.04f))
+                .border(1.dp, LineColor, RoundedCornerShape(12.dp))
+                .clickable(onClick = onOpenActivate)
+                .padding(horizontal = 14.dp, vertical = 11.dp),
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("批准设备登录", style = McType.subheadline)
+                Text("输入设备上的配对码，批准或拒绝接入", style = McType.caption, color = TextFaint)
+            }
+            Icon(
+                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = TextFaint,
+                modifier = Modifier.size(16.dp),
+            )
+        }
         if (vm.isAdmin) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -676,6 +752,37 @@ fun DevicesSettingsScreen(onBack: () -> Unit, vm: DevicesSettingsViewModel = hil
                         },
                         onRevoke = { revoking = device },
                     )
+                }
+                // 「清理长期没用的设备」入口（iOS `devices-cleanup-entry`）：除本机之外还有设备才有意义；
+                // 超管开着「全部成员」时口径跟着变
+                if (s.value.any { !it.current }) {
+                    item(key = "cleanup-entry") {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color.White.copy(alpha = 0.04f))
+                                .border(1.dp, LineColor, RoundedCornerShape(12.dp))
+                                .clickable { cleanupOpen = true }
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                        ) {
+                            Icon(
+                                Icons.Rounded.AutoAwesome, contentDescription = null,
+                                tint = Accent, modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                if (all) "清理全部成员长期没用的设备" else "清理长期没用的设备",
+                                style = McType.subheadline, color = TextPrimary,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null,
+                                tint = TextFaint, modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -717,6 +824,137 @@ fun DevicesSettingsScreen(onBack: () -> Unit, vm: DevicesSettingsViewModel = hil
             },
             dismissButton = { TextButton(onClick = { revoking = null }) { Text("取消") } },
         )
+    }
+
+    if (cleanupOpen) {
+        DeviceCleanupSheet(
+            showAll = all,
+            onPreview = { days, cb -> vm.cleanupPreview(days, cb) },
+            onConfirm = { days, done ->
+                vm.cleanup(days) { count, error ->
+                    if (count != null) feedback.success("已注销 $count 台设备")
+                    done(count != null, error)
+                }
+            },
+            onDismiss = { cleanupOpen = false },
+        )
+    }
+}
+
+/**
+ * 清理长期没用的设备（iOS `DeviceCleanupSheet` 的对应物）：7 / 30 / 90 天三档 →
+ * **先让服务端 dry-run 列出「将注销 N 台」的名单**（看清了再一次注销）→「注销 N 台」。
+ * 脚注写明「正在用的这台、连着的转码器不会被清理」——这是人按下按钮前真正想知道的。
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun DeviceCleanupSheet(
+    showAll: Boolean,
+    onPreview: (Int, (List<io.movieclaw.android.core.model.DeviceCleanupItem>?) -> Unit) -> Unit,
+    onConfirm: (Int, (Boolean, String?) -> Unit) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var days by remember { mutableStateOf(90) }
+    var items by remember { mutableStateOf<List<io.movieclaw.android.core.model.DeviceCleanupItem>?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    // 换天数就重新 dry-run：名单永远与当前档位一致（拉失败就给错误提示，别卡在「正在统计…」）
+    LaunchedEffect(days) {
+        items = null
+        onPreview(days) { result ->
+            if (result == null) error = "读取失败，请稍后再试" else items = result
+        }
+    }
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF15161A),
+        contentColor = Color.White,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
+            Text("清理设备", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(12.dp))
+            Text("多久没用过", style = McType.caption, color = TextFaint)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(7, 30, 90).forEach { option ->
+                    val on = days == option
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(if (on) Color.White.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.06f))
+                            .border(
+                                1.dp,
+                                if (on) Color.White.copy(alpha = 0.4f) else Color.White.copy(alpha = 0.12f),
+                                RoundedCornerShape(999.dp),
+                            )
+                            .clickable { days = option }
+                            .padding(horizontal = 14.dp, vertical = 7.dp),
+                    ) {
+                        Text("$option 天", style = McType.sub, color = if (on) TextPrimary else TextMuted)
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                if (showAll) {
+                    "清理全部成员的设备。被注销的要重新登录或配对才能再用；正在用的这台、连着的转码器不会被清理。"
+                } else {
+                    "被注销的要重新登录或配对才能再用；正在用的这台、连着的转码器不会被清理。"
+                },
+                style = McType.caption, color = TextFaint, lineHeight = 17.sp,
+            )
+            Spacer(Modifier.height(14.dp))
+            when {
+                error != null -> Text(error!!, style = McType.footnote, color = Danger, lineHeight = 19.sp)
+                items == null -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(color = TextMuted, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("正在统计…", style = McType.footnote, color = TextMuted)
+                }
+                items!!.isEmpty() -> Text("没有超过 $days 天没用过的设备", style = McType.footnote, color = TextMuted)
+                else -> Column(Modifier.heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {
+                    Text("将注销 ${items!!.size} 台", style = McType.caption, color = TextFaint)
+                    Spacer(Modifier.height(6.dp))
+                    items!!.forEach { item ->
+                        Text(
+                            if (showAll && item.ownerNickname.isNotBlank()) "${item.name} · ${item.ownerNickname}" else item.name,
+                            style = McType.footnote, color = TextPrimary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(vertical = 3.dp),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            val count = items?.size ?: 0
+            val enabled = count > 0 && !busy
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(46.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(if (enabled) Danger else Color.White.copy(alpha = 0.08f))
+                    .clickable(enabled = enabled) {
+                        busy = true
+                        error = null
+                        onConfirm(days) { ok, message ->
+                            busy = false
+                            if (ok) onDismiss() else error = message ?: "清理失败，请稍后再试"
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    when {
+                        busy -> "正在注销…"
+                        count > 0 -> "注销 $count 台"
+                        else -> "注销"
+                    },
+                    style = McType.bodySemibold,
+                    color = if (enabled) Color.White else TextMuted,
+                )
+            }
+        }
     }
 }
 
