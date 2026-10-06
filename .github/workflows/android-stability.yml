@@ -25,7 +25,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      # 不装 android-actions/setup-android：ubuntu-latest 镜像自带 Android SDK 且许可证已接受
+      # （v3 动作的 sdkmanager --licenses 在 runner 上 exit 1，会把整条流水线卡在启动阶段）
       - uses: gradle/actions/setup-gradle@v4
       - name: Native shutdown regression with sanitizers
         run: bash apps/android/tests/native/run.sh
