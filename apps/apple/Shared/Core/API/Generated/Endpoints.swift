@@ -1893,6 +1893,18 @@ nonisolated extension APIClient {
         return try await send("GET", "/push/me")
     }
 
+    /// 恢复一部片的推送
+    /// `DELETE /push/me/muted-items/{item_id}`
+    func pushMeMutedRemove(itemId: Int) async throws -> API.MyPushView {
+        return try await send("DELETE", "/push/me/muted-items/\(itemId)")
+    }
+
+    /// 这部片不再提醒（长按通知的快捷操作；只关推送，订阅照常下载）
+    /// `PUT /push/me/muted-items/{item_id}`
+    func pushMeMutedAdd(itemId: Int) async throws -> API.MyPushView {
+        return try await send("PUT", "/push/me/muted-items/\(itemId)")
+    }
+
     /// 改我的通知开关
     /// `PUT /push/me/preferences`
     func pushMePreferencesSet(body: API.PushPreferencesRequest) async throws -> API.MyPushView {
@@ -1993,6 +2005,16 @@ nonisolated extension APIClient {
         if let stock { query.append(URLQueryItem(name: "stock", value: "\(stock)")) }
         if let seriesKeys { query.append(URLQueryItem(name: "series_keys", value: "\(seriesKeys)")) }
         return try await send("GET", "/reels/facets", query: query)
+    }
+
+    /// 大图预告：一部片停留后原地播放的那一段
+    /// `GET /reels/preview/{media_item_id}`
+    func reelsPreview(mediaItemId: Int, source: String? = nil, season: Int? = nil, episode: Int? = nil) async throws -> API.ReelItemView? {
+        var query: [URLQueryItem] = []
+        if let source { query.append(URLQueryItem(name: "source", value: "\(source)")) }
+        if let season { query.append(URLQueryItem(name: "season", value: "\(season)")) }
+        if let episode { query.append(URLQueryItem(name: "episode", value: "\(episode)")) }
+        return try await send("GET", "/reels/preview/\(mediaItemId)", query: query)
     }
 
     /// 规则组列表（首次访问自动创建默认组）

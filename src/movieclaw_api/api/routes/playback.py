@@ -872,7 +872,7 @@ def _share_stream_kwargs(principal: Principal) -> dict[str, int]:
 
 
 #: 原生 App 在播放会话里报的 client：自研引擎直出原文件，用不上详情页的关键帧采样预热
-NATIVE_APP_CLIENTS = ("ios", "tvos")
+NATIVE_APP_CLIENTS = ("ios", "tvos", "macos")
 
 
 def _remember_capability(
@@ -892,8 +892,8 @@ def _remember_session_capability(
     """开会话也记下客户端的解码能力，供详情页起播预热（warmup.py）判断值不值得读盘采样。
 
     原来只在 /decide 里记，而网页早已改成直接开会话（续播点并进开会话，web-player.md §6.10），
-    两个客户端都不再调 /decide——预热对网页一直没生效。原生 App（iPhone、Apple TV 同一个自研引擎）
-    直出原文件、用不上关键帧采样，不记（免得它偶尔走系统播放器时申报的能力把同一账号的记录搅乱）。
+    两个客户端都不再调 /decide——预热对网页一直没生效。原生 App（iPhone、Apple TV、Mac
+    同一个自研引擎）直出原文件、用不上关键帧采样，不记（免得它偶尔走系统播放器时申报的能力把同一账号的记录搅乱）。
     """
     if payload.client in NATIVE_APP_CLIENTS:
         return
@@ -1393,6 +1393,7 @@ async def start_playback_session(
             decision=view,
             session_id=transcode.id,
             stream_url=(f"/api/v1/playback/sessions/{transcode.id}/index.m3u8?token={token}"),
+            progressive_segments=transcode.progressive,
             # master 列表带 WEBVTT 字幕组：iOS 原生 HLS 用它，字幕成为系统级
             # 字幕轨——画中画小窗、原生全屏里都由系统渲染（§12）
             master_url=(
@@ -1679,10 +1680,14 @@ def _consumes_partial_segments(request: Request) -> bool:
     """客户端能不能边收边解一个还没转完的分片（docs/design/transcode-latency.md §5）。
 
     AVFoundation（iOS App 放服务端流、Safari 原生 HLS）收到一个完整的片段就能解码出画，
-    UA 都带 ``AppleCoreMedia``。hls.js 要整段收完才喂给解码器，提前流式下发对它没有好处，
-    反而会让按传输期算的带宽读数偏低（网页的「线路不够」判定吃这个读数）——照旧等整段。
+    UA 都带 ``AppleCoreMedia``。网页启用 hls.js 的 FetchLoader 渐进解码后，通过 ``partial=1``
+    显式选择这条路；不支持流式 Fetch 的浏览器仍等整段。网页剔除这些响应的带宽样本，
+    避免把等待编码的时间当成网络慢。
     """
-    return "AppleCoreMedia" in request.headers.get("user-agent", "")
+    return (
+        "AppleCoreMedia" in request.headers.get("user-agent", "")
+        or request.query_params.get("partial") == "1"
+    )
 
 
 #: 边产出边送的分片多久没长就放弃下发：Worker 那边卡住（或这一轮被悄悄换掉）时别把连接挂到天荒地老。
@@ -1709,7 +1714,13 @@ class _PartialSegmentResponse(StreamingResponse):
     ) -> None:
         # 借 StreamingResponse 的头部装配（不写 Content-Length）；发送循环在 __call__ 里自己管
         super().__init__(
-            content=iter(()), media_type="video/mp4", headers={"Cache-Control": "no-store"}
+            content=iter(()),
+            media_type="video/mp4",
+            headers={
+                "Cache-Control": "no-store",
+                "X-MovieClaw-Partial-Segment": "1",
+                "X-Accel-Buffering": "no",
+            },
         )
         self._partial = partial
         self._final_path = final_path

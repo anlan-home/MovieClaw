@@ -5933,6 +5933,8 @@ nonisolated extension API {
         var libraryIds: [Int]?
         /// 我收不到通知的设备；空 = 没问题
         var attention: [API.PushAttentionView]
+        /// 静音了的片（长按通知「这部剧不再提醒」），最近静音的在前
+        var mutedItems: [API.PushMutedItemView]?
 
         enum CodingKeys: String, CodingKey {
             case instanceReady = "instance_ready"
@@ -5942,6 +5944,7 @@ nonisolated extension API {
             case libraries
             case libraryIds = "library_ids"
             case attention
+            case mutedItems = "muted_items"
         }
     }
 
@@ -7633,6 +7636,21 @@ nonisolated extension API {
         }
     }
 
+    /// 「这部剧不再提醒」静音了的一部片。
+    struct PushMutedItemView: Codable, Hashable, Sendable {
+        var id: Int
+        var title: String
+        var year: Int?
+        var kind: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case title
+            case year
+            case kind
+        }
+    }
+
     struct PushPreferencesRequest: Codable, Hashable, Sendable {
         var events: [String: Bool]?
         /// 「媒体库有新片」关心的库；null = 全部；不传这个字段 = 不改
@@ -8120,6 +8138,8 @@ nonisolated extension API {
         var streamUrl: String?
         /// seek：原片大小（片源字节缓存的键要用）
         var sizeBytes: Int?
+        /// seek：光盘的交付方式（同正片会话 decision.disc）——image=光盘镜像，stream_url 是镜像原字节；folder=原盘目录（BDMV / VIDEO_TS），按 GET /playback/files/{file_id}/disc 的清单（含主播放列表）逐个文件取；None=普通文件
+        var disc: String?
         /// seek：起播音轨的同类型序号
         var audioOrdinal: Int?
         /// seek：要显示的中文字幕；None 不开
@@ -8131,6 +8151,7 @@ nonisolated extension API {
             case mode
             case streamUrl = "stream_url"
             case sizeBytes = "size_bytes"
+            case disc
             case audioOrdinal = "audio_ordinal"
             case subtitle
             case prefetch
@@ -10197,6 +10218,8 @@ nonisolated extension API {
         var language: String?
         var isDefault: Bool
         var isAi: Bool
+        var title: String?
+        var isForced: Bool?
 
         enum CodingKeys: String, CodingKey {
             case trackRef = "track_ref"
@@ -10204,6 +10227,8 @@ nonisolated extension API {
             case language
             case isDefault = "is_default"
             case isAi = "is_ai"
+            case title
+            case isForced = "is_forced"
         }
     }
 

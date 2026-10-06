@@ -34,33 +34,38 @@ enum GenreLabels {
     ]
 }
 
-/// 设计稿 A：手机 236 × 150、电视 416 × 234。两端共用剧照、遮罩与分类语义。
+/// 全幅剧照类型卡：各端共用自然通透的剧照、文字保护与分类语义。
 struct GenreCardFace: View {
     let label: String
     let count: Int
     let mediaKind: String
     let coverURL: URL?
     let width: CGFloat
-    var imageSaturation: Double = 0.76
+    var imageSaturation: Double = 1
+    /// 剧照在卡片里的缩放（Mac 悬停时 1.045，同网页；卡片外框不动）
+    var imageScale: CGFloat = 1
 
     #if os(tvOS)
-    private let height: CGFloat = 234
-    private let corner: CGFloat = 20
-    private let titleSize: CGFloat = 40
-    private let countSize: CGFloat = 24
-    private let titleLeft: CGFloat = 30
-    private let titleBottom: CGFloat = 66
-    private let countLeft: CGFloat = 32
-    private let countBottom: CGFloat = 29
+    private var scale: CGFloat { width / 416 }
+    private var height: CGFloat { width * 9 / 16 }
+    private var corner: CGFloat { 20 * scale }
+    private var titleSize: CGFloat { 40 * scale }
+    private var countSize: CGFloat { 24 * scale }
+    private var titleLeft: CGFloat { 30 * scale }
+    private var titleBottom: CGFloat { 66 * scale }
+    private var countLeft: CGFloat { 30 * scale }
+    private var countBottom: CGFloat { 29 * scale }
     #else
-    private let height: CGFloat = 150
-    private let corner: CGFloat = 12
-    private let titleSize: CGFloat = 24
+    private var scale: CGFloat { width / 236 }
+    private var height: CGFloat { 150 * scale }
+    private var corner: CGFloat { 12 * scale }
+    private var titleSize: CGFloat { 24 * scale }
+    // 部数保持 11 pt，缩小卡片后仍易读。
     private let countSize: CGFloat = 11
-    private let titleLeft: CGFloat = 18
-    private let titleBottom: CGFloat = 38
-    private let countLeft: CGFloat = 19
-    private let countBottom: CGFloat = 17
+    private var titleLeft: CGFloat { 18 * scale }
+    private var titleBottom: CGFloat { 38 * scale }
+    private var countLeft: CGFloat { 18 * scale }
+    private var countBottom: CGFloat { 17 * scale }
     #endif
 
     private var countLabel: String { "\(count) 部\(mediaKind == "tv" ? "剧集" : "电影")" }
@@ -70,6 +75,17 @@ struct GenreCardFace: View {
             LazyImage(url: coverURL, transaction: Transaction(animation: .easeOut(duration: 0.2))) { state in
                 if let image = state.image {
                     image.resizable().scaledToFill().saturation(imageSaturation)
+                        .overlay {
+                            // 压暗区提饱和：黑色渐变压低的那一截颜色更浓，读起来是「暗」而不是「灰」
+                            image.resizable().scaledToFill()
+                                .saturation(imageSaturation * 1.2)
+                                .mask(LinearGradient(stops: [
+                                    .init(color: .black, location: 0),
+                                    .init(color: .black, location: 0.25),
+                                    .init(color: .clear, location: 0.6),
+                                ], startPoint: .bottom, endPoint: .top))
+                        }
+                        .scaleEffect(imageScale)
                 } else {
                     RadialGradient(colors: [Color(white: 0.28), Color(white: 0.12)],
                                    center: .topTrailing, startRadius: 0, endRadius: width * 0.85)
@@ -84,42 +100,47 @@ struct GenreCardFace: View {
             .frame(width: width, height: height)
             .clipped()
 
-            LinearGradient(stops: [
-                .init(color: Color(red: 7 / 255, green: 9 / 255, blue: 13 / 255).opacity(239 / 255), location: 0),
-                .init(color: Color(red: 8 / 255, green: 10 / 255, blue: 12 / 255).opacity(119 / 255), location: 0.44),
-                .init(color: Color(red: 9 / 255, green: 11 / 255, blue: 16 / 255).opacity(16 / 255), location: 1),
-            ], startPoint: .bottom, endPoint: .top)
+            // 文字保护只压该压的地方：全宽一层很轻的底，再在文字所在的左下叠一团椭圆暗区；
+            // 两层都走缓动曲线，没有可见的渐变边界，右上角保持剧照原本的亮度
+            LinearGradient(stops: Self.easedStops(maxOpacity: 0.28, span: 0.54), startPoint: .bottom, endPoint: .top)
+            EllipticalGradient(stops: Self.easedStops(maxOpacity: 0.5, span: 1), center: .center)
+                .frame(width: width * 1.56, height: height * 1.44)
+                .position(x: width * 0.12, y: height)
 
             Text(label)
                 .font(.system(size: titleSize, weight: .semibold))
-                .tracking(0.6)
+                .tracking(0.2)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
                 .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.5), radius: 8, y: 1)
+                .shadow(color: .black.opacity(0.32), radius: 4, y: 1)
                 .padding(.leading, titleLeft)
                 .padding(.trailing, titleLeft * 2)
                 .padding(.bottom, titleBottom)
             Text(countLabel)
-                .font(.system(size: countSize))
+                .font(.system(size: countSize).monospacedDigit())
                 .foregroundStyle(.white.opacity(0.72))
                 .padding(.leading, countLeft)
                 .padding(.bottom, countBottom)
-            Image(systemName: "chevron.right")
-                .font(.system(size: countSize * 0.85, weight: .medium))
-                .foregroundStyle(.white.opacity(0.9))
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.trailing, countBottom)
-                .padding(.bottom, countBottom + 2)
         }
         .frame(width: width, height: height)
         .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: corner, style: .continuous)
-                .strokeBorder(.white.opacity(0.07), lineWidth: 1)
+                // 顶边一道内高光往下淡出，卡片有厚度、不像贴在黑底上的平图
+                .strokeBorder(LinearGradient(colors: [.white.opacity(0.12), .white.opacity(0.025)],
+                                             startPoint: .top, endPoint: .center), lineWidth: 0.5)
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("浏览\(label)，\(countLabel)")
+    }
+
+    /// smoothstep 缓动的黑色渐变：从 0 处的 maxOpacity 平滑落到 span 处的全透明
+    private static func easedStops(maxOpacity: Double, span: Double) -> [Gradient.Stop] {
+        (0...8).map { i in
+            let t = Double(i) / 8
+            return .init(color: .black.opacity(maxOpacity * (1 - t * t * (3 - 2 * t))), location: t * span)
+        }
     }
 }
