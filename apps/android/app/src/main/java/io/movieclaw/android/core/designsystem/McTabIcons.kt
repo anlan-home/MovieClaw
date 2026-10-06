@@ -47,13 +47,15 @@ object McTabIcons {
         )
     }
 
-    /** #i-lib：圆角矩形 + 内嵌播放三角 + 后面叠一层的第二张 */
+    /** #i-lib：网页 LibraryStackIcon 同款——横宽圆角卡 + 实心播放三角 + 顶部两条渐短堆叠线 */
     val Library: ImageVector by lazy {
         build(
             "mc-library",
-            "M6 4h8a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z" to false,
-            "M20 7v11a2 2 0 0 1-2 2h-1" to false,
-            "m9 9.5 4 2.5-4 2.5z" to true,
+            // 圆角矩形 (3.5,8.5)-(20.5,20.5)，rx 2.2
+            "M5.7 8.5H18.3A2.2 2.2 0 0 1 20.5 10.7V18.3A2.2 2.2 0 0 1 18.3 20.5H5.7A2.2 2.2 0 0 1 3.5 18.3V10.7A2.2 2.2 0 0 1 5.7 8.5Z" to false,
+            "M5.8 5.5H18.2" to false,
+            "M8 2.9H16" to false,
+            "M10.5 11.7v5.6l4.6-2.8Z" to true,
         )
     }
 

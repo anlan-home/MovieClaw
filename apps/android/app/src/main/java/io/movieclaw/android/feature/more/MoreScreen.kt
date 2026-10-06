@@ -28,12 +28,15 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.SystemUpdateAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -72,6 +75,8 @@ import io.movieclaw.android.core.designsystem.McTabBarContentPadding
 import io.movieclaw.android.core.designsystem.McTopBar
 import io.movieclaw.android.core.designsystem.McTopBarVariant
 import io.movieclaw.android.core.designsystem.McType
+import io.movieclaw.android.core.designsystem.RemoteImage
+import io.movieclaw.android.core.designsystem.tabGlassSource
 import io.movieclaw.android.core.designsystem.MenuSurface
 import io.movieclaw.android.core.designsystem.TextFaint
 import io.movieclaw.android.core.designsystem.TextMuted
@@ -92,6 +97,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /** 「我的」页的数据：提醒组（待处理 + 待更新）与最近会话 */
@@ -99,9 +105,21 @@ import kotlinx.coroutines.launch
 class MoreViewModel @Inject constructor(
     private val repository: SessionRepository,
     private val apiFactory: ApiFactory,
+    /** 底栏形态试用开关（液态玻璃新版 ⇄ 当前形态） */
+    private val tabBarPrefs: io.movieclaw.android.core.session.TabBarPrefs,
 ) : ViewModel() {
     val ui = repository.ui
     val servers = repository.servers
+
+    val liquidTabBar = tabBarPrefs.liquid.stateIn(
+        viewModelScope,
+        kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),
+        false,
+    )
+
+    fun setLiquidTabBar(on: Boolean) {
+        viewModelScope.launch { tabBarPrefs.setLiquid(on) }
+    }
 
     /** 提醒组的两件事：待处理条数与「新版本 vX / 新识别模型 X」（都只对管理员有意义） */
     data class Reminders(val noticeCount: Int = 0, val updateLabel: String? = null) {
@@ -123,7 +141,7 @@ class MoreViewModel @Inject constructor(
     private val _sessions = MutableStateFlow(Sessions())
     val sessions = _sessions.asStateFlow()
 
-    private val origin: String? get() = repository.ui.value.origin
+    val origin: String? get() = repository.ui.value.origin
     private val isAdmin: Boolean
         get() = io.movieclaw.android.core.session.Permissions
             .of(repository.ui.value.session).isAdmin
@@ -284,6 +302,8 @@ fun MoreScreen(
     val servers by vm.servers.collectAsStateWithLifecycle()
     val reminders by vm.reminders.collectAsStateWithLifecycle()
     val sessions by vm.sessions.collectAsStateWithLifecycle()
+    // 底栏形态试用开关（开 = 液态玻璃新版，关 = 当前形态）
+    val liquidTabBar by vm.liquidTabBar.collectAsStateWithLifecycle()
     val permissions = LocalPermissions.current
     val feedback = LocalFeedback.current
 
@@ -315,11 +335,13 @@ fun MoreScreen(
         LazyColumn(
             state = listState,
             contentPadding = PaddingValues(top = topBarTotal + 6.dp, bottom = McTabBarContentPadding),
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize()
+                // 液态底栏的背景模糊源（Local 为 null 时原样返回，零代价）
+                .tabGlassSource(),
         ) {
             // ── 账户卡（头像 + 昵称 + 身份小字 + 雪佛龙，整卡进「个人信息」）──
             item(key = "profile") {
-                AccountRow(session = ui.session, onClick = onOpenProfile)
+                AccountRow(session = ui.session, origin = vm.origin, onClick = onOpenProfile)
             }
 
             // ── 提醒组（仅管理员，且「有事」才出现；待处理 30 秒轮询）──
@@ -373,6 +395,22 @@ fun MoreScreen(
                         title = "客户端",
                         subtitle = "MovieClaw-Android/${BuildInfo.APP_VERSION}",
                         showChevron = false,
+                    )
+                    RowDivider()
+                    // 底栏形态 A/B 试用：开 = 液态玻璃新版（弹簧胶囊 / 按压辉光 / 高光边 /
+                    // 收缩形态对齐 / 拖动擦选），关 = 当前形态。两边对齐稳定后删一边
+                    FlatRow(
+                        title = "底栏液态玻璃",
+                        subtitle = "试用：新版底栏动效与形态；关 = 当前形态",
+                        icon = Icons.Rounded.Star,
+                        showChevron = false,
+                        trailing = {
+                            Switch(
+                                checked = liquidTabBar,
+                                onCheckedChange = { vm.setLiquidTabBar(it) },
+                                colors = SwitchDefaults.colors(checkedTrackColor = Accent),
+                            )
+                        },
                     )
                     RowDivider()
                     FlatRow(title = "成员权限", subtitle = capabilityText(ui.session), showChevron = false)
@@ -707,7 +745,7 @@ private fun RowDivider() {
  * `@用户名`），不同才写 `@用户名 · 角色`。服务器地址不再挤在这一行（服务器分组里已有「地址」）。
  */
 @Composable
-private fun AccountRow(session: SessionView?, onClick: () -> Unit) {
+private fun AccountRow(session: SessionView?, origin: String?, onClick: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -715,13 +753,24 @@ private fun AccountRow(session: SessionView?, onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = McMetrics.pagePadding, vertical = 14.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .size(56.dp)
-                .background(Brush.linearGradient(listOf(Color.White, Color(0xFFDFE4EC))), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(session.initials(), style = McType.title2, color = Color(0xFF141821))
+        // 有同步头像显示头像（iOS MorePage / 网页 AvatarBadge 同口径），否则首字徽标
+        if (!session?.avatarUrl.isNullOrBlank()) {
+            RemoteImage(
+                url = session?.avatarUrl,
+                origin = origin,
+                widthHint = 192,
+                contentDescription = session?.nickname,
+                modifier = Modifier.size(56.dp).clip(CircleShape),
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .background(Brush.linearGradient(listOf(Color.White, Color(0xFFDFE4EC))), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(session.initials(), style = McType.title2, color = Color(0xFF141821))
+            }
         }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {

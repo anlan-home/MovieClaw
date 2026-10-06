@@ -157,7 +157,6 @@ enum class SettingsSection(
 class SettingsViewModel @Inject constructor(
     private val repository: SessionRepository,
 ) : ViewModel() {
-    val session: SessionView? get() = repository.ui.value.session
     val origin: String? get() = repository.ui.value.origin
 
     fun visibleSections(): List<SettingsSection> {
@@ -316,7 +315,8 @@ class ProfileSettingsViewModel @Inject constructor(
     private val apiFactory: ApiFactory,
     private val repository: SessionRepository,
 ) : ViewModel() {
-    val session: SessionView? get() = repository.ui.value.session
+    /** 订阅式的会话仓库状态（换头像后 revalidate 写回，页面跟着重组——getter 版不订阅，页面永远不刷新） */
+    val ui = repository.ui
     val origin: String? get() = repository.ui.value.origin
 
     private val _busy = MutableStateFlow(false)
@@ -398,7 +398,8 @@ fun ProfileSettingsScreen(
     onOpenAccounts: () -> Unit = {},
     vm: ProfileSettingsViewModel = hiltViewModel(),
 ) {
-    val session = vm.session
+    val uiState by vm.ui.collectAsStateWithLifecycle()
+    val session = uiState.session
     val context = LocalContext.current
     var nickname by remember(session?.nickname) { mutableStateOf(session?.nickname ?: "") }
     var oldPassword by remember { mutableStateOf("") }
@@ -422,7 +423,9 @@ fun ProfileSettingsScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(64.dp).clip(RoundedCornerShape(999.dp))) {
                     RemoteImage(
-                        url = session?.avatarUrl?.substringBefore('?'),
+                        // 保留 `?v=`：服务端在 avatar_url 里带版本参数专门破缓存，
+                        // 剥掉它换头像后 Coil 会一直用同一 URL 的旧缓存（实机反馈「提示已更新但不换」）
+                        url = session?.avatarUrl,
                         origin = vm.origin,
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),

@@ -74,6 +74,7 @@ import io.movieclaw.android.core.designsystem.ProgressBar
 import io.movieclaw.android.core.designsystem.Success
 import io.movieclaw.android.core.designsystem.TextFaint
 import io.movieclaw.android.core.designsystem.TextMuted
+import io.movieclaw.android.core.designsystem.tabGlassSource
 import io.movieclaw.android.core.designsystem.Warning
 import io.movieclaw.android.core.model.ActiveFileDownload
 import io.movieclaw.android.core.model.ActivePlaybackSession
@@ -130,7 +131,9 @@ fun ActivityScreen(
                         top = topBarTotal + 6.dp,
                         bottom = McTabBarContentPadding,
                     ),
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize()
+                        // 液态底栏的背景模糊源（Local 为 null 时原样返回，零代价）
+                        .tabGlassSource(),
                 ) {
                     // ── 需要处理（HTML 活动页第一个分区）──
                     // 数据不是单独接口：网页也是从下载任务 + 后台任务里派生的（useTaskActivity）。

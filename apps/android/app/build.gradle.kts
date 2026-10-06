@@ -211,6 +211,9 @@ dependencies {
     // 本机通知的周期检查（纯客户端，不动服务端）
     implementation(libs.androidx.work.runtime)
 
+    // 底栏玻璃的真背景模糊（内容层 hazeSource + 玻璃件 hazeEffect）
+    implementation(libs.haze)
+
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
     implementation(libs.hilt.navigation.compose)

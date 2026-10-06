@@ -231,8 +231,12 @@ fun McCapsuleTabBar(
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
-    /** 最后一格是账号头像（直径 25、白底、深色首字母 11/700） */
+    /** 最后一格是账号头像：有 `avatarUrl` 显示同步头像（iOS/网页同口径），否则首字徽标 */
     avatarInitials: String? = null,
+    /** 当前账号的服务端头像（相对路径，走鉴权图片管线） */
+    avatarUrl: String? = null,
+    /** 头像地址解析用的服务器来源 */
+    origin: String? = null,
     /** 要挂状态点的格下标 → 点（iOS：活动页签三色状态点、头像页签「有可用更新」蓝点） */
     dots: Map<Int, TabDot> = emptyMap(),
 ) {
@@ -334,12 +338,23 @@ fun McCapsuleTabBar(
                         ) { onSelect(i) },
                     contentAlignment = Alignment.Center,
                 ) {
-                    if (avatarInitials != null && i == count - 1) {
-                        Box(
-                            Modifier.size(25.dp).clip(CircleShape).background(Color.White),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(avatarInitials, style = McType.microSemibold, color = Color(0xFF141821))
+                    if (i == count - 1 && (avatarUrl != null || avatarInitials != null)) {
+                        // 「我的」格 = 当前账号头像：有同步头像显示头像，否则首字徽标（iOS/网页同口径）
+                        if (avatarUrl != null) {
+                            RemoteImage(
+                                url = avatarUrl,
+                                origin = origin,
+                                widthHint = 96,
+                                contentDescription = labels.getOrNull(i),
+                                modifier = Modifier.size(25.dp).clip(CircleShape),
+                            )
+                        } else {
+                            Box(
+                                Modifier.size(25.dp).clip(CircleShape).background(Color.White),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(avatarInitials ?: "", style = McType.microSemibold, color = Color(0xFF141821))
+                            }
                         }
                     } else {
                         Icon(

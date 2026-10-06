@@ -73,6 +73,7 @@ import io.movieclaw.android.core.designsystem.McTabBarContentPadding
 import io.movieclaw.android.core.designsystem.McTopBar
 import io.movieclaw.android.core.designsystem.McTopBarVariant
 import io.movieclaw.android.core.designsystem.McType
+import io.movieclaw.android.core.designsystem.tabGlassSource
 import io.movieclaw.android.core.designsystem.Placeholder
 import io.movieclaw.android.core.designsystem.PosterCard
 import io.movieclaw.android.core.designsystem.RemoteImage
@@ -568,6 +569,8 @@ fun LibraryScreen(
                     Modifier
                         .fillMaxSize()
                         .verticalScroll(libScroll)
+                        // 液态底栏的背景模糊源（Local 为 null 时原样返回，零代价）
+                        .tabGlassSource()
                         // iOS 根页是 inlineLarge 大标题：标题占 52dp 之后统计行再往下 4dp
                         .padding(top = McMetrics.topBarHeight + 2.dp, bottom = McTabBarContentPadding),
                 ) {

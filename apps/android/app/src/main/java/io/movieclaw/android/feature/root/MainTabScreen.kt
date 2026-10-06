@@ -26,7 +26,10 @@ import androidx.lifecycle.repeatOnLifecycle
 import io.movieclaw.android.core.designsystem.TabDot
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 import io.movieclaw.android.core.designsystem.Bg
 import io.movieclaw.android.core.designsystem.McCapsuleTabBar
@@ -69,8 +72,20 @@ class MainTabViewModel @Inject constructor(
     val badges: ShellBadges,
     /** 落地页稳定后的一次性预热（数据 + 首屏图） */
     val prewarm: io.movieclaw.android.core.session.SessionPrewarm,
+    /** 底栏形态试用开关（「我的」页切换；开 = 液态玻璃新版，关 = 当前形态） */
+    private val tabBarPrefs: io.movieclaw.android.core.session.TabBarPrefs,
 ) : ViewModel() {
     val ui = repository.ui
+
+    val liquidTabBar = tabBarPrefs.liquid.stateIn(
+        viewModelScope,
+        kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),
+        false,
+    )
+
+    fun setLiquidTabBar(on: Boolean) {
+        viewModelScope.launch { tabBarPrefs.setLiquid(on) }
+    }
 }
 
 /**
@@ -155,6 +170,8 @@ fun MainTabScreen(
     // 底栏状态点（iOS `ShellBadges`）：前台轮询，退后台停、回前台立刻刷
     val activityDot by vm.badges.activityDot.collectAsStateWithLifecycle()
     val moreDot by vm.badges.moreDot.collectAsStateWithLifecycle()
+    // 底栏形态试用开关（「我的」页切换）
+    val liquidTabBar by vm.liquidTabBar.collectAsStateWithLifecycle()
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
@@ -168,8 +185,14 @@ fun MainTabScreen(
         }
     }
 
+    // 液态底栏的模糊源：开关打开才提供（Local 为 null 时内容层的标记原样返回，零代价）
+    val hazeState = dev.chrisbanes.haze.rememberHazeState()
+
     Box(Modifier.fillMaxSize().background(Bg)) {
-        when (tabs[selected]) {
+        androidx.compose.runtime.CompositionLocalProvider(
+            io.movieclaw.android.core.designsystem.LocalTabHazeState provides if (liquidTabBar) hazeState else null,
+        ) {
+            when (tabs[selected]) {
             MainTab.DISCOVER -> DiscoverScreen(
                 onOpenLibrary = onOpenLibrary,
                 onOpenItem = onOpenItem,
@@ -215,21 +238,44 @@ fun MainTabScreen(
                 onOpenAgentSession = onOpenAgentSession,
                 onOpenSettings = onOpenSettings,
             )
+            }
         }
 
-        // 悬浮胶囊底栏：内容从它下面穿过（实测就是这样，底栏不占布局高度）
-        McCapsuleTabBar(
-            icons = tabs.map { it.icon },
-            labels = tabs.map { it.label },
-            selectedIndex = selected,
-            onSelect = { current = tabs[it] },
-            avatarInitials = ui.session.initials(),
-            dots = dots,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(bottom = McMetrics.tabBarBottom),
-        )
+        // 悬浮胶囊底栏：内容从它下面穿过（实测就是这样，底栏不占布局高度）。
+        // 「我的」页的试用开关在两套形态间 A/B：开 = 液态玻璃新版，关 = 当前形态
+        if (liquidTabBar) {
+            io.movieclaw.android.core.designsystem.McLiquidTabBar(
+                icons = tabs.map { it.icon },
+                labels = tabs.map { it.label },
+                selectedIndex = selected,
+                onSelect = { current = tabs[it] },
+                avatarInitials = ui.session.initials(),
+                avatarUrl = ui.session?.avatarUrl,
+                origin = ui.origin,
+                dots = dots,
+                hazeState = hazeState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(bottom = McMetrics.tabBarBottom),
+            )
+        } else {
+            McCapsuleTabBar(
+                icons = tabs.map { it.icon },
+                labels = tabs.map { it.label },
+                selectedIndex = selected,
+                onSelect = { current = tabs[it] },
+                avatarInitials = ui.session.initials(),
+                avatarUrl = ui.session?.avatarUrl,
+                origin = ui.origin,
+                dots = dots,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(bottom = McMetrics.tabBarBottom),
+            )
+        }
     }
 }

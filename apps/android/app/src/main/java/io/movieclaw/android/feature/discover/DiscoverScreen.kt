@@ -5,6 +5,7 @@ import io.movieclaw.android.core.designsystem.SkeletonBlock
 import io.movieclaw.android.core.designsystem.PosterRowSkeleton
 import io.movieclaw.android.core.designsystem.PosterRibbon
 import io.movieclaw.android.core.designsystem.McType
+import io.movieclaw.android.core.designsystem.tabGlassSource
 import io.movieclaw.android.core.designsystem.McRow
 import io.movieclaw.android.core.designsystem.McMetrics
 import androidx.compose.ui.text.TextStyle
@@ -445,6 +446,8 @@ fun DiscoverScreen(
                 // 筛选态下正文是懒加载网格：外层不能再套垂直滚动（无限高约束会崩），
                 // 网格自己滚；常规态仍是整页一个滚动容器（实测形态）
                 .then(if (filtering) Modifier else Modifier.verticalScroll(scroll))
+                // 液态底栏的背景模糊源（Local 为 null 时原样返回，零代价）
+                .tabGlassSource()
                 .padding(bottom = McTabBarContentPadding),
         ) {
             if (filtering) {

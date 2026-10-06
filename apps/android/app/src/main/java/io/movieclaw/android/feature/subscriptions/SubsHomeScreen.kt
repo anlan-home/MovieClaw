@@ -90,6 +90,7 @@ import io.movieclaw.android.core.designsystem.LineSoft
 import io.movieclaw.android.core.designsystem.McMetrics
 import io.movieclaw.android.core.designsystem.McTabBarContentPadding
 import io.movieclaw.android.core.designsystem.McType
+import io.movieclaw.android.core.designsystem.tabGlassSource
 import io.movieclaw.android.core.designsystem.Ok
 import io.movieclaw.android.core.designsystem.RemoteImage
 import io.movieclaw.android.core.designsystem.Success
@@ -640,6 +641,8 @@ fun SubsHomeScreen(
                     onRefresh = { vm.pullRefresh() },
                 )
                 .verticalScroll(scroll)
+                // 液态底栏的背景模糊源（Local 为 null 时原样返回，零代价）
+                .tabGlassSource()
                 .padding(bottom = McTabBarContentPadding),
         ) {
             if (state.loading && state.slides.isEmpty()) {
@@ -772,10 +775,6 @@ private fun SubsHero(
         )
     }
     val fade = (1f - scrollValue / 260f).coerceIn(0f, 1f)
-    // 临时诊断（查「hero 不轮播」）：张数与当前页，定位后删
-    LaunchedEffect(slides.size, pager.currentPage) {
-        android.util.Log.i("McPerf", "订阅hero：${slides.size} 张，当前第 ${pager.currentPage + 1} 张")
-    }
     Box(Modifier.fillMaxWidth().height(500.dp)) {
         HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
             val s = slides[page]
