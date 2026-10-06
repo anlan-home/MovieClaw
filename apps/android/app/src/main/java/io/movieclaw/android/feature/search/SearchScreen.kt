@@ -92,6 +92,8 @@ fun SearchScreen(
     initialKeyword: String = "",
     /** 进页时预选的分区；null = 维持资源（与网页 /search?q= 不带 tab 同语义） */
     initialMode: SearchMode? = null,
+    /** 进页时预选的资源分类（详情页「搜索资源」按影片类型收窄 → search?q=&cat=；null = 不收窄） */
+    initialCategory: TorrentCategory? = null,
     /** 手动选种模式（订阅详情「手动选种」→ search?forSub=）：结果全投给这条订阅 */
     forSubscriptionId: Long? = null,
     forSubscriptionTitle: String = "",
@@ -136,13 +138,13 @@ fun SearchScreen(
     }
 
     // 首次进入：
-    //  · 带词（标题详情「搜索资源」→ search?q=）＝ 预填并自动搜一次（不弹键盘，用户要看的是结果），
-    //    只有 q 不带 tab 时按网页老链接落在资源分区；
+    //  · 带词（详情页「搜索资源」→ search?q=[&cat=]）＝ 预填并自动搜一次（不弹键盘，用户要看的是结果），
+    //    只有 q 不带 tab 时按网页老链接落在资源分区；cat 非空再按影片类型收窄分类（v0.32）；
     //  · 带 tab（放大镜按来源页签预选：发现 / 订阅 → 影视，媒体库 → 媒体库，活动 → 资源）＝ 直接落在该分区；
     //  · 手动选种（search?forSub=）＝ 资源分区；
     //  · 什么都没有（「我的」放大镜）＝ 沿用上次停留的分区（Web localStorage / iOS @AppStorage 同款）。
     // 空手进来还要聚焦弹键盘——点了放大镜就是要输入。
-    LaunchedEffect(initialKeyword, initialMode, forSubscriptionId, rememberedMode) {
+    LaunchedEffect(initialKeyword, initialMode, initialCategory, forSubscriptionId, rememberedMode) {
         if (entryResolved) return@LaunchedEffect
         val resolved = when {
             forSubscriptionId != null -> SearchMode.TORRENTS
@@ -151,7 +153,7 @@ fun SearchScreen(
             else -> rememberedMode ?: SearchMode.TORRENTS
         }
         entryResolved = true
-        vm.prefill(resolved, initialKeyword.trim())
+        vm.prefill(resolved, initialKeyword.trim(), initialCategory)
         // 预选出来的分区也记下来（同 web `writeSearchPaletteState`）
         vm.rememberMode(resolved)
         if (initialKeyword.isNotBlank()) vm.submit()

@@ -178,8 +178,9 @@ fun AppNav() {
                 titleRef = entry.arguments?.getString("ref").orEmpty(),
                 onBack = { navController.popBackStack() },
                 onOpenTitle = { ref -> navController.navigate("title?ref=${Uri.encode(ref)}") },
-                // 「搜索资源」带片名进搜索页（tab 缺省 = 资源分区，与网页 /search?q= 同口径）
-                onSearch = { keyword -> navController.navigate("search?q=${Uri.encode(keyword)}") },
+                // 「搜索资源」带片名进搜索页（tab 缺省 = 资源分区，与网页 /search?q= 同口径）；
+                // 电影 / 剧集按类型收窄（v0.32 iOS / Web 同款，见 searchRouteFor）
+                onSearch = { keyword, kind -> navController.navigate(searchRouteFor(keyword, kind)) },
                 onSubscribe = { ref ->
                     io.movieclaw.android.feature.subscriptions.SubscribeSheetHost.open(ref)
                 },
@@ -322,16 +323,18 @@ fun AppNav() {
                 },
             )
         }
-        // 搜索页带 q/tab 深链：标题详情「搜索资源」带词进来，tab 缺省 = 资源分区
-        // （与网页 /search?q= 同语义：URL 里只有 q 时不带 tab，落在站点资源）。
+        // 搜索页带 q/tab/cat 深链：详情页「搜索资源」带词进来，tab 缺省 = 资源分区
+        // （与网页 /search?q= 同语义：URL 里只有 q 时不带 tab，落在站点资源）；
+        // cat = 按影片类型收窄的资源分类（v0.32，电影/剧集，见 searchRouteFor）。
         // 订阅详情「手动选种」用 forSub/forSubTitle 进手动选种模式（网页 /search?for_sub=）
         composable(
-            "search?q={q}&tab={tab}&forSub={forSub}&forSubTitle={forSubTitle}",
+            "search?q={q}&tab={tab}&forSub={forSub}&forSubTitle={forSubTitle}&cat={cat}",
             arguments = listOf(
                 androidx.navigation.navArgument("q") { defaultValue = "" },
                 androidx.navigation.navArgument("tab") { defaultValue = "" },
                 androidx.navigation.navArgument("forSub") { defaultValue = "" },
                 androidx.navigation.navArgument("forSubTitle") { defaultValue = "" },
+                androidx.navigation.navArgument("cat") { defaultValue = "" },
             ),
         ) { entry ->
             SearchScreen(
@@ -342,6 +345,8 @@ fun AppNav() {
                     "library" -> SearchMode.LIBRARY
                     else -> null
                 },
+                initialCategory = io.movieclaw.android.core.model.TorrentCategory
+                    .of(entry.arguments?.getString("cat")),
                 forSubscriptionId = entry.arguments?.getString("forSub")?.toLongOrNull(),
                 forSubscriptionTitle = entry.arguments?.getString("forSubTitle").orEmpty(),
                 onBack = { navController.popBackStack() },
@@ -361,9 +366,11 @@ fun AppNav() {
             val subId = it.arguments?.getString("subscriptionId")?.toLongOrNull()
             SubscriptionDetailScreen(
                 onBack = { navController.popBackStack() },
-                onOpenSearch = { title ->
+                // 「手动选种」：带词 + 按订阅类型收窄分类进搜索页（v0.32 iOS / Web 同款）
+                onOpenSearch = { title, kind ->
                     navController.navigate(
-                        "search?forSub=${subId ?: -1L}&forSubTitle=${Uri.encode(title)}"
+                        searchRouteFor(title, kind) +
+                            "&forSub=${subId ?: -1L}&forSubTitle=${Uri.encode(title)}"
                     )
                 },
             )
@@ -498,4 +505,15 @@ private fun adminOnly(navController: androidx.navigation.NavHostController): Boo
         }
     }
     return allowed
+}
+
+/**
+ * 详情页「搜索资源」的搜索路由：电影 / 剧集按影片类型收窄资源分类
+ * （Web `scopeOfMediaKind` / iOS `SearchScope.ofMediaKind` 同款）——同名另一类的种子
+ * 不再混进来，结果页分类胶囊会高亮、可一键放宽；其余形态（库里的「其他」/图片）
+ * 或查不到类型时不收窄（与网页 URL 只有 q 时同语义）。
+ */
+private fun searchRouteFor(keyword: String, kind: String?): String {
+    val base = "search?q=${Uri.encode(keyword)}"
+    return if (kind == "movie" || kind == "tv") "$base&cat=$kind" else base
 }

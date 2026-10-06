@@ -48,6 +48,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -80,7 +81,9 @@ import io.movieclaw.android.core.designsystem.McNavButton
 import io.movieclaw.android.core.designsystem.RemoteImage
 import io.movieclaw.android.core.model.FacetValue
 import io.movieclaw.android.core.model.PlaybackMarksRequest
+import io.movieclaw.android.core.playback.ExoEngine
 import io.movieclaw.android.core.playback.PlaybackNetwork
+import io.movieclaw.android.core.playback.mpv.MpvEngine
 import io.movieclaw.android.core.model.ReelEventBatch
 import io.movieclaw.android.core.model.ReelEventView
 import io.movieclaw.android.core.model.ReelFacetsView
@@ -765,18 +768,31 @@ private fun ReelPage(
                 val slotEngine = players.engineFor(item.id)
                 val slotReady = players.frameReadyId == item.id || players.standbyReadyId == item.id
                 if (slotEngine != null) {
-                    AndroidView(
-                        factory = { ctx ->
-                            androidx.media3.ui.PlayerView(ctx).apply {
-                                useController = false
-                                setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                            }
-                        },
-                        // 引擎是池里的状态（换条 / 预起转正时会变），重组时重绑
-                        update = { view -> view.player = players.engineFor(item.id)?.player },
-                        onRelease = { view -> view.player = null },
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    // 画面槽分两种引擎：Exo 走 PlayerView；mpv（光盘镜像专用，v0.32 disc=image）
+                    // 走引擎自带的 SurfaceView（直渲，与正片播放页同一套）。key 住引擎实例——
+                    // 换条时 engineFor 返回的实例会变，key 变了 AndroidView 才会重建、
+                    // 换成对的那块画面（Exo 靠 update 重绑 player，mpv 必须换 view）
+                    key(slotEngine) {
+                        if (slotEngine is MpvEngine) {
+                            AndroidView(
+                                factory = { slotEngine.surfaceView },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            AndroidView(
+                                factory = { ctx ->
+                                    androidx.media3.ui.PlayerView(ctx).apply {
+                                        useController = false
+                                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                    }
+                                },
+                                // 引擎是池里的状态（换条 / 预起转正时会变），重组时重绑
+                                update = { view -> view.player = (players.engineFor(item.id) as? ExoEngine)?.player },
+                                onRelease = { view -> view.player = null },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
                 }
                 if (!slotReady) {
                     RemoteImage(

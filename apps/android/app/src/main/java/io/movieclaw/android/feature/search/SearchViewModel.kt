@@ -150,14 +150,18 @@ class SearchViewModel @Inject constructor(
     fun consumeNotice() = _ui.update { it.copy(notice = null) }
 
     /**
-     * 带词/带分区进入（标题详情「搜索资源」→ `search?q=&tab=`）：先预填再由页面自动搜一次。
+     * 带词/带分区进入（详情页「搜索资源」→ `search?q=&tab=&cat=`）：先预填再由页面自动搜一次。
      * mode 传 null = 维持当前分区（路由 tab 缺省时的语义：资源）。
+     * category 非空 = 按影片类型收窄资源分类（v0.32，Web `scopeOfMediaKind` /
+     * iOS `SearchScope.ofMediaKind` 同款：电影只搜电影分类、剧集只搜剧集分类，结果页
+     * 分类胶囊会高亮，可一键放宽）。
      */
-    fun prefill(mode: SearchMode?, keyword: String) {
+    fun prefill(mode: SearchMode?, keyword: String, category: TorrentCategory? = null) {
         _ui.update {
             it.copy(
                 mode = mode ?: it.mode,
                 query = keyword.ifBlank { it.query },
+                category = category ?: it.category,
             )
         }
     }

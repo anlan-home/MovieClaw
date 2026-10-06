@@ -1,5 +1,6 @@
 import java.net.URI
 import java.security.MessageDigest
+import java.time.LocalDate
 import java.util.zip.ZipInputStream
 import org.gradle.api.DefaultTask
 import org.gradle.api.provider.Property
@@ -27,8 +28,11 @@ android {
         applicationId = "io.movieclaw.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // 版本随构建日期（自更新方案：GitHub release tag `android-apk-YYYYMMDD` 同源）：
+        // versionCode = YYYYMMDD——单调递增、供客户端比较新旧；versionName = YYYY.MM.DD（展示）
+        val buildStamp = LocalDate.now()
+        versionCode = buildStamp.year * 10000 + buildStamp.monthValue * 100 + buildStamp.dayOfMonth
+        versionName = "%04d.%02d.%02d".format(buildStamp.year, buildStamp.monthValue, buildStamp.dayOfMonth)
         ndk {
             // libmp2.so(libmpv 全量内核)仅随 arm64 分发,包体控制见设计方案 §附录 B
             abiFilters += listOf("arm64-v8a")

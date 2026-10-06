@@ -166,7 +166,8 @@ fun TitleDetailScreen(
     onSubscribe: (String) -> Unit,
     onOpenItem: (Long, Long) -> Unit,
     onPlay: (PlayTarget) -> Unit,
-    onSearch: (String) -> Unit = {},
+    /** 「搜索资源」：带片名与影片类型进搜索页（kind 供按类型收窄，v0.32 iOS / Web 同款） */
+    onSearch: (String, String?) -> Unit = { _, _ -> },
     /** 演职员点进「TMDB 影人页」（iOS `MediaDetailView` 的 `.discoveredPerson`；与库内影人页是两个页面） */
     onOpenPerson: (Int) -> Unit = {},
     vm: TitleDetailViewModel = hiltViewModel(),
@@ -390,7 +391,7 @@ fun TitleDetailScreen(
                                 }
                             }
                             if (showSearch) {
-                                ActionPill("搜索资源", Icons.Rounded.Search, filled = false) { onSearch(title.title) }
+                                ActionPill("搜索资源", Icons.Rounded.Search, filled = false) { onSearch(title.title, title.mediaType) }
                             }
                         }
                     }

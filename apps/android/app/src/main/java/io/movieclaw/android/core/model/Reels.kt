@@ -91,7 +91,13 @@ data class ReelPlayView(
     /** 原片取流地址（相对路径，含令牌） */
     val streamUrl: String? = null,
     val sizeBytes: Long? = null,
-    /** 起播音轨的同类型序号（embedded:<k>） */
+    /**
+     * 光盘的交付方式（服务端 v0.32 起「大图预告」与「片段」也放开原盘 / 镜像 / DVD / TS / AVI）：
+     * `image` = 光盘镜像（stream_url 是镜像原字节，盘内结构本机读，同正片）；
+     * `folder` = 原盘目录（BDMV / VIDEO_TS，按目录清单逐个文件取）；null = 普通文件
+     */
+    val disc: String? = null,
+    /** 起播音轨的同类型序号（embedded:<k>）；光盘镜像服务端读不出盘内轨，为 null */
     val audioOrdinal: Int? = null,
     /** 要显示的中文字幕；null 不开 */
     val subtitle: ReelSubtitleView? = null,

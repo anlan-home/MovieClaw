@@ -15,9 +15,13 @@ import io.movieclaw.android.core.playback.BufferProfile
 import io.movieclaw.android.core.playback.DeviceCapability
 import io.movieclaw.android.core.playback.EngineSource
 import io.movieclaw.android.core.playback.ExoEngine
+import io.movieclaw.android.core.playback.IsoBridge
+import io.movieclaw.android.core.playback.PlayerEngine
 import io.movieclaw.android.core.playback.ReelsQuality
 import io.movieclaw.android.core.playback.SourceByteCache
 import io.movieclaw.android.core.playback.SubtitleCues
+import io.movieclaw.android.core.playback.mpv.MpvEngine
+import io.movieclaw.android.core.playback.mpv.MpvNative
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -47,6 +51,8 @@ data class ReelSource(
     val audioRef: String?,
     /** 转码会话 id；直出为 null。离开这条时要停掉，播放中每 15 秒续命 */
     val sessionId: String? = null,
+    /** 光盘交付方式（服务端 `play.disc`）；非空 = 这条是光盘镜像，url 已是 IsoBridge 的本地流 */
+    val disc: String? = null,
 )
 
 /**
@@ -102,15 +108,15 @@ class ReelsPlayers(
     var cues by mutableStateOf<List<SubtitleCues.Cue>>(emptyList())
         private set
 
-    /** 画面该挂哪个引擎：当前条的引擎（页面用 state 读它，换引擎会重组重绑） */
-    var currentEngine by mutableStateOf<ExoEngine?>(null)
+    /** 画面该挂哪个引擎：当前条的引擎（页面用 state 读它，换引擎会重组重绑；光盘镜像是 mpv） */
+    var currentEngine by mutableStateOf<PlayerEngine?>(null)
         private set
 
     /* ---------------- 内部 ---------------- */
 
     private class Clip(
         val item: ReelItemView,
-        val engine: ExoEngine,
+        val engine: PlayerEngine,
         val source: ReelSource,
         var pollJob: Job? = null,
         var subtitleJob: Job? = null,
@@ -133,6 +139,9 @@ class ReelsPlayers(
     private var qualityCap: Int = ReelsQuality.AUTO
     private var network: PlaybackNetwork = PlaybackNetwork.UNKNOWN
 
+    /** openSource 失败的原因：光盘类读不出来要说清是哪一步，不能都说成「缺少取流地址」 */
+    private var openFailureReason: String? = null
+
     fun setQuality(cap: Int) {
         qualityCap = cap
     }
@@ -143,7 +152,7 @@ class ReelsPlayers(
 
     fun currentItemId(): String? = current?.item?.id
 
-    fun engineFor(itemId: String): ExoEngine? {
+    fun engineFor(itemId: String): PlayerEngine? {
         if (current?.item?.id == itemId) return current?.engine
         // 预起的那条：**装载好就把画面给它**——页面挂上 surface 它才出得了第一帧；
         // 等 standbyReadyId 再给就成了鸡生蛋（没 surface 永远不出帧）
@@ -180,7 +189,8 @@ class ReelsPlayers(
             standbyReadyId = null
             adopt(ready, item, impressionAt)
             ready.engine.setPlaying(true)
-            ready.engine.player.volume = 1f
+            // 预起只可能是 Exo（光盘镜像不预起，见 scheduleStandby）：还原音量
+            (ready.engine as? ExoEngine)?.player?.volume = 1f
             playing = true
             ended = false
             android.util.Log.i("McReels", "接上预起：${item.title.name}")
@@ -191,18 +201,28 @@ class ReelsPlayers(
         } else {
             dropStandby()
             scope.launch {
+                // 失败原因分开报：光盘类读不出来要说清是哪一步（"缺少取流地址"会把镜像说错）
                 val source = openSource(item) ?: run {
-                    failMessage = "这一条缺少取流地址"
-                    onEvent(item, "fail", null, null, null, "no_stream_url")
+                    failMessage = openFailureReason ?: "这一条缺少取流地址"
+                    onEvent(
+                        item, "fail", null, null, null,
+                        if (openFailureReason != null) "disc_unsupported" else "no_stream_url",
+                    )
                     return@launch
                 }
                 if (seq != settleSeq) {
                     android.util.Log.i("McReels", "作废一次换条（已滑走）：${item.title.name}")
+                    // 作废的这次可能已经开过镜像的原生会话：顺手关掉，别留一个没人读的盘
+                    if (source.disc != null) IsoBridge.close()
                     return@launch
                 }
                 io.movieclaw.android.core.playback.PlaybackStartupTrace.mark("决策+会话")
                 lastOpenWasTranscoded = source.sessionId != null
-                val engine = ExoEngine(context, BufferProfile.Normal)
+                // 光盘镜像是 mpv 的活：Exo 读不了盘内 192 字节包的 m2ts（正片链路同一条判据，
+                // 实测 Exo 会白等 5 秒才失败回退）；其余照旧 Exo（硬解最优）
+                val engine: PlayerEngine =
+                    if (source.disc == "image") MpvEngine(context)
+                    else ExoEngine(context, BufferProfile.Normal)
                 val clip = Clip(item = item, engine = engine, source = source)
                 current = clip
                 currentEngine = engine
@@ -252,6 +272,11 @@ class ReelsPlayers(
      */
     private suspend fun openSource(item: ReelItemView): ReelSource? {
         val origin = originProvider() ?: return null
+        openFailureReason = null
+        // 光盘片源（v0.32 起「大图预告」与「片段」也放开原盘 / 镜像 / DVD / TS / AVI）：
+        // 按交付方式装载，与正片同一套（docs/design/disc-direct-play.md）。不进下面的会话
+        // 协商——限了画质也救不了光盘（服务端读不出盘内结构，转不了码），协商只会白跑一趟
+        item.play.disc?.let { return discSource(item, origin) }
         val cap = ReelsQuality.effectiveCap(qualityCap, network)
         if (cap == null) return directSource(item, origin)
         return runCatching {
@@ -321,50 +346,89 @@ class ReelsPlayers(
         )
     }
 
+    /**
+     * 光盘片源：按 `play.disc` 的交付方式装载（与正片同一套）。
+     *
+     *  · `image`（光盘镜像）：走 IsoBridge——服务端只按 Range 供原字节，盘内结构（UDF →
+     *    BDMV/STREAM 正片 m2ts）在本机读出来，交给 mpv（只有它能放这种盘流）；
+     *  · `folder`（原盘目录 BDMV / VIDEO_TS）：本机内核读不了远端目录结构（与申报的
+     *    `discFolder=false` 同一条边界），明确失败、换下一条，而不是拿原字节硬播；
+     *  · 其余值：按普通文件回落（新服务端字段出现新值时不至于整条播不了）。
+     *
+     * 服务端对光盘不给预取范围、也不给音轨/字幕序号（盘内轨清单它读不出）——
+     * 音轨交给 mpv 按盘上默认轨起播，字幕本条不开（服务端同款注释）。
+     */
+    private suspend fun discSource(item: ReelItemView, origin: String): ReelSource? {
+        when (item.play.disc) {
+            "image" -> Unit
+            "folder" -> {
+                openFailureReason = "原盘目录暂不支持播放"
+                return null
+            }
+            else -> return directSource(item, origin)
+        }
+        if (!MpvNative.available) {
+            openFailureReason = "本机内核不支持光盘镜像"
+            return null
+        }
+        val raw = item.play.streamUrl ?: return null
+        val url = if (raw.startsWith("http")) raw else origin.trimEnd('/') + raw
+        // 开卷 + 扫目录是几十次远端小读（真机几百毫秒到秒级），必须离开主线程
+        val local = withContext(Dispatchers.IO) { IsoBridge.open(url) }
+        if (local == null) {
+            openFailureReason = "光盘镜像读取失败"
+            return null
+        }
+        android.util.Log.i("McReels", "光盘镜像装载：${item.title.name} → $local")
+        return ReelSource(
+            url = local,
+            hls = false,
+            playerStartMs = item.segment.startMs,
+            playerEndMs = item.segment.endMs,
+            fileOffsetMs = 0L,
+            // 镜像的字节由 IsoBridge 的原生预读窗口管，不进片源字节缓存（与正片一致）
+            cacheKey = null,
+            audioRef = item.play.audioOrdinal?.let { "embedded:$it" },
+            disc = "image",
+        )
+    }
+
     /** 把引擎的监听、位置轮询、字幕挂上（新建的与预起后接手的都走这里） */
     private fun attach(clip: Clip, impressionAt: Long) {
         val engine = clip.engine
-        engine.player.addListener(object : Player.Listener {
-            private fun firstFrame() {
-                if (clip.hasFirstFrame) return
-                clip.hasFirstFrame = true
-                clip.startedAtMs = android.os.SystemClock.elapsedRealtime()
-                frameReadyId = clip.item.id
-                onEvent(
-                    clip.item, "first_frame", null,
-                    clip.startedAtMs - impressionAt, clip.item.segment.startMs, null,
-                )
-                android.util.Log.i(
-                    "McReels",
-                    "出画 ${clip.item.title.name}：等 ${clip.startedAtMs - impressionAt}ms",
-                )
-                io.movieclaw.android.core.playback.PlaybackStartupTrace.mark("首帧")
-                io.movieclaw.android.core.playback.PlaybackStartupTrace.finish()
-                val index = pendingItems.indexOfFirst { it.id == clip.item.id }
-                if (index >= 0) afterFirstFrame(clip.item, index, pendingItems)
-            }
+        // Exo 有首帧/错误回调；mpv（光盘镜像）没有——首帧靠下面的位置轮询（与正片链路
+        // 同一判据：PlaybackController「firstFrameMs == null && positionMs() > 0」）
+        if (engine is ExoEngine) {
+            engine.player.addListener(object : Player.Listener {
+                override fun onRenderedFirstFrame() = markFirstFrame(clip, impressionAt)
 
-            override fun onRenderedFirstFrame() = firstFrame()
+                /** 首帧回调万一漏了（surface 刚挂上就追帧），画面尺寸一到也算出了画 */
+                override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                    if (videoSize.width > 0 && videoSize.height > 0) markFirstFrame(clip, impressionAt)
+                }
 
-            /** 首帧回调万一漏了（surface 刚挂上就追帧），画面尺寸一到也算出了画 */
-            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-                if (videoSize.width > 0 && videoSize.height > 0) firstFrame()
-            }
-
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                failMessage = error.message ?: error.errorCodeName
-                onEvent(clip.item, "fail", clip.watchedMs, null, positionMs, error.errorCodeName)
-            }
-        })
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    failMessage = error.message ?: error.errorCodeName
+                    onEvent(clip.item, "fail", clip.watchedMs, null, positionMs, error.errorCodeName)
+                }
+            })
+        }
 
         clip.pollJob = scope.launch {
             while (isActive) {
                 delay(250)
                 val enginePos = engine.positionMs()
+                if (engine is MpvEngine && !clip.hasFirstFrame && enginePos > 0) {
+                    markFirstFrame(clip, impressionAt)
+                }
                 positionMs = enginePos + clip.source.fileOffsetMs
-                // 状态与引擎对账：任何一处漏置都能在这里收敛（不引 isPlaying()——它在缓冲期
-                // 会短暂为假，会让暂停键闪一下；playWhenReady 才是我真正控制的东西）
-                val want = runCatching { clip.engine.player.playWhenReady }.getOrDefault(playing)
+                // 状态与引擎对账：任何一处漏置都能在这里收敛（Exo 读 playWhenReady——它在
+                // 缓冲期会短暂为假，读 isPlaying() 会让暂停键闪一下；mpv 读 isPlaying()，
+                // 它读的就是我们设的 pause 属性，同义）
+                val want = when (engine) {
+                    is ExoEngine -> runCatching { engine.player.playWhenReady }.getOrDefault(playing)
+                    else -> engine.isPlaying()
+                }
                 if (want != playing && !(ended && !want)) playing = want
                 if (clip.hasFirstFrame && clip.startedAtMs > 0) {
                     clip.watchedMs = android.os.SystemClock.elapsedRealtime() - clip.startedAtMs
@@ -389,6 +453,26 @@ class ReelsPlayers(
                 cues = SubtitleCues.parse(bytes)
             }
         }
+    }
+
+    /** 出画：Exo 的首帧回调与 mpv 的位置轮询两条路共用一个落点 */
+    private fun markFirstFrame(clip: Clip, impressionAt: Long) {
+        if (clip.hasFirstFrame) return
+        clip.hasFirstFrame = true
+        clip.startedAtMs = android.os.SystemClock.elapsedRealtime()
+        frameReadyId = clip.item.id
+        onEvent(
+            clip.item, "first_frame", null,
+            clip.startedAtMs - impressionAt, clip.item.segment.startMs, null,
+        )
+        android.util.Log.i(
+            "McReels",
+            "出画 ${clip.item.title.name}：等 ${clip.startedAtMs - impressionAt}ms",
+        )
+        io.movieclaw.android.core.playback.PlaybackStartupTrace.mark("首帧")
+        io.movieclaw.android.core.playback.PlaybackStartupTrace.finish()
+        val index = pendingItems.indexOfFirst { it.id == clip.item.id }
+        if (index >= 0) afterFirstFrame(clip.item, index, pendingItems)
     }
 
     /** 这一条的字幕窗口文件（服务端给的相对路径，含令牌） */
@@ -471,8 +555,8 @@ class ReelsPlayers(
     // 从当前位置「看全片」：给正片播放器的起点（原片时间）
     fun filePositionMs(): Long = current?.let { it.engine.positionMs() + it.source.fileOffsetMs } ?: 0L
 
-    /** 当前条的带宽估计（bits/s）：等待态那行「↓ x.x MB/s」用（iOS 同一个读数） */
-    fun bandwidthBps(): Long? = current?.engine?.bandwidthBps
+    /** 当前条的带宽估计（bits/s）：等待态那行「↓ x.x MB/s」用（iOS 同一个读数）；mpv（光盘）没有这个读数 */
+    fun bandwidthBps(): Long? = (current?.engine as? ExoEngine)?.bandwidthBps
 
     /* ---------------- 收尾 ---------------- */
 
@@ -505,6 +589,9 @@ class ReelsPlayers(
         clip.subtitleJob?.cancel()
         val engine = clip.engine
         android.util.Log.i("McReels", "收引擎：${clip.item.title.name}")
+        // 光盘镜像：IsoBridge 的原生会话是全局的，必须**同步**关——换条是先 leave（关）再
+        // open（开），延迟到 500ms 后拆引擎时再关会把下一条刚开的镜像一起关掉
+        if (clip.source.disc != null) IsoBridge.close()
         if (deferTeardown) {
             engine.setPlaying(false)
             scope.launch {
@@ -598,6 +685,8 @@ class ReelsPlayers(
         standbyJob?.cancel()
         val next = items.getOrNull(index + 1) ?: return
         if (standby?.item?.id == next.id) return
+        // 光盘片源不预起：装载要开卷（IsoBridge 秒级）、解码器也只有 mpv 那份，白占
+        if (next.play.disc != null) return
         if (ReelsQuality.effectiveCap(qualityCap, network) != null) return
         if (network == PlaybackNetwork.AWAY) return
         if (approxBitrateBps(next)?.let { it > 40_000_000L } == true) {

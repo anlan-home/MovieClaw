@@ -42,6 +42,8 @@ fun RemoteImage(
      * 「该库还没有海报资产」时返回 404（服务端原文），不接一下就是一块空黑。
      */
     fallback: (@Composable () -> Unit)? = null,
+    /** 图片颜色滤镜（如类型卡「压暗区提饱和」叠画层的 ×1.2 饱和度）；null = 原样 */
+    colorFilter: androidx.compose.ui.graphics.ColorFilter? = null,
 ) {
     if (url.isNullOrEmpty() || (origin == null && !url.startsWith("http"))) {
         if (fallback != null) fallback() else PosterPlaceholder(seed = url ?: "movieclaw", modifier = modifier)
@@ -74,6 +76,7 @@ fun RemoteImage(
             imageLoader = loader,
             contentDescription = contentDescription,
             contentScale = contentScale,
+            colorFilter = colorFilter,
             onState = { state ->
                 if (state is AsyncImagePainter.State.Error) {
                     failed = true

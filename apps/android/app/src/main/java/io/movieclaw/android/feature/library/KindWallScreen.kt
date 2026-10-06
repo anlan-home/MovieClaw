@@ -33,7 +33,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -52,6 +51,7 @@ import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.TextFaint
 import io.movieclaw.android.core.designsystem.TextMuted
 import io.movieclaw.android.core.designsystem.TextPrimary
+import io.movieclaw.android.core.model.GenreLabels
 import io.movieclaw.android.core.model.LibraryItemView
 import io.movieclaw.android.core.network.ApiFactory
 import io.movieclaw.android.core.network.dataOrThrow
@@ -112,9 +112,13 @@ class KindWallViewModel @Inject constructor(
     private val repository: SessionRepository,
 ) : ViewModel() {
 
-    val kind: String = savedStateHandle.get<String>("kind").orEmpty().ifBlank { "movie" }
-    /** TMDB genre id（首页色块点进来带的）；null = 不过滤 */
+    val kind: String = savedStateHandle.get<String>("kind").orEmpty().ifBlank { "movie" }
+    /**
+     * TMDB genre id（首页类型色块点进来带的）；null = 不过滤。
+     * 与网页同一条校验：只认纯数字 id，别的形状当没带。
+     */
     val genre: String? = savedStateHandle.get<String>("genre")
+        ?.takeIf { it.isNotBlank() && it.all(Char::isDigit) }
 
     data class UiState(
         val loading: Boolean = true,
@@ -140,7 +144,8 @@ class KindWallViewModel @Inject constructor(
             _ui.update { it.copy(loading = true, error = null) }
             try {
                 val api = apiFactory.forOrigin(origin)
-                val summary = api.libraryKindSummary(kind).dataOrThrow()
+                // 概况也要带 g：页头计数是「这面墙」的口径（带类型进来的墙不该报全类型的部数）
+                val summary = api.libraryKindSummary(kind, genres = genre).dataOrThrow()
                 val items = api.libraryKindItems(
                     kind = kind,
                     sort = _ui.value.sort,
@@ -202,7 +207,10 @@ fun KindWallScreen(
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
     val origin = vm.origin
-    val label = "全部${mediaKindLabel(vm.kind)}"
+    // 带类型（首页色块点进来）：标题是类型名——与 Web/iOS 同一张表按 id 反查，查不到用「类型 N」兜底；
+    // 不带类型：「全部电影 / 全部剧集」。标题**只在顶栏写一遍**（与 iOS 同版式；
+    // 此前页头大标题与顶栏各写一遍，看起来就是标题重复）
+    val label = vm.genre?.toIntOrNull()?.let { GenreLabels.nameOf(it) } ?: "全部${mediaKindLabel(vm.kind)}"
     val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
 
     androidx.compose.runtime.LaunchedEffect(gridState, state.items.size) {
@@ -214,15 +222,25 @@ fun KindWallScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Bg)) {
-        Column(Modifier.fillMaxSize().padding(top = McMetrics.topBarHeight)) {
-            // 页头：名字 20/700 + 一行统计（N 部作品 · M 个库）
+    // 顶栏**随流排**（与合集详情等子页同版式）：浮层写法会让页头首行顶进顶栏里
+    // ——此前大标题与顶栏标题叠着显示（看着就是「标题重复」）也有这一半原因
+    Column(Modifier.fillMaxSize().background(Bg)) {
+        McTopBar(
+            variant = McTopBarVariant.Sub,
+            title = label,
+            onBack = onBack,
+        )
+        Column(Modifier.fillMaxSize()) {
+            // 页头只有一行统计（标题在顶栏，与 iOS 同版式）：带类型写「N 部电影 · 来自 M 个库」
+            // （计数走筛后口径），不带类型写「N 部作品」并说明去重口径——文案与 Web/iOS 逐字一致
             Column(Modifier.padding(horizontal = McMetrics.pagePadding, vertical = 14.dp)) {
-                Text(label, style = McType.title3, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (state.total > 0) {
-                    Spacer(Modifier.height(3.dp))
                     Text(
-                        "${state.total} 部作品" + if (state.libraryCount > 0) " · ${state.libraryCount} 个库" else "",
+                        if (vm.genre == null) {
+                            "${state.total} 部作品 · 来自 ${state.libraryCount} 个库，同一部片只算一次"
+                        } else {
+                            "${state.total} 部${mediaKindLabel(vm.kind)} · 来自 ${state.libraryCount} 个库"
+                        },
                         style = McType.body,
                         color = TextMuted,
                     )
@@ -289,11 +307,5 @@ fun KindWallScreen(
             }
         }
 
-        McTopBar(
-            variant = McTopBarVariant.Sub,
-            title = label,
-            onBack = onBack,
-            modifier = Modifier.align(Alignment.TopCenter),
-        )
     }
 }

@@ -30,7 +30,6 @@ import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.PlayCircle
-import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -43,6 +42,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.text.TextStyle
@@ -429,9 +441,15 @@ data class LibraryHome(
 )
 
 /**
- * 全幅剧照分类卡（Shared `GenreCardFace` 的手机规格）：236 × 150、圆角 12；
- * 剧照铺满（0.76 饱和度）+ 底部渐暗垫出「类型名（24/半粗，投影）」与
- * 「N 部电影 / 剧集（11，72%）」；右下箭头、外圈 7% 白描边。点的落点是带 g 的跨库墙。
+ * 全幅剧照分类卡（v0.32 跨端规范 `docs/design/genre-cinematic-cards.md` 的手机规格）：
+ * 卡片 196 × 124.6（保留 236:150），圆角 / 字号 / 边距 = 基准值 × 196/236
+ * （Web 手机 / iPhone / macOS 同档）。
+ *
+ * 「自然通透」——剧照不整体压暗，只在文字所在处压暗：全宽底部一层很轻的底
+ * （0.28、跨度 0.54）+ 文字所在的左下椭圆暗区（0.5、直径 1.56×宽 / 1.44×高、
+ * 中心横向 12% 底部），两层都走 smoothstep 色标（没有可见的渐变分界）；压暗的
+ * 那一截饱和度 ×1.2（读起来是「暗」而不是「灰」）；顶边 0.5dp 内高光往下淡出；
+ * 不再有右下角箭头。点的落点是带 g 的跨库墙。
  */
 @Composable
 private fun GenreTileCard(
@@ -441,13 +459,19 @@ private fun GenreTileCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
+    // 各端共用一条缩放规则：手机端 = 196 / 236
+    val scale = 196f / 236f
+    val corner = 10.dp
+    val density = LocalDensity.current
+    // 标题投影：黑 32%、半径 4、下移 1（Web `0 1px 4px #00000052` / iOS radius 4, y 1）
+    val shadowRadius = with(density) { 4.dp.toPx() }
+    val shadowOffsetY = with(density) { 1.dp.toPx() }
     Box(
         modifier
-            .width(236.dp)
-            .height(150.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF1A1D26))
-            .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(12.dp))
+            .width(196.dp)
+            .height(124.6.dp)
+            .clip(RoundedCornerShape(corner))
+            .background(Color(0xFF202023))
             .clickable(onClick = onClick),
     ) {
         RemoteImage(
@@ -455,46 +479,150 @@ private fun GenreTileCard(
             origin = origin,
             contentDescription = genre.label,
             modifier = Modifier.fillMaxSize(),
+            // 缺图 / 加载失败：中性深灰渐变 + 胶片符号（Web fallback / iOS 缺图同款）
+            fallback = { GenreCoverFallback(scale) },
         )
-        // 底部渐暗：底 0.94 → 44% 处 0.47 → 顶透明（两端共用同一组 stops）
-        Box(
-            Modifier
+        // 「压暗区提饱和」：同一张图 ×1.2 叠画（Coil 内存缓存命中，不重复下载），
+        // 蒙版限定在底部——0→25% 全生效、60% 处淡出（同 Web mask-image / iOS mask）
+        RemoteImage(
+            url = genre.coverUrl,
+            origin = origin,
+            contentDescription = null,
+            colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(1.2f) }),
+            fallback = {},
+            modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color.Transparent,
-                        0.56f to Color(0xFF080A0C).copy(alpha = 0.47f),
-                        1f to Color(0xFF07090D).copy(alpha = 0.94f),
+                .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                .drawWithContent {
+                    drawContent()
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            0f to Color.Transparent,
+                            0.4f to Color.Transparent,
+                            0.75f to Color.Black,
+                            1f to Color.Black,
+                        ),
+                        blendMode = BlendMode.DstIn,
                     )
-                ),
+                },
+        )
+        // 文字保护一：全宽底部一层很轻的底（右上一半保持剧照原本的亮度）
+        Box(
+            Modifier.fillMaxSize().drawBehind {
+                drawRect(Brush.verticalGradient(colorStops = easedBlackStopsFromBottom(0.28f, 0.54f)))
+            },
+        )
+        // 文字保护二：文字所在的左下再叠一团椭圆暗区
+        Box(
+            Modifier.fillMaxSize().drawBehind {
+                val rx = size.width * 1.56f / 2f
+                val ry = size.height * 1.44f / 2f
+                withTransform({
+                    translate(size.width * 0.12f, size.height)
+                    scale(1f, ry / rx, pivot = Offset.Zero)
+                }) {
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colorStops = easedBlackStops(0.5f, 1f),
+                            center = Offset.Zero,
+                            radius = rx,
+                        ),
+                        radius = rx,
+                        center = Offset.Zero,
+                    )
+                }
+            },
         )
         Text(
             genre.label,
-            fontSize = 24.sp, fontWeight = FontWeight.SemiBold, color = Color.White,
-            letterSpacing = 0.6.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            fontSize = (24f * scale).sp, fontWeight = FontWeight.SemiBold, color = Color.White,
+            letterSpacing = 0.2.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
             style = TextStyle(
                 shadow = Shadow(
-                    color = Color.Black.copy(alpha = 0.5f),
-                    offset = androidx.compose.ui.geometry.Offset(0f, 1f),
-                    blurRadius = 8f,
+                    color = Color.Black.copy(alpha = 0.32f),
+                    offset = Offset(0f, shadowOffsetY),
+                    blurRadius = shadowRadius,
                 ),
             ),
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(start = 18.dp, end = 36.dp, bottom = 38.dp),
+                .padding(start = 18.dp * scale, end = 36.dp * scale, bottom = 38.dp * scale),
         )
         Text(
             "${genre.count} 部" + if (kind == "tv") "剧集" else "电影",
             fontSize = 11.sp, color = Color.White.copy(alpha = 0.72f),
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 19.dp, bottom = 17.dp),
-        )
-        Icon(
-            Icons.Rounded.ChevronRight, contentDescription = null,
-            tint = Color.White.copy(alpha = 0.9f),
+            // 等宽数字（Web `tabular-nums` / iOS `monospacedDigit`）
+            style = TextStyle(fontFeatureSettings = "tnum"),
             modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 17.dp, bottom = 19.dp)
-                .size(13.dp),
+                .align(Alignment.BottomStart)
+                .padding(start = 18.dp * scale, bottom = 17.dp * scale),
+        )
+        // 顶边内高光往下淡出：卡片有厚度，不像贴在黑底上的平图（不再描整圈 7% 白边）
+        Box(
+            Modifier
+                .matchParentSize()
+                .drawWithContent {
+                    drawContent()
+                    val stroke = 0.5.dp.toPx()
+                    val half = stroke / 2f
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(
+                            0f to Color.White.copy(alpha = 0.12f),
+                            0.5f to Color.White.copy(alpha = 0.025f),
+                            1f to Color.White.copy(alpha = 0.025f),
+                        ),
+                        topLeft = Offset(half, half),
+                        size = Size(size.width - stroke, size.height - stroke),
+                        cornerRadius = CornerRadius((corner.toPx() - half).coerceAtLeast(0f)),
+                        style = Stroke(width = stroke),
+                    )
+                },
+        )
+    }
+}
+
+/**
+ * smoothstep 缓动的黑色色标（与 Web `genre-tile.tsx` 的 `easedStops` / iOS
+ * `GenreCardFace.easedStops` 同曲线）：位置 t·span、不透明度 max·(1 − t²(3−2t))，
+ * 到 span 处落成全透明。用于径向渐变（0 = 圆心）。
+ */
+private fun easedBlackStops(maxOpacity: Float, span: Float): Array<Pair<Float, Color>> =
+    Array(9) { i ->
+        val t = i / 8f
+        (t * span) to Color.Black.copy(alpha = maxOpacity * (1f - t * t * (3f - 2f * t)))
+    }
+
+/** 同上，但从**底部**算起（转成 Compose 纵向渐变的从顶往下坐标） */
+private fun easedBlackStopsFromBottom(maxOpacity: Float, span: Float): Array<Pair<Float, Color>> =
+    Array(9) { i ->
+        val t = 1f - i / 8f
+        (1f - t * span) to Color.Black.copy(alpha = maxOpacity * (1f - t * t * (3f - 2f * t)))
+    }
+
+/** 类型卡缺图 / 加载失败的兜底：中性深灰径向渐变 + 右上角胶片符号（Web fallback / iOS 缺图同款） */
+@Composable
+private fun GenreCoverFallback(scale: Float) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .drawBehind {
+                // Web：radial-gradient(ellipse at 80% 0%, #45454b, #1d1d20 65%)
+                drawRect(
+                    Brush.radialGradient(
+                        colors = listOf(Color(0xFF45454B), Color(0xFF1D1D20)),
+                        center = Offset(size.width * 0.8f, 0f),
+                        radius = size.width * 1.1f,
+                    )
+                )
+            },
+        contentAlignment = Alignment.TopEnd,
+    ) {
+        Icon(
+            Icons.Rounded.Movie, contentDescription = null,
+            tint = Color.White.copy(alpha = 0.13f),
+            modifier = Modifier
+                .padding(top = 20.dp * scale, end = 20.dp * scale)
+                .size(45.dp * scale),
         )
     }
 }

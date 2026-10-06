@@ -383,11 +383,14 @@ interface McApi {
     /**
      * 按类型的跨库墙概况（首页「全部电影」行与墙页头）：由可见、没被排除出首页的
      * 同类型库聚合，同一部片跨库只算一部。
+     * `g` = 按 TMDB 类型收窄（首页类型色块的落点墙用它，页头计数要跟着筛后口径走，
+     * 与 Web / iOS 同一条参数、同一个接口）。
      */
     @GET("libraries/kinds/{kind}")
     suspend fun libraryKindSummary(
         @Path("kind") kind: String,
         @Query("w") watch: String? = null,
+        @Query("g") genres: String? = null,
     ): McEnvelope<io.movieclaw.android.core.model.LibraryKindSummaryView>
 
     /** 按类型的跨库海报墙（首页类型行 + 点「查看全部」进去的那面墙）；每格自带落点库 */

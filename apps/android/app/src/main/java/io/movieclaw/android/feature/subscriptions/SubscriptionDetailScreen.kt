@@ -286,8 +286,8 @@ private fun statusDot(s: io.movieclaw.android.core.model.SubscriptionView): Colo
 @Composable
 fun SubscriptionDetailScreen(
     onBack: () -> Unit,
-    /** 「手动选种」：带订阅标题进搜索页的手动选种模式（搜索页把结果投给这条订阅） */
-    onOpenSearch: (String) -> Unit = {},
+    /** 「手动选种」：带订阅标题与类型进搜索页的收窄分类手动选种模式（搜索页把结果投给这条订阅） */
+    onOpenSearch: (String, String?) -> Unit = { _, _ -> },
     vm: SubscriptionDetailViewModel = hiltViewModel(),
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
@@ -426,7 +426,7 @@ fun SubscriptionDetailScreen(
                                 }
                                 if (showManual) {
                                     ActionButton("手动选种", modifier = Modifier.weight(1f)) {
-                                        onOpenSearch(sub.media.title)
+                                        onOpenSearch(sub.media.title, sub.media.kind)
                                     }
                                 }
                                 if (showMore) {
