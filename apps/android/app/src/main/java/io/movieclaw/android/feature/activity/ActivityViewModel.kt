@@ -44,6 +44,7 @@ class ActivityViewModel @Inject constructor(
     private val eventStream: EventStream,
     private val sessionRepository: SessionRepository,
     private val json: Json,
+    private val playbackEvents: io.movieclaw.android.core.playback.PlaybackDataEvents,
 ) : ViewModel() {
 
     data class UiState(
@@ -78,11 +79,20 @@ class ActivityViewModel @Inject constructor(
     val origin: String? get() = sessionRepository.ui.value.origin
 
     private var pollJob: Job? = null
+    private var watchJob: Job? = null
+    private var historyJob: Job? = null
+    private var watchGeneration = 0
+    private var historyGeneration = 0
 
     init {
         loadSnapshot()
         observeJobsStream()
         startPolling()
+        viewModelScope.launch {
+            playbackEvents.changes.collect { change ->
+                if (change != null && sessionRepository.isCurrentIdentity(change.identity)) loadWatchAndHistory()
+            }
+        }
     }
 
     fun consumeNotice() = _ui.update { it.copy(notice = null) }
@@ -214,18 +224,23 @@ class ActivityViewModel @Inject constructor(
     }
 
     private fun reloadWatchStats() {
-        viewModelScope.launch {
+        val generation = ++watchGeneration
+        watchJob?.cancel()
+        watchJob = viewModelScope.launch {
             val origin = origin ?: return@launch
+            val identity = sessionRepository.requestIdentity(origin) ?: return@launch
             val state = _ui.value
             runCatching {
-                apiFactory.forOrigin(origin).playbackWatchStats(
+                apiFactory.forIdentity(origin, identity).playbackWatchStats(
                     days = state.watchStatsDays,
                     tzOffsetMinutes = tzOffsetMinutes(),
                     memberId = state.watchStatsMemberId,
                 ).dataOrThrow()
-            }
-                .onSuccess { stats -> _ui.update { it.copy(watchStats = stats) } }
-                .onFailure { android.util.Log.i("McActivity", "观看统计跳过：${it.message}") }
+            }.onSuccess { stats ->
+                if (generation == watchGeneration && sessionRepository.isCurrentIdentity(identity)) {
+                    _ui.update { it.copy(watchStats = stats) }
+                }
+            }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
         }
     }
 
@@ -251,20 +266,22 @@ class ActivityViewModel @Inject constructor(
      * 两个接口都是**管理员专属**：非管理员 403，静默跳过——不报错、不显示空壳。
      */
     fun loadWatchAndHistory() {
-        viewModelScope.launch {
+        reloadWatchStats()
+        val generation = ++historyGeneration
+        historyJob?.cancel()
+        historyJob = viewModelScope.launch {
             val origin = origin ?: return@launch
-            val api = apiFactory.forOrigin(origin)
-            runCatching {
-                api.playbackWatchStats(
-                    days = _ui.value.watchStatsDays,
-                    tzOffsetMinutes = tzOffsetMinutes(),
-                    memberId = _ui.value.watchStatsMemberId,
-                ).dataOrThrow()
-            }.onSuccess { stats -> _ui.update { it.copy(watchStats = stats) } }
-                .onFailure { android.util.Log.i("McActivity", "观看统计跳过：${it.message}") }
-            runCatching { api.playbackHistory(limit = 20).dataOrThrow() }
-                .onSuccess { h -> _ui.update { it.copy(history = h.entries) } }
-                .onFailure { android.util.Log.i("McActivity", "播放历史跳过：${it.message}") }
+            val identity = sessionRepository.requestIdentity(origin) ?: return@launch
+            runCatching { apiFactory.forIdentity(origin, identity).playbackHistory(limit = 20).dataOrThrow() }
+                .onSuccess { history ->
+                    if (generation == historyGeneration && sessionRepository.isCurrentIdentity(identity)) {
+                        _ui.update { it.copy(history = history.entries) }
+                    }
+                }
+                .onFailure {
+                    if (it is kotlinx.coroutines.CancellationException) throw it
+                    android.util.Log.i("McActivity", "播放历史跳过：${it.message}")
+                }
         }
     }
 

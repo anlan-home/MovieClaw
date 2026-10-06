@@ -883,13 +883,17 @@ private fun trackOptions(
             if (s.external) {
                 val name = s.fileName ?: return@mapNotNull null
                 val ref = "external:$name"
-                DetailTrackOption(ref, TrackLabels.subtitle(s.language, kindOfCodec(s.codec), ref, false), s.default)
+                DetailTrackOption(
+                    ref,
+                    TrackLabels.subtitle(s.language, kindOfCodec(s.codec), ref, false, s.title, s.forced),
+                    s.default,
+                )
             } else {
                 embeddedIndex++
                 val ref = "embedded:$embeddedIndex"
                 DetailTrackOption(
                     ref = ref,
-                    label = TrackLabels.subtitle(s.language, kindOfCodec(s.codec), ref, false),
+                    label = TrackLabels.subtitle(s.language, kindOfCodec(s.codec), ref, false, s.title, s.forced),
                     isDefault = s.default,
                     unavailableReason = TrackLabels.subtitleUnsupportedReason(kindOfCodec(s.codec)),
                 )

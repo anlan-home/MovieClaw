@@ -41,11 +41,27 @@ object TrackLabels {
         return (listOf(name) + rest).joinToString(" · ")
     }
 
-    fun subtitle(language: String?, kind: String?, ref: String, isAi: Boolean): String {
-        val name = LanguageLabel.of(language) ?: refLabel(ref, "内封轨", "未知语言")
+    /**
+     * 字幕轨的名字。**优先用文件自带的标题**（服务端把 `title` 贯通到客户端，iOS / 网页同口径）：
+     * 文件里常写「简体中文」「简英双语」「SDH」这类比语言码更准的名字；没有标题才退回
+     * 语言码 → 轨引用。强制轨在末尾打「强制」（iOS `SubtitleOption.detail` 同款）。
+     */
+    fun subtitle(
+        language: String?,
+        kind: String?,
+        ref: String,
+        isAi: Boolean,
+        title: String? = null,
+        isForced: Boolean = false,
+    ): String {
+        val name = title?.trim()?.takeIf { it.isNotEmpty() }
+            ?: LanguageLabel.of(language)
+            ?: refLabel(ref, "内封轨", "未知语言")
         val kindLabel = subtitleKindLabels[kind?.lowercase()]
-        return (listOfNotNull(name, kindLabel) + listOfNotNull(if (isAi) "AI 生成" else null))
-            .joinToString(" · ")
+        return (
+            listOfNotNull(name, kindLabel) +
+                listOfNotNull(if (isAi) "AI 生成" else null, if (isForced) "强制" else null)
+            ).joinToString(" · ")
     }
 
     /** 没有语言标记时的兜底名：外挂轨用文件名，内封轨用序号 */
