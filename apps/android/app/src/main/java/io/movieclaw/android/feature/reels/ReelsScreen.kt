@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package io.movieclaw.android.feature.reels
 
 import android.content.Context
@@ -163,6 +165,9 @@ class ReelsViewModel @Inject constructor(
     private var nextOffset = 0
     private var hasMore = true
     private var loadingMore = false
+    private var feedGeneration = 0
+    private var feedJob: kotlinx.coroutines.Job? = null
+    private var moreJob: kotlinx.coroutines.Job? = null
 
     /** 事件攒批：满 10 条或离开页面时上报（失败即丢，只是统计，不重试） */
     private val pendingEvents = mutableListOf<ReelEventView>()
@@ -193,7 +198,12 @@ class ReelsViewModel @Inject constructor(
     fun qualityLabel(cap: Int): String = ReelsQuality.label(cap, _ui.value.network)
 
     fun loadFirstPage() {
-        viewModelScope.launch {
+        feedGeneration += 1
+        val generation = feedGeneration
+        feedJob?.cancel()
+        moreJob?.cancel()
+        loadingMore = false
+        feedJob = viewModelScope.launch {
             val origin = origin ?: run {
                 _ui.update { it.copy(loading = false, error = "尚未连接服务器") }
                 return@launch
@@ -209,12 +219,15 @@ class ReelsViewModel @Inject constructor(
                     kind = f.kind, genres = f.genres, countries = f.countries,
                     decades = f.decades, ratingGte = f.ratingGte, runtimes = f.runtimes, watch = f.watch,
                 ).dataOrThrow()
+                if (generation != feedGeneration) return@launch
                 seed = page.seed
                 nextOffset = page.nextOffset
                 hasMore = page.hasMore
                 players.setItems(page.items)
                 _ui.update { it.copy(loading = false, items = page.items) }
             } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (generation != feedGeneration) return@launch
                 val message = friendlyMessage(e)
                 val outdated = message.contains("404") || message.contains("Not Found", true) ||
                     message.contains("找不到", false)
@@ -231,7 +244,8 @@ class ReelsViewModel @Inject constructor(
         if (loadingMore || !hasMore || state.loading) return
         if (currentIndex < state.items.size - 3) return
         loadingMore = true
-        viewModelScope.launch {
+        val generation = feedGeneration
+        moreJob = viewModelScope.launch {
             val origin = origin ?: return@launch
             val f = state.filter
             runCatching {
@@ -242,6 +256,7 @@ class ReelsViewModel @Inject constructor(
                 ).dataOrThrow()
             }
                 .onSuccess { page ->
+                    if (generation != feedGeneration) return@onSuccess
                     nextOffset = page.nextOffset
                     hasMore = page.hasMore
                     val known = _ui.value.items.map { it.id }.toSet()
@@ -250,7 +265,7 @@ class ReelsViewModel @Inject constructor(
                     _ui.update { it.copy(items = merged) }
                 }
                 .onFailure { /* 下一页拉不到就停在这儿；用户滑回来会再试 */ }
-            loadingMore = false
+            if (generation == feedGeneration) loadingMore = false
         }
     }
 
@@ -270,7 +285,7 @@ class ReelsViewModel @Inject constructor(
     /** 换筛选：整个信息流重来（新种子、从头抽），同 iOS */
     fun applyFilter(filter: ReelFilter) {
         players.release()
-        _ui.update { it.copy(filter = filter) }
+        _ui.update { it.copy(filter = filter, items = emptyList(), loading = true) }
         loadFirstPage()
         loadFacets()
     }
@@ -452,7 +467,7 @@ fun ReelsScreen(
     androidx.activity.compose.BackHandler(enabled = fullscreen) { fullscreen = false }
 
     // 滑动停稳才换播放器（拖动途中每变一次就起引擎会连开好几个）
-    LaunchedEffect(pagerState.isScrollInProgress, state.items.size) {
+    LaunchedEffect(pagerState.isScrollInProgress, state.items, pagerState.currentPage) {
         if (state.items.isEmpty() || pagerState.isScrollInProgress) return@LaunchedEffect
         val index = pagerState.currentPage
         val item = state.items.getOrNull(index) ?: return@LaunchedEffect

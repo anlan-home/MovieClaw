@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package io.movieclaw.android.core.playback
 
 import android.content.Context
@@ -141,6 +143,7 @@ class ExoEngine(
         pendingInitialAudioRef = source.initialAudioRef
         val mediaItem = MediaItem.Builder()
             .setUri(source.url)
+            .setCustomCacheKey(if (source.hls) null else source.cacheKey)
             .setMediaMetadata(mediaMetadataOf(source))
             .build()
         val factory: MediaSourceFactory = if (source.hls) {
@@ -149,7 +152,7 @@ class ExoEngine(
             // 数据源链：CuesServing（MKV 精简索引，命中就绕过网络）→ 字节缓存 → 网络。
             // 缓存键由调用方给（文件 id + 大小）：正片与刷片放过的字节彼此复用。
             val upstream: DataSource.Factory = if (source.cacheKey != null) {
-                SourceByteCache.playbackFactory(this.context)
+                SourceByteCache.playbackFactory(this.context, httpFactory)
             } else {
                 httpFactory
             }

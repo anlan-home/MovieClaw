@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package io.movieclaw.android.core.playback
 
 import android.util.Base64
@@ -53,15 +55,17 @@ internal class CuesServingDataSource(
 
     override fun open(dataSpec: DataSpec): Long {
         close()
-        val bytes = decoded() ?: return upstream.open(dataSpec)
+        val bytes = decoded() ?: return openUpstream(dataSpec)
         val start = dataSpec.position
         val cuesEnd = cues.offset + bytes.size
         // 起点不在 Cues 区间内：原样透传（多数请求走这里，日志只在 debug 级）
         if (start < cues.offset || start >= cuesEnd) {
             Log.d(TAG, "透传 pos=$start len=${dataSpec.length} (cues ${cues.offset}..$cuesEnd)")
-            return upstream.open(dataSpec)
+            return openUpstream(dataSpec)
         }
-        local = bytes.copyOfRange((start - cues.offset).toInt(), bytes.size)
+        val remaining = bytes.size - (start - cues.offset).toInt()
+        val count = if (dataSpec.length == C.LENGTH_UNSET.toLong()) remaining else minOf(remaining.toLong(), dataSpec.length).toInt()
+        local = bytes.copyOfRange((start - cues.offset).toInt(), (start - cues.offset).toInt() + count)
         localPos = 0
         val localLen = local!!.size.toLong()
         val requested = dataSpec.length
@@ -78,18 +82,20 @@ internal class CuesServingDataSource(
             null
         }
         if (tailSpec == null) return localLen
-        tailOpen = true
-        val tailLen = try {
-            upstream.open(tailSpec)
-        } catch (e: java.io.IOException) {
-            tailOpen = false
-            Log.w(TAG, "Cues 尾段接原文件失败，本次按本地长度交差: ${e.message}")
-            return localLen
-        }
+        val tailLen = openUpstream(tailSpec)
         return if (tailLen == C.LENGTH_UNSET.toLong()) C.LENGTH_UNSET.toLong() else localLen + tailLen
     }
 
+    private fun openUpstream(spec: DataSpec): Long {
+        tailOpen = true
+        return try { upstream.open(spec) } catch (e: Exception) {
+            close()
+            throw e
+        }
+    }
+
     override fun read(target: ByteArray, offset: Int, length: Int): Int {
+        if (length == 0) return 0
         val bytes = local
         if (bytes != null && localPos < bytes.size) {
             val n = minOf(length, bytes.size - localPos)

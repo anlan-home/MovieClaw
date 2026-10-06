@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package io.movieclaw.android.core.playback
 
 import io.movieclaw.android.core.AppScopes
@@ -14,6 +16,12 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import io.movieclaw.android.core.playback.mpv.MpvEngine
 import io.movieclaw.android.core.playback.mpv.MpvNative
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -47,10 +55,14 @@ class PlaybackController(
     private val origin: String = "",
     private val qoe: PlaybackQoe? = null,
     private val trickplay: TrickplayProvider? = null,
+    private val engineFactory: ((EngineKind) -> PlayerEngine)? = null,
 ) {
+    private var disposed = false
+    private var recoveryJob: Job? = null
+    private val negotiationMutex = Mutex()
     private var attempt: PlaybackQoe.Attempt? = null
 
-    private fun positionMs(): Long = runCatching { engine().positionMs() }.getOrDefault(0L)
+    private fun positionMs(): Long = runCatching { engines[_engineKind.value]?.positionMs() ?: 0L }.getOrDefault(0L)
 
     /** 光盘镜像的本机代理地址（协商阶段备好，见 negotiateInternal） */
     private var isoLocalUrl: String? = null
@@ -191,17 +203,23 @@ class PlaybackController(
         EngineKind.MPV -> mpvProxy
     }
 
-    private fun engine(kind: EngineKind = _engineKind.value): PlayerEngine =
-        engines.getOrPut(kind) {
-            when (kind) {
+    private fun engine(kind: EngineKind = _engineKind.value): PlayerEngine {
+        check(!disposed) { "Playback controller released" }
+        return engines.getOrPut(kind) {
+            engineFactory?.invoke(kind) ?: when (kind) {
                 EngineKind.EXO -> ExoEngine(appContext).also { exo ->
                     exo.onDecodeError = { autoSwitchToMpv() }
                 }
                 EngineKind.MPV -> MpvEngine(appContext).also { mpv ->
-                    mpvProxy = MpvPlayerProxy(mpv, mainScope)
+                    mpvProxy = MpvPlayerProxy(mpv, mainScope,
+                        onPlayingChanged = { playCommanded = it },
+                        onSpeedChanged = { currentSpeed = it },
+                    )
                 }
             }
         }
+
+    }
 
     fun exoPlayer(): androidx.media3.exoplayer.ExoPlayer? =
         (engines[EngineKind.EXO] as? ExoEngine)?.player
@@ -234,6 +252,8 @@ class PlaybackController(
     fun preselectEngine(kind: EngineKind) {
         if (kind == _engineKind.value) return
         if (kind == EngineKind.MPV && !MpvNative.available) return
+        onPlayerChanged?.invoke(null)
+        if (_engineKind.value == EngineKind.MPV) { mpvProxy?.release(); mpvProxy = null }
         engines.remove(_engineKind.value)?.release()
         _engineKind.value = kind
     }
@@ -243,7 +263,9 @@ class PlaybackController(
         if (kind == EngineKind.MPV && !MpvNative.available) return
         val previous = engine()
         val position = filePositionMs()
-        val playing = previous.isPlaying()
+        val playing = media3Player()?.playWhenReady ?: playCommanded
+        onPlayerChanged?.invoke(null)
+        if (_engineKind.value == EngineKind.MPV) { mpvProxy?.release(); mpvProxy = null }
         previous.release()
         engines.remove(_engineKind.value)
         _engineKind.value = kind
@@ -252,7 +274,9 @@ class PlaybackController(
         val next = engine(kind)
         next.open(currentSource(url, playerMs))
         next.setPlaying(playing)
+        mpvProxy?.setPlaybackIntent(playing)
         next.setSpeed(currentSpeed)
+        mpvProxy?.syncSpeedIntent(currentSpeed)
         playCommanded = playing
         onPlayerChanged?.invoke(media3Player())
     }
@@ -269,74 +293,83 @@ class PlaybackController(
         initialAudioRef = _selectedAudioRef.value,
         // 片源字节缓存：键 = 文件 id + 大小（iOS PlaybackController.sourceCacheKey 同口径）。
         // 刷片预取 / 播放下过的字节都在同一份缓存里，点「接着看」转过来直接复用。
-        cacheKey = session?.let { SourceByteCache.key(it.decision.fileId ?: 0L, it.source?.sizeBytes) },
+        cacheKey = session?.let { SourceByteCache.key(it.decision.fileId ?: 0L, it.source?.sizeBytes, origin) },
     )
 
-    suspend fun negotiate(): Negotiation = negotiateInternal(startMs = null)
+    suspend fun negotiate(): Negotiation = negotiateInternal(startMs = target.startMs)
 
     /** 从指定位置协商（刷片「全屏观看」：按片段起点起播，不接着续播点） */
     suspend fun negotiateAt(startMs: Long): Negotiation = negotiateInternal(startMs = startMs)
 
     suspend fun fromBeginning(): Negotiation = negotiateInternal(startMs = 0L)
 
-    private suspend fun negotiateInternal(startMs: Long?): Negotiation {
-        lastStartMs = startMs
-        val request = PlaybackSessionRequest(
-            mediaItemId = target.mediaItemId,
-            seasonNumber = target.seasonNumber,
-            episodeNumber = target.episodeNumber,
-            // 限了画质上限就不报 universal：报了服务端会直通原文件，上限形同虚设。
-            //
-            // 但**原盘恰恰必须报 universal**：服务端的 ISO 分支只在 universal 时才把
-            // 原字节推给客户端（decide.py：capability.universal → tier 0 + disc="image"），
-            // 否则直接拒绝——「服务端读不了光盘镜像（ISO）的盘内结构，没法为这个播放器
-            // 换封装或转码」。这里原来把 discSource 也算进"不报"的一侧（那是只有 Exo
-            // 内核、读不了盘内结构时的判断），结果 ISO 一播就被服务端挡下。
-            // 盘内结构本来就是我们在本机读（IsoBridge + UDF over HTTP），所以这条申报
-            // 与真实能力一致；MpvNative 不可用时（没带预编译库的构建）照旧不报，
-            // 让服务端把原因说清楚，而不是发来一份注定放不了的原字节。
-            capability = DeviceCapability.probe(
-                appContext,
-                universal = (target.discSource && MpvNative.available) || qualityCapHeight == null,
-            ),
-            failedTiers = failedTiers.toList(),
-            maxHeight = qualityCapHeight,
-            // 详情页选好的起播轨直接随请求带上：服务端 apply 后返回的 plan 就是那两条轨，
-            // 播放器起播即按它走（PGS 烧录弹窗那条路不变，被丢字幕时仍报 off）
-            audioTrack = target.preferredAudio,
-            subtitleTrack = if (droppedSubtitle) "off" else target.preferredSubtitle,
-            deviceId = deviceId,
-            startMs = startMs,
-            client = "android",
-        )
-        val view = endpoint.startSession(request)
-        session = view
-        // 光盘镜像：**在协商阶段就把盘内结构读出来**（开卷 + 扫目录是几十次远端小读，
-        // 真实耗时几百毫秒到秒级），跑在 IO 线程；start() 直接用结果，不阻塞主线程。
-        isoLocalUrl = if (view.decision.disc == "image") {
-            val raw = view.streamUrl
-            if (raw.isNullOrEmpty()) {
-                null
-            } else {
-                withContext(Dispatchers.IO) { IsoBridge.open(normalizeStreamUrl(raw)) }
-                    .also { if (it == null) android.util.Log.w("McPlayer", "ISO 直连失败：盘内结构读不出来") }
+    private suspend fun negotiateInternal(startMs: Long?): Negotiation = negotiationMutex.withLock {
+        check(!disposed) { "Playback controller released" }
+        currentCoroutineContext().ensureActive()
+        try {
+            lastStartMs = startMs
+            val request = PlaybackSessionRequest(
+                mediaItemId = target.mediaItemId,
+                seasonNumber = target.seasonNumber,
+                episodeNumber = target.episodeNumber,
+                // 只有已装载 MPV 且没有画质限制时才申报通用解码；纯 Exo 构建不能承诺任意片源。
+                capability = DeviceCapability.probe(
+                    appContext,
+                    universal = MpvNative.available && qualityCapHeight == null,
+                ),
+                failedTiers = failedTiers.toList(),
+                maxHeight = qualityCapHeight,
+                // 详情页选好的起播轨直接随请求带上：服务端 apply 后返回的 plan 就是那两条轨，
+                // 播放器起播即按它走（PGS 烧录弹窗那条路不变，被丢字幕时仍报 off）
+                audioTrack = target.preferredAudio,
+                subtitleTrack = if (droppedSubtitle) "off" else target.preferredSubtitle,
+                deviceId = deviceId,
+                startMs = startMs,
+                client = "android",
+            )
+            val view = endpoint.startSession(request)
+            if (disposed || !currentCoroutineContext().isActive) {
+                discardSession(view)
+                currentCoroutineContext().ensureActive()
+                throw CancellationException("Playback controller released")
             }
-        } else {
-            IsoBridge.close()
-            null
-        }
-        // 把服务端的判据打出来：档 1=换壳直通、2=换壳+转音轨 都不是"转码"，
-        // 但用户看到播放页的档位标签只会以为"又在转码"，这一行能直接指认是哪个输入
-        // 顶上去的（视频编码/容器/HDR/音轨/画质上限），排查"为什么全是转码"靠它
-        android.util.Log.i(
-            "McPlayer",
-            "决策 档=${view.decision.tier} 直通=${view.decision.video?.action ?: "-"}" +
-                " 音轨=${view.decision.audio?.action ?: "-"} 原因=${view.decision.reason}",
-        )
-        return when (view.decision.outcome) {
-            "rejected" -> Negotiation.Rejected(view.decision.reason, view.decision.suggestion)
-            "consent" -> Negotiation.Consent(view.decision.reason, view.decision.costHint)
-            else -> Negotiation.Ready(view)
+            session = view
+            // 光盘镜像：**在协商阶段就把盘内结构读出来**（开卷 + 扫目录是几十次远端小读，
+            // 真实耗时几百毫秒到秒级），跑在 IO 线程；start() 直接用结果，不阻塞主线程。
+            isoLocalUrl = if (view.decision.disc == "image") {
+                val raw = view.streamUrl
+                if (raw.isNullOrEmpty()) {
+                    null
+                } else {
+                    withContext(Dispatchers.IO) { IsoBridge.open(normalizeStreamUrl(raw), this@PlaybackController) }
+                        .also { if (it == null) android.util.Log.w("McPlayer", "ISO 直连失败：盘内结构读不出来") }
+                }
+            } else {
+                isoLocalUrl?.let { local -> withContext(Dispatchers.IO) { IsoBridge.closeIfCurrent(local, this@PlaybackController) } }
+                null
+            }
+            // 把服务端的判据打出来：档 1=换壳直通、2=换壳+转音轨 都不是"转码"，
+            // 但用户看到播放页的档位标签只会以为"又在转码"，这一行能直接指认是哪个输入
+            // 顶上去的（视频编码/容器/HDR/音轨/画质上限），排查"为什么全是转码"靠它
+            android.util.Log.i(
+                "McPlayer",
+                "决策 档=${view.decision.tier} 直通=${view.decision.video?.action ?: "-"}" +
+                    " 音轨=${view.decision.audio?.action ?: "-"} 原因=${view.decision.reason}",
+            )
+            currentCoroutineContext().ensureActive()
+            if (view.decision.disc == "image" && isoLocalUrl == null && view.decision.outcome != "rejected") {
+                discardSession(view)
+                return@withLock Negotiation.Rejected("无法打开光盘镜像", "当前镜像代理仅支持 HTTP；请使用兼容片源或检查服务器连接")
+            }
+            when (view.decision.outcome) {
+                "rejected" -> Negotiation.Rejected(view.decision.reason, view.decision.suggestion)
+                "consent" -> Negotiation.Consent(view.decision.reason, view.decision.costHint)
+                else -> Negotiation.Ready(view)
+            }
+        } catch (e: CancellationException) {
+            session?.let { discardSession(it) }
+            withContext(NonCancellable + Dispatchers.IO) { IsoBridge.closeOwner(this@PlaybackController) }
+            throw e
         }
     }
 
@@ -348,6 +381,7 @@ class PlaybackController(
 
     /** 换画质:iOS 语义是「上限」而非目标;从当前位置重开会话让服务端按新档位出流 */
     suspend fun changeQuality(maxHeight: Int?): Negotiation {
+        recoveryJob?.cancel()
         qualityCapHeight = maxHeight
         _qualityCap.value = maxHeight
         val resumeAt = filePositionMs()
@@ -395,6 +429,10 @@ class PlaybackController(
     }.getOrDefault(raw)
 
     fun start(view: PlaybackSessionView) {
+        if (disposed || session !== view) {
+            discardSession(view)
+            return
+        }
         val raw = if (view.timeline == "file") (view.masterUrl ?: view.streamUrl) else view.streamUrl
         if (raw.isNullOrEmpty()) return
         val url = normalizeStreamUrl(raw)
@@ -409,7 +447,7 @@ class PlaybackController(
         // HLS 只认「会话的 HLS 流」与真 .m3u8 地址：**档 0 直出是原文件的字节流
         // （/playback/files/{id}/stream），是渐进式流而不是 HLS** —— 当成 HLS 交给
         // HlsMediaSource 会解析失败（Exo 报的 "Top bit not zero" 就是这个类别的错）
-        val hls = view.timeline == "file" || url.substringBefore('?').endsWith(".m3u8")
+        val hls = isHlsSource(view, url)
         val startPosition = if (fileTimeline) view.startMs else 0L
         // 光盘镜像（ISO）：本机读 UDF 卷、找正片 m2ts、用本地服务暴露成普通流，
         // 再把**本地地址**交给 mpv（Exo 与远端 mpv 都读不了 ISO 原始字节）。
@@ -422,9 +460,9 @@ class PlaybackController(
                 playUrl.substringBefore('?').take(120) + (if (playUrl.contains('?')) "?…" else ""),
         )
         currentUrl = playUrl
-        currentHls = false      // 本地 m2ts 是普通字节流，不是 HLS
+        currentHls = isoLocalUrl == null && hls
         currentOffsetMs = if (fileTimeline) 0L else view.startMs
-        playCommanded = true
+        playCommanded = media3Player()?.playWhenReady ?: playCommanded
         // 起播选中轨：
         //  · 音轨以 **decision.audio.trackRef** 为准——那是这份计划真要放的那条
         //    （详情页选的轨随请求发上去，服务端 apply 后就体现在这里）；
@@ -492,7 +530,10 @@ class PlaybackController(
         // 于是引擎读的还是 ISO 原始字节（本地服务一个请求都收不到），
         // 表现就是 mpv 反复 mpegts 重同步失败 —— 一度以为是字节或 Range 的问题。
         engine().open(currentSource(playUrl, startPosition), sidecars)
+        engine().setPlaying(playCommanded)
         engine().setSpeed(currentSpeed)
+        mpvProxy?.setPlaybackIntent(playCommanded)
+        mpvProxy?.syncSpeedIntent(currentSpeed)
         mpvProxy?.updateMediaItem(
             androidx.media3.common.MediaItem.Builder()
                 .setUri(playUrl)
@@ -593,19 +634,19 @@ class PlaybackController(
      */
     fun filePositionMs(): Long {
         session ?: return 0L
-        val position = runCatching { engine().positionMs() }.getOrDefault(0L).coerceAtLeast(0L)
+        val position = runCatching { engines[_engineKind.value]?.positionMs() ?: 0L }.getOrDefault(0L).coerceAtLeast(0L)
         return position + currentOffsetMs
     }
 
     fun fileDurationMs(): Long {
         val current = session ?: return 0L
-        val duration = runCatching { engine().durationMs() }.getOrDefault(0L)
+        val duration = runCatching { engines[_engineKind.value]?.durationMs() ?: 0L }.getOrDefault(0L)
         if (duration <= 0L) return current.watch?.durationMs ?: 0L
         // 与 filePositionMs 同一口径：会话相对流才加续播点
         return duration + currentOffsetMs
     }
 
-    fun isPlaying(): Boolean = runCatching { engine().isPlaying() }.getOrDefault(false)
+    fun isPlaying(): Boolean = runCatching { engines[_engineKind.value]?.isPlaying() ?: false }.getOrDefault(false)
 
     /** 自然播完判定(Exo 的 STATE_ENDED / MPV 的到达片长) */
     fun isEnded(): Boolean = runCatching {
@@ -634,6 +675,7 @@ class PlaybackController(
     fun setPlaying(playing: Boolean) {
         playCommanded = playing
         engine().setPlaying(playing)
+        mpvProxy?.setPlaybackIntent(playing)
     }
 
     fun seekToFileMs(fileMs: Long) {
@@ -680,6 +722,7 @@ class PlaybackController(
     fun setSpeed(speed: Float) {
         currentSpeed = speed
         engine().setSpeed(speed)
+        mpvProxy?.syncSpeedIntent(speed)
     }
 
     fun currentSpeed(): Float = currentSpeed
@@ -748,7 +791,9 @@ class PlaybackController(
                 delay(15_000)
                 val failure = runCatching { endpoint.ping(sessionId) }.exceptionOrNull()
                 if ((failure as? HttpException)?.code() == 404 && isPlaying()) {
-                    reopenSession()
+                    recoveryJob?.cancel()
+                    recoveryJob = mainScope.launch { reopenSession() }
+                    return@launch
                 }
             }
         }
@@ -758,8 +803,12 @@ class PlaybackController(
     private suspend fun reopenSession() {
         val current = filePositionMs()
         stopLoops()
-        runCatching { negotiateInternal(startMs = current) }
-            .onSuccess { negotiation -> if (negotiation is Negotiation.Ready) start(negotiation.session) }
+        try {
+            val negotiation = negotiateInternal(startMs = current)
+            if (negotiation is Negotiation.Ready) start(negotiation.session)
+        } catch (e: CancellationException) { throw e } catch (e: Exception) {
+            android.util.Log.w("McPlayer", "会话恢复失败", e)
+        }
     }
 
     private fun stopLoops() {
@@ -849,21 +898,39 @@ class PlaybackController(
     }
 
     /** 退出播放:同步取位后异步冲刷 stop + 关会话(scope 不随 ViewModel 死亡,冲刷可完成) */
+    fun discardSession(view: PlaybackSessionView) {
+        view.sessionId?.let { id ->
+            cleanupScope.launch { withTimeoutOrNull(5_000) { runCatching { endpoint.stop(id) } } }
+        }
+    }
+
     fun dispose() {
-        val position = filePositionMs()
+        if (disposed) return
+        val stopRequest = if (currentUrl != null) progressRequest("stop", positionMs = filePositionMs()) else null
         val snapshot = session
+        disposed = true
         stopLoops()
-        mainScope.launch {
-            reportMutex.withLock { runCatching { endpoint.reportProgress(progressRequest("stop", positionMs = position)) } }
-            snapshot?.sessionId?.let { runCatching { endpoint.stop(it) } }
+        recoveryJob?.cancel()
+        onPlayerChanged?.invoke(null)
+        onPlayerChanged = null
+        mainScope.cancel()
+        mpvProxy?.release()
+        mpvProxy = null
+        engines.values.forEach { it.release() }
+        engines.clear()
+        cleanupScope.launch(Dispatchers.IO) { IsoBridge.closeOwner(this@PlaybackController) }
+        cleanupScope.launch {
+            withTimeoutOrNull(5_000) {
+                if (stopRequest != null) reportMutex.withLock { runCatching { endpoint.reportProgress(stopRequest) } }
+            }
+            snapshot?.sessionId?.let { id ->
+                withTimeoutOrNull(5_000) { runCatching { endpoint.stop(id) } }
+            }
         }
         attempt?.let { qoe?.finish(it) }
         attempt = null
-        engines.values.forEach { it.release() }
-        engines.clear()
-        mpvProxy = null
-        onPlayerChanged?.invoke(null)
     }
+
 }
 
 /** 降质建议的档位阶梯(码率取 iOS 提示里的口径) */
@@ -876,3 +943,8 @@ private const val GRACE_MS = 10_000L
 private const val WINDOW_MS = 300_000L
 private const val MIN_STALLS = 3
 private const val MIN_STALL_SECONDS = 45
+
+internal fun isHlsSource(view: PlaybackSessionView, url: String): Boolean =
+    view.masterUrl != null || url.substringBefore('?').substringBefore('#').endsWith(".m3u8", ignoreCase = true)
+
+private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)

@@ -12,6 +12,13 @@ import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import io.movieclaw.android.core.network.BuildInfo
 import java.io.File
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -78,9 +85,11 @@ object SourceByteCache {
     }
 
     /** 缓存键：文件 id + 大小（`fileId` 为 0 或大小未知时不下缓存） */
-    fun key(fileId: Long, sizeBytes: Long?): String? {
+    fun key(fileId: Long, sizeBytes: Long?, origin: String): String? {
         if (fileId <= 0L) return null
-        return "file-$fileId-${sizeBytes ?: 0L}"
+        val scope = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(origin.trimEnd('/').toByteArray()).joinToString("") { "%02x".format(it) }
+        return "$scope-file-$fileId-${sizeBytes ?: 0L}"
     }
 
     private fun httpFactory(): DefaultHttpDataSource.Factory = DefaultHttpDataSource.Factory()
@@ -90,9 +99,9 @@ object SourceByteCache {
         .setUserAgent(BuildInfo.USER_AGENT)
 
     /** 引擎侧要挂的那层：读命中缓存、放过的字节顺手写进去 */
-    fun playbackFactory(context: Context): CacheDataSource.Factory = CacheDataSource.Factory()
+    fun playbackFactory(context: Context, upstream: androidx.media3.datasource.DataSource.Factory): CacheDataSource.Factory = CacheDataSource.Factory()
         .setCache(cache(context))
-        .setUpstreamDataSourceFactory(httpFactory())
+        .setUpstreamDataSourceFactory(upstream)
         .setCacheWriteDataSinkFactory(
             androidx.media3.datasource.cache.CacheDataSink.Factory().setCache(cache(context)),
         )
@@ -119,6 +128,7 @@ object SourceByteCache {
         var written = 0L
         try {
             for ((offset, length) in ranges) {
+                currentCoroutineContext().ensureActive()
                 if (length <= 0L) continue
                 val spec = DataSpec.Builder()
                     .setUri(url)
@@ -126,14 +136,17 @@ object SourceByteCache {
                     .setPosition(offset)
                     .setLength(length)
                     .build()
-                runCatching {
-                    CacheWriter(
-                        dataSource,
-                        spec,
-                        ByteArray(CacheWriter.DEFAULT_BUFFER_SIZE_BYTES),
-                        null,
-                    ).cache()
-                }.onSuccess { written += length }
+                val writer = CacheWriter(dataSource, spec, ByteArray(CacheWriter.DEFAULT_BUFFER_SIZE_BYTES), null)
+                try {
+                    coroutineScope {
+                        // 取消立即告知 CacheWriter；当前有界网络读取完成后停止，不继续下载下一范围。
+                        val cancellation = launch(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                            try { awaitCancellation() } finally { writer.cancel() }
+                        }
+                        try { writer.cache() } finally { cancellation.cancel() }
+                    }
+                    written += length
+                } catch (e: CancellationException) { throw e } catch (_: java.io.IOException) { break }
                 // 失败（断网 / 令牌过期 / 这条被取消）就到此为止：只是预取，播放时还会再取一遍
                 if (!cache(context).isCached(cacheKey, offset, length)) break
             }

@@ -13,8 +13,12 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import io.movieclaw.android.core.model.PlaybackSessionView
 import io.movieclaw.android.core.network.ApiFactory
 import io.movieclaw.android.core.session.SessionRepository
+import io.movieclaw.android.core.session.TokenVault
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import io.movieclaw.android.core.network.friendlyMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -58,10 +62,64 @@ class PlaybackSessionHolder @Inject constructor(
     val sessionPlayer: StateFlow<Player?> = _sessionPlayer.asStateFlow()
 
     private var controller: PlaybackController? = null
+    private var memberIdentity: TokenVault.Identity? = null
+    private var operation: Job? = null
+    private var generation = 0L
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
     private var rememberedQualityNotice: String? = null
 
+    init {
+        // 成员播放归属启动它的账号；退出/切账号立即终止，访客播放不绑定成员身份。
+        scope.launch {
+            sessionRepository.ui.collect {
+                val owner = memberIdentity
+                if (owner != null && !sessionRepository.isCurrentIdentity(owner)) exit()
+            }
+        }
+    }
+
+    /** 用户的新操作作废旧协商；UI/服务只接受当前实例的播放器回调。 */
+    private fun beginOperation(replaceController: Boolean): Long {
+        generation += 1
+        operation?.cancel()
+        operation = null
+        if (replaceController) {
+            memberIdentity = null
+            val previous = controller
+            controller = null
+            previous?.dispose()
+            _sessionPlayer.value = null
+            rememberedQualityNotice = null
+        }
+        return generation
+    }
+
+    private fun bind(created: PlaybackController) {
+        controller = created
+        created.onPlayerChanged = { player ->
+            if (controller === created) _sessionPlayer.value = player
+        }
+    }
+
+    private fun launchOperation(mine: Long, block: suspend () -> Unit) {
+        operation = scope.launch {
+            try {
+                val owner = memberIdentity
+                if (owner != null && !sessionRepository.isCurrentIdentity(owner)) {
+                    exit()
+                    return@launch
+                }
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (mine == generation) _state.value = State.Failed(friendlyMessage(e))
+            }
+        }
+    }
+
     fun open(target: PlayTarget) {
+        val mine = beginOperation(replaceController = true)
         // 起播分段计时从这里起算（iOS `PlaybackStartupTrace`：用户说起播慢时先看这一行）
         PlaybackStartupTrace.start()
         PlaybackStartupTrace.mark("点击")
@@ -70,11 +128,9 @@ class PlaybackSessionHolder @Inject constructor(
             _state.value = State.Failed("尚未连接服务器")
             return
         }
-        // 新点播先收掉旧会话(与网页端「同文件重开有 stop 兜底」同语义)
-        controller?.dispose()
-        controller = null
+        memberIdentity = sessionRepository.requestIdentity(origin)
         _state.value = State.Preparing
-        scope.launch {
+        launchOperation(mine) {
             // 播放链路走专用连接池（协商/进度/心跳/停止都在它上面，不排在页面请求后面）
             val api = apiFactory.playbackForOrigin(origin)
             val created = PlaybackController(
@@ -87,8 +143,11 @@ class PlaybackSessionHolder @Inject constructor(
                 trickplay = trickplay,
             )
             created.attachApi(api)
-            created.onPlayerChanged = { _sessionPlayer.value = it }
-            controller = created
+            if (mine != generation) {
+                created.dispose()
+                return@launchOperation
+            }
+            bind(created)
             // 画质记忆:同一片名 + 同一网络环境沿上次的选择(iOS QualityMemory)
             val remembered = qualityMemory.remembered(target.mediaItemId, networkOf())
             if (remembered != null) {
@@ -100,12 +159,19 @@ class PlaybackSessionHolder @Inject constructor(
             }
             val negotiation = created.negotiate()
             PlaybackStartupTrace.mark("决策+会话")
-            handle(negotiation)
+            handle(created, mine, negotiation)
         }
     }
 
-    private suspend fun handle(negotiation: PlaybackController.Negotiation) {
-        val active = controller ?: return
+    private suspend fun handle(
+        active: PlaybackController, mine: Long, negotiation: PlaybackController.Negotiation,
+    ) {
+        val owner = memberIdentity
+        if (owner != null && !sessionRepository.isCurrentIdentity(owner)) exit()
+        if (mine != generation || controller !== active) {
+            if (negotiation is PlaybackController.Negotiation.Ready) active.discardSession(negotiation.session)
+            return
+        }
         when (negotiation) {
             is PlaybackController.Negotiation.Rejected ->
                 _state.value = State.Failed(negotiation.reason.ifEmpty { "无法播放" }, negotiation.suggestion)
@@ -124,17 +190,18 @@ class PlaybackSessionHolder @Inject constructor(
         }
     }
 
-    /** 换画质走的是「重开会话」,结果由调用方回填(与内部 handle 同构) */
-    fun publishPlaying(controller: PlaybackController, session: PlaybackSessionView) {
-        _state.value = State.Playing(controller, session)
-    }
-
-    fun publishConsent(reason: String, costHint: String?) {
-        _state.value = State.Consent(reason, costHint)
-    }
-
-    fun publishFailed(message: String, suggestion: String?) {
-        _state.value = State.Failed(message, suggestion)
+    /** 画质重开与点播共用操作闸，退出/再次选择会取消旧协商。 */
+    fun changeQuality(height: Int?) {
+        val active = controller ?: return
+        val mine = beginOperation(replaceController = false)
+        val network = networkOf()
+        launchOperation(mine) {
+            val result = active.changeQuality(height)
+            handle(active, mine, result)
+            if (result is PlaybackController.Negotiation.Ready && mine == generation && controller === active) {
+                qualityMemory.remember(active.target.mediaItemId, network, height)
+            }
+        }
     }
 
     /**
@@ -142,11 +209,10 @@ class PlaybackSessionHolder @Inject constructor(
      * 不读写任何成员态(进度由服务端访客通道保存)。
      */
     fun openGuest(origin: String, slug: String, target: PlayTarget) {
-        controller?.dispose()
-        controller = null
+        val mine = beginOperation(replaceController = true)
         _state.value = State.Preparing
-        scope.launch {
-            val api = apiFactory.playbackForOrigin(origin)
+        launchOperation(mine) {
+            val api = apiFactory.guestPlaybackForOrigin(origin)
             val created = PlaybackController(
                 context = context.applicationContext,
                 endpoint = GuestPlaybackEndpoint(api, slug),
@@ -157,33 +223,34 @@ class PlaybackSessionHolder @Inject constructor(
                 trickplay = trickplay,
             )
             created.attachApi(api)
-            created.onPlayerChanged = { _sessionPlayer.value = it }
-            controller = created
-            handle(created.negotiate())
+            if (mine != generation) {
+                created.dispose()
+                return@launchOperation
+            }
+            bind(created)
+            handle(created, mine, created.negotiate())
         }
     }
 
     fun grantConsent() {
-        scope.launch { controller?.let { handle(it.grantConsent()) } }
+        val active = controller ?: return
+        val mine = beginOperation(replaceController = false)
+        launchOperation(mine) { handle(active, mine, active.grantConsent()) }
     }
 
     fun retryWithoutSubtitle() {
-        scope.launch { controller?.let { handle(it.retryWithoutSubtitle()) } }
+        val active = controller ?: return
+        val mine = beginOperation(replaceController = false)
+        launchOperation(mine) { handle(active, mine, active.retryWithoutSubtitle()) }
     }
 
     /** 关闭播放:先冲刷进度,再断开控制器(服务随之后台停用) */
     fun exit() {
-        controller?.dispose()
-        controller = null
+        beginOperation(replaceController = true)
         _sessionPlayer.value = null
         _state.value = State.Idle
         mediaControllerFuture?.let { MediaController.releaseFuture(it) }
         mediaControllerFuture = null
-    }
-
-    /** 记录用户主动选择的画质(只记限制性选择;等于自动时记 0) */
-    fun rememberQuality(mediaItemId: Long, capHeight: Int?) {
-        scope.launch { qualityMemory.remember(mediaItemId, networkOf(), capHeight) }
     }
 
     fun networkOf(): PlaybackNetwork {

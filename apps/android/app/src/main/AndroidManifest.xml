@@ -38,13 +38,13 @@
                 <data android:scheme="movieclaw" android:host="share" />
             </intent-filter>
 
-            <!-- 站点分享链接 https://<任意服务器>/s/<slug>(host 省略即匹配任意域名) -->
+            <!-- 站点分享链接 https://<任意服务器>/s/<slug>(显式通配 host，路径仅限分享) -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:pathPrefix="/s/" />
-                <data android:scheme="http" android:pathPrefix="/s/" />
+                <data android:scheme="https" android:host="*" android:pathPrefix="/s/" />
+                <data android:scheme="http" android:host="*" android:pathPrefix="/s/" />
             </intent-filter>
         </activity>
 

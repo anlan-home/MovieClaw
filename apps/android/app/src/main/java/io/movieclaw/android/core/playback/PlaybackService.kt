@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package io.movieclaw.android.core.playback
 
 import io.movieclaw.android.core.AppScopes
@@ -16,6 +18,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import io.movieclaw.android.MainActivity
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -39,12 +42,13 @@ class PlaybackService : MediaSessionService() {
     lateinit var holder: PlaybackSessionHolder
 
     private var mediaSession: MediaSession? = null
+    private val idlePlayer by lazy { IdlePlayer() }
     private val scope = AppScopes.main("PlaybackService")
     private var observeJob: Job? = null
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession {
         mediaSession?.let { return it }
-        val session = MediaSession.Builder(this, holder.sessionPlayer.value ?: IdlePlayer())
+        val session = MediaSession.Builder(this, holder.sessionPlayer.value ?: idlePlayer)
             .setSessionActivity(openAppIntent())
             .build()
         mediaSession = session
@@ -57,8 +61,9 @@ class PlaybackService : MediaSessionService() {
         observeJob?.cancel()
         observeJob = scope.launch {
             holder.sessionPlayer.collectLatest { player ->
-                if (player != null && session.player !== player) {
-                    session.player = player
+                val next = player ?: idlePlayer
+                if (session.player !== next) {
+                    session.player = next
                 }
             }
         }
@@ -75,11 +80,14 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         observeJob?.cancel()
+        holder.exit()
+        scope.cancel()
         mediaSession?.run {
-            player = IdlePlayer()
+            player = idlePlayer
             release()
         }
         mediaSession = null
+        idlePlayer.release()
         super.onDestroy()
     }
 }

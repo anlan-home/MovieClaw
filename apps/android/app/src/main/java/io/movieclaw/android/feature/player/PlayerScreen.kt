@@ -1,6 +1,5 @@
 package io.movieclaw.android.feature.player
 
-import android.app.Activity
 import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.pm.ActivityInfo
@@ -249,20 +248,7 @@ class PlayerViewModel @Inject constructor(
 
     /** 换画质:从当前位置重开会话;并写入画质记忆 */
     fun selectQuality(option: QualityOption) {
-        val playing = holder.state.value as? PlaybackSessionHolder.State.Playing ?: return
-        val target = playing.controller.target
-        viewModelScope.launch {
-            when (val result = playing.controller.changeQuality(option.height)) {
-                is PlaybackController.Negotiation.Ready -> {
-                    playing.controller.start(result.session)
-                    holder.publishPlaying(playing.controller, result.session)
-                }
-                is PlaybackController.Negotiation.Consent -> holder.publishConsent(result.reason, result.costHint)
-                is PlaybackController.Negotiation.Rejected ->
-                    holder.publishFailed(result.reason.ifEmpty { "该画质不可用" }, result.suggestion)
-            }
-            holder.rememberQuality(target.mediaItemId, option.height)
-        }
+        holder.changeQuality(option.height)
     }
 }
 
@@ -274,7 +260,7 @@ fun PlayerScreen(onExit: () -> Unit, vm: PlayerViewModel = hiltViewModel()) {
     // 上次手势记下的播放页亮度（本机）：进页套上，退出仍把系统亮度还回去
     val brightnessMemory by vm.playerBrightness.collectAsStateWithLifecycle()
 
-    val activity = LocalContext.current as? Activity
+    val activity = androidx.activity.compose.LocalActivity.current
     DisposableEffect(Unit) {
         val previous = activity?.requestedOrientation
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -357,7 +343,7 @@ private fun PlayingSurface(
     onRememberBrightness: (Float) -> Unit,
 ) {
     val context = LocalContext.current
-    val activity = context as? Activity
+    val activity = androidx.activity.compose.LocalActivity.current
     val controller = state.controller
     val decision = state.session.decision
     val engineKind by controller.engineKind.collectAsStateWithLifecycle()

@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package io.movieclaw.android.core.playback
 
 import android.os.Looper
@@ -9,6 +11,7 @@ import androidx.media3.common.SimpleBasePlayer
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -23,19 +26,31 @@ import kotlinx.coroutines.launch
 class MpvPlayerProxy(
     private val engine: PlayerEngine,
     scope: CoroutineScope,
+    private val onPlayingChanged: (Boolean) -> Unit = {},
+    private val onSpeedChanged: (Float) -> Unit = {},
 ) : SimpleBasePlayer(Looper.getMainLooper()) {
 
     private var playWhenReady = true
     private var speed = 1.0f
     private var mediaItem: MediaItem = MediaItem.Builder().build()
 
-    init {
-        scope.launch {
-            while (isActive) {
-                invalidateState()
-                delay(500)
-            }
+    private val pollJob: Job = scope.launch {
+        while (isActive) {
+            invalidateState()
+            delay(500)
         }
+    }
+
+    /** UI/Controller 直接控制内核时同步播放意图，缓冲期间也不会被误认为用户暂停。 */
+    fun setPlaybackIntent(playing: Boolean) {
+        playWhenReady = playing
+        invalidateState()
+    }
+
+    /** Controller 改速时只同步通知状态，不再次调用内核。 */
+    fun syncSpeedIntent(speed: Float) {
+        this.speed = speed
+        invalidateState()
     }
 
     fun updateMediaItem(item: MediaItem) {
@@ -56,22 +71,23 @@ class MpvPlayerProxy(
             .setPlaylist(listOf(itemData))
             .setCurrentMediaItemIndex(0)
             .setContentPositionMs(engine.positionMs())
-            .setPlayWhenReady(playing, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+            .setPlayWhenReady(playWhenReady, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
             .setPlaybackState(
                 when {
-                    durationMs > 0 -> Player.STATE_READY
-                    playing -> Player.STATE_BUFFERING
+                    engine.isBuffering() -> Player.STATE_BUFFERING
+                    durationMs > 0 || playing -> Player.STATE_READY
                     else -> Player.STATE_IDLE
                 }
             )
             .setPlaybackParameters(PlaybackParameters(speed))
-            .setIsLoading(false)
+            .setIsLoading(engine.isBuffering())
             .build()
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
         this.playWhenReady = playWhenReady
         engine.setPlaying(playWhenReady)
+        onPlayingChanged(playWhenReady)
         invalidateState()
         return Futures.immediateVoidFuture()
     }
@@ -85,6 +101,7 @@ class MpvPlayerProxy(
     override fun handleSetPlaybackParameters(playbackParameters: PlaybackParameters): ListenableFuture<*> {
         speed = playbackParameters.speed
         engine.setSpeed(speed)
+        onSpeedChanged(speed)
         invalidateState()
         return Futures.immediateVoidFuture()
     }
@@ -92,11 +109,14 @@ class MpvPlayerProxy(
     override fun handleStop(): ListenableFuture<*> {
         playWhenReady = false
         engine.setPlaying(false)
+        onPlayingChanged(false)
         invalidateState()
         return Futures.immediateVoidFuture()
     }
 
     override fun handleRelease(): ListenableFuture<*> {
+        // 本代理只拥有轮询；真实内核由 PlaybackController 释放，避免双重 native destroy。
+        pollJob.cancel()
         return Futures.immediateVoidFuture()
     }
 
@@ -115,8 +135,6 @@ class MpvPlayerProxy(
                 Player.COMMAND_GET_TIMELINE,
                 Player.COMMAND_GET_METADATA,
                 Player.COMMAND_SET_SPEED_AND_PITCH,
-                Player.COMMAND_SET_MEDIA_ITEM,
-                Player.COMMAND_CHANGE_MEDIA_ITEMS,
                 Player.COMMAND_RELEASE,
             )
             .build()

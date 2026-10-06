@@ -1,0 +1,42 @@
+name: Android stability
+
+on:
+  pull_request:
+    branches: [android]
+    paths:
+      - 'apps/android/**'
+      - '.github/workflows/android-stability.yml'
+  push:
+    branches: [android]
+    paths:
+      - 'apps/android/**'
+      - '.github/workflows/android-stability.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Native shutdown regression with sanitizers
+        run: bash apps/android/tests/native/run.sh
+      - name: Android scenario tests, lint and Exo-only APK
+        working-directory: apps/android
+        run: bash gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug -PskipNativeLibsDownload=true --stacktrace
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-regression-results
+          path: |
+            apps/android/app/build/reports/tests/
+            apps/android/app/build/reports/lint-results-debug.*
+            apps/android/app/build/outputs/apk/debug/
