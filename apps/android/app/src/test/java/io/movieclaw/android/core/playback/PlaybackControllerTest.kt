@@ -35,13 +35,17 @@ class PlaybackControllerTest {
         val starts = mutableListOf<PlaybackSessionRequest>()
         val stops = mutableListOf<String>()
         val reports = mutableListOf<PlaybackProgressRequest>()
+        var stopGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        var committed: PlaybackStateView? = null
         override suspend fun startSession(request: PlaybackSessionRequest): PlaybackSessionView {
             starts += request
             return PlaybackSessionView(PlaybackDecisionView("ready", fileId = 5),
                 sessionId = "s${starts.size}", streamUrl = "/index.m3u8", startMs = request.startMs ?: 0)
         }
         override suspend fun reportProgress(request: PlaybackProgressRequest): PlaybackStateView? {
-            reports += request; return null
+            reports += request
+            if (request.event == "stop") stopGate?.await()
+            return committed
         }
         override suspend fun ping(sessionId: String) { if (sessionId == "s1") throw HttpException(Response.error<Any>(404, "expired".toResponseBody())) }
         override suspend fun stop(sessionId: String) { stops += sessionId }
@@ -73,4 +77,48 @@ class PlaybackControllerTest {
             assertFalse(controller.isPlaying())
         } finally { controller.dispose(); runCurrent(); Dispatchers.resetMain() }
     }
+    @Test fun returningFromPlayerPublishesOnlyAfterFinalProgressIsCommitted() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val endpoint = Endpoint().apply {
+            stopGate = kotlinx.coroutines.CompletableDeferred()
+            committed = PlaybackStateView(positionMs = 42_000)
+        }
+        val events = PlaybackDataEvents()
+        val identity = io.movieclaw.android.core.session.TokenVault.Identity("https://example.com", "alice", "token", 1)
+        val engine = Engine()
+        val controller = PlaybackController(RuntimeEnvironment.getApplication(), endpoint, "device",
+            PlayTarget(1, 1, "movie", "Movie"), identity.origin, engineFactory = { engine },
+            onStopCommitted = { events.committed(identity) })
+        try {
+            controller.start((controller.negotiate() as PlaybackController.Negotiation.Ready).session)
+            runCurrent()
+            controller.dispose(); runCurrent()
+            assertTrue(engine.released)
+            assertNull(events.changes.value)
+            assertEquals(42_000L, endpoint.reports.last().positionMs)
+            endpoint.stopGate!!.complete(Unit); runCurrent()
+            assertEquals(identity, events.changes.value!!.identity)
+            // Subscriber is created only after returning; the completed change is still available.
+            assertEquals(1L, events.changes.value!!.revision)
+            assertEquals(listOf("s1"), endpoint.stops)
+            controller.dispose(); runCurrent()
+            assertEquals(1L, events.changes.value!!.revision)
+        } finally { controller.dispose(); runCurrent(); Dispatchers.resetMain() }
+    }
+
+    @Test fun unsuccessfulFinalProgressDoesNotClaimHistoryChanged() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        var notifications = 0
+        val endpoint = Endpoint()
+        val controller = PlaybackController(RuntimeEnvironment.getApplication(), endpoint, "device",
+            PlayTarget(1, 1, "movie", "Movie"), engineFactory = { Engine() },
+            onStopCommitted = { notifications++ })
+        try {
+            controller.start((controller.negotiate() as PlaybackController.Negotiation.Ready).session)
+            controller.dispose(); runCurrent()
+            assertEquals(0, notifications)
+            assertEquals(listOf("s1"), endpoint.stops)
+        } finally { controller.dispose(); runCurrent(); Dispatchers.resetMain() }
+    }
+
 }

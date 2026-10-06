@@ -113,6 +113,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -261,6 +262,7 @@ data class SubsHomeState(
 class SubsHomeViewModel @Inject constructor(
     private val apiFactory: ApiFactory,
     private val repository: SessionRepository,
+    private val playbackEvents: io.movieclaw.android.core.playback.PlaybackDataEvents,
 ) : ViewModel() {
 
     private val _ui = MutableStateFlow(SubsHomeState())
@@ -268,7 +270,26 @@ class SubsHomeViewModel @Inject constructor(
 
     val origin: String? get() = repository.ui.value.origin
 
-    init { load() }
+    private val loadMutex = kotlinx.coroutines.sync.Mutex()
+    private var arrivalSnapshot: List<ArrivalGroup> = emptyList()
+
+    init {
+        load()
+        viewModelScope.launch {
+            playbackEvents.changes.collect { change ->
+                if (change != null && repository.isCurrentIdentity(change.identity)) {
+                    loadMutex.withLock {
+                        val recent = runCatching {
+                            apiFactory.forIdentity(change.identity.origin, change.identity).recentArrivals().dataOrThrow()
+                        }.getOrNull() ?: return@withLock
+                        if (repository.isCurrentIdentity(change.identity)) _ui.update {
+                            it.copy(recent = recent, slides = buildSlides(it.all, arrivalSnapshot, recent))
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /** 取消/新增订阅后从别处回来时重新拉（详情页是独立导航目标，列表不会自己重建） */
     fun reloadIfChanged(revision: Int) {
@@ -302,41 +323,44 @@ class SubsHomeViewModel @Inject constructor(
 
     fun load() {
         viewModelScope.launch {
-            val origin = origin
-            if (origin == null) { _ui.update { it.copy(loading = false, error = "尚未连接服务器") }; return@launch }
-            _ui.update { it.copy(loading = true, error = null) }
-            try {
-                val api = apiFactory.forOrigin(origin)
-                val subs: List<SubscriptionView>
-                val arrivals: List<TodayArrivalFull>
-                val recent: List<RecentArrivalView>
-                val tasks: List<DownloadTask>
-                coroutineScope {
-                    val a = async { runCatching { api.subscriptions().dataOrThrow() }.getOrDefault(emptyList()) }
-                    val b = async { runCatching { api.todayArrivalsFull().dataOrThrow() }.getOrDefault(emptyList()) }
-                    val c = async { runCatching { api.recentArrivals().dataOrThrow() }.getOrDefault(emptyList()) }
-                    // 下载器的实时进度 / ETA（iOS 订阅首页同一份任务快照）：按 info_hash 对到预告行上；
-                    // 拉不到就当作没有，不挡页面
-                    val d = async {
-                        runCatching { api.downloadTasks().dataOrThrow().items }.getOrDefault(emptyList())
+            loadMutex.withLock {
+                val origin = origin
+                if (origin == null) { _ui.update { it.copy(loading = false, error = "尚未连接服务器") }; return@withLock }
+                _ui.update { it.copy(loading = true, error = null) }
+                try {
+                    val api = apiFactory.forOrigin(origin)
+                    val subs: List<SubscriptionView>
+                    val arrivals: List<TodayArrivalFull>
+                    val recent: List<RecentArrivalView>
+                    val tasks: List<DownloadTask>
+                    coroutineScope {
+                        val a = async { runCatching { api.subscriptions().dataOrThrow() }.getOrDefault(emptyList()) }
+                        val b = async { runCatching { api.todayArrivalsFull().dataOrThrow() }.getOrDefault(emptyList()) }
+                        val c = async { runCatching { api.recentArrivals().dataOrThrow() }.getOrDefault(emptyList()) }
+                        // 下载器的实时进度 / ETA（iOS 订阅首页同一份任务快照）：按 info_hash 对到预告行上；
+                        // 拉不到就当作没有，不挡页面
+                        val d = async {
+                            runCatching { api.downloadTasks().dataOrThrow().items }.getOrDefault(emptyList())
+                        }
+                        subs = a.await(); arrivals = b.await(); recent = c.await(); tasks = d.await()
                     }
-                    subs = a.await(); arrivals = b.await(); recent = c.await(); tasks = d.await()
+                    val now = LocalDate.now()
+                    val groups = arrivalGroups(arrivals, tasks)
+                    arrivalSnapshot = groups
+                    _ui.update {
+                        it.copy(
+                            loading = false,
+                            slides = buildSlides(subs, groups, recent),
+                            recent = recent,
+                            days = buildDays(groups, now),
+                            tv = subs.filter { s -> s.media.kind == "tv" },
+                            movie = subs.filter { s -> s.media.kind == "movie" },
+                            all = subs,
+                        )
+                    }
+                } catch (e: Exception) {
+                    _ui.update { it.copy(loading = false, error = friendlyMessage(e)) }
                 }
-                val now = LocalDate.now()
-                val groups = arrivalGroups(arrivals, tasks)
-                _ui.update {
-                    it.copy(
-                        loading = false,
-                        slides = buildSlides(subs, groups, recent),
-                        recent = recent,
-                        days = buildDays(groups, now),
-                        tv = subs.filter { s -> s.media.kind == "tv" },
-                        movie = subs.filter { s -> s.media.kind == "movie" },
-                        all = subs,
-                    )
-                }
-            } catch (e: Exception) {
-                _ui.update { it.copy(loading = false, error = friendlyMessage(e)) }
             }
         }
     }

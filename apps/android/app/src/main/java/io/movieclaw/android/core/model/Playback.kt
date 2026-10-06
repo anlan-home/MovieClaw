@@ -110,6 +110,10 @@ data class SubtitlePlanView(
     val language: String? = null,
     val isDefault: Boolean = false,
     val isAi: Boolean = false,
+    /** 文件自带的轨标题（「简体中文」「简英双语」这类，比语言码更准）；旧服务端没有这个字段 */
+    val title: String? = null,
+    /** 强制轨（forced）。可选字段：旧服务端缺字段时按非强制展示（同 iOS 口径） */
+    val isForced: Boolean? = null,
 )
 
 @Serializable

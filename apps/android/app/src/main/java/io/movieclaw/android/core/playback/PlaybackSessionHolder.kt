@@ -42,6 +42,7 @@ class PlaybackSessionHolder @Inject constructor(
     private val feedback: FeedbackBus,
     private val qoe: PlaybackQoe,
     private val trickplay: TrickplayProvider,
+    private val playbackEvents: PlaybackDataEvents = PlaybackDataEvents(),
 ) {
     sealed interface State {
         data object Idle : State
@@ -129,6 +130,7 @@ class PlaybackSessionHolder @Inject constructor(
             return
         }
         memberIdentity = sessionRepository.requestIdentity(origin)
+        val owner = memberIdentity
         _state.value = State.Preparing
         launchOperation(mine) {
             // 播放链路走专用连接池（协商/进度/心跳/停止都在它上面，不排在页面请求后面）
@@ -141,6 +143,9 @@ class PlaybackSessionHolder @Inject constructor(
                 origin = origin,
                 qoe = qoe,
                 trickplay = trickplay,
+                onStopCommitted = {
+                    if (owner != null && sessionRepository.isCurrentIdentity(owner)) playbackEvents.committed(owner)
+                },
             )
             created.attachApi(api)
             if (mine != generation) {

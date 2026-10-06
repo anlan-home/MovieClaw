@@ -108,6 +108,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 
 /** 媒体库首屏的数据（统计行 / 接下来继续 / 我的收藏 / 每库一行 / 按类型的跨库行） */
@@ -119,6 +120,7 @@ class LibraryViewModel @Inject constructor(
     private val preconnect: io.movieclaw.android.core.playback.PlaybackPreconnect,
     private val snapshotStore: io.movieclaw.android.core.session.LibraryHomeSnapshotStore,
     private val feedback: io.movieclaw.android.core.designsystem.FeedbackBus,
+    private val playbackEvents: io.movieclaw.android.core.playback.PlaybackDataEvents,
 ) : ViewModel() {
     private val _state = MutableStateFlow<Loadable<LibraryHome>>(Loadable.Loading)
     val state = _state.asStateFlow()
@@ -130,8 +132,30 @@ class LibraryViewModel @Inject constructor(
     /** 图片基址（RemoteImage 用） */
     val origin: String? get() = repository.ui.value.origin
 
+    private val loadMutex = kotlinx.coroutines.sync.Mutex()
+    private var visibleRows: List<HomeRows.Row> = emptyList()
+
     init {
         // 「接下来继续」多半从这里点：进页就把起播要用的两条连接连好（iOS `LibraryHomeView.onAppear` 同款）
+        viewModelScope.launch {
+            playbackEvents.changes.collect { change ->
+                if (change != null && repository.isCurrentIdentity(change.identity)) {
+                    loadMutex.withLock {
+                        val upNext = runCatching {
+                            apiFactory.forIdentity(change.identity.origin, change.identity).upNext(limit = 24).dataOrThrow().items
+                        }.getOrNull() ?: return@withLock
+                        if (!repository.isCurrentIdentity(change.identity)) return@withLock
+                        val home = (_state.value as? Loadable.Ready)?.value ?: return@withLock
+                        val rows = visibleRows.mapNotNull { row ->
+                            if (row.kind is HomeRows.Kind.UpNext) {
+                                if (upNext.isEmpty()) null else HomeRowData(row)
+                            } else home.rows.firstOrNull { it.row.id == row.id }
+                        }
+                        _state.value = Loadable.Ready(home.copy(upNext = upNext, rows = rows))
+                    }
+                }
+            }
+        }
         preconnect.warm()
         load()
         // 自定义首页保存后就地重排（iOS 写 LibraryHomePrefs.shared 同效）
@@ -159,7 +183,9 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    private suspend fun loadOnce() {
+    private suspend fun loadOnce() = loadMutex.withLock { loadOnceUnlocked() }
+
+    private suspend fun loadOnceUnlocked() {
         // coroutineScope（不是 run）：下面要 async 并发拉，见「五路同发」
         val t0 = android.os.SystemClock.elapsedRealtime()
         coroutineScope {
@@ -215,6 +241,7 @@ class LibraryViewModel @Inject constructor(
                 val collections = collectionsDeferred.await()
                 val rows = HomeRows.build(prefs?.home?.rows.orEmpty(), libraries, collections)
                     .filterNot { it.hidden }
+                visibleRows = rows
                 // 「按类型找电影 / 剧集」色块（出厂内置行，紧跟「我的媒体库」）：每种有库的类型拉一次
                 // /libraries/kinds/{kind}/genres（封面 + 部数），拉不到就当这一行不出现
                 // 类型色块、每行条目、跨库行全部**并行**（iOS 同款：各行在库与合集一到就同发）
@@ -351,6 +378,7 @@ class LibraryViewModel @Inject constructor(
     /** 快照 → 首页数据：行清单用 `HomeRows.build` 重建（与在线路径同一份合并口径），行条目按 id 对上 */
     private fun homeFromSnapshot(snap: io.movieclaw.android.core.session.LibraryHomeSnapshot): LibraryHome {
         val rows = HomeRows.build(snap.rows, snap.libraries, snap.collections).filterNot { it.hidden }
+        visibleRows = rows
         return LibraryHome(
             libraries = snap.libraries,
             upNext = snap.upNext,

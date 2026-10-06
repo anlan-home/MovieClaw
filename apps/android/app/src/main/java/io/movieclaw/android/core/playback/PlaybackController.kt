@@ -56,6 +56,7 @@ class PlaybackController(
     private val qoe: PlaybackQoe? = null,
     private val trickplay: TrickplayProvider? = null,
     private val engineFactory: ((EngineKind) -> PlayerEngine)? = null,
+    private val onStopCommitted: () -> Unit = {},
 ) {
     private var disposed = false
     private var recoveryJob: Job? = null
@@ -120,7 +121,10 @@ class PlaybackController(
             val hasUrl = session?.subtitleUrls?.getOrNull(index) != null
             TrackOption(
                 ref = ref,
-                label = TrackLabels.subtitle(subtitle.language, subtitle.kind, ref, subtitle.isAi),
+                label = TrackLabels.subtitle(
+                    subtitle.language, subtitle.kind, ref, subtitle.isAi,
+                    title = subtitle.title, isForced = subtitle.isForced == true,
+                ),
                 unavailableReason = TrackLabels.subtitleUnsupportedReason(subtitle.kind)
                     ?: if (hasUrl) null else "服务端没有给出这条轨的地址",
             )
@@ -587,7 +591,8 @@ class PlaybackController(
                     }
                     _engineSubtitle.value = tracks.subtitle.mapIndexed { i, t ->
                         val kind = kindOfCodec(t.codec)
-                        TrackOption("embedded:$i", TrackLabels.subtitle(t.language, kind, "embedded:$i", false))
+                        // 引擎探测原盘时也能读到轨标题（mpv 的 track-list）✓ 同样优先用它
+                        TrackOption("embedded:$i", TrackLabels.subtitle(t.language, kind, "embedded:$i", false, t.title))
                     }
                     // 原盘：mpv 默认放的是盘内标注的默认轨，**与计划/记忆不一致时要拨过去**
                     // （服务端读不到盘内结构，计划里那条轨是这次选的或记着的引擎序号；
@@ -667,7 +672,9 @@ class PlaybackController(
         val duration = fileDurationMs()
         mainScope.launch {
             reportMutex.withLock {
-                runCatching { endpoint.reportProgress(progressRequest("stop", positionMs = duration)) }
+                if (runCatching { endpoint.reportProgress(progressRequest("stop", positionMs = duration)) }.getOrNull() != null) {
+                    onStopCommitted()
+                }
             }
         }
     }
@@ -927,7 +934,9 @@ class PlaybackController(
         cleanupScope.launch(Dispatchers.IO) { IsoBridge.closeOwner(this@PlaybackController) }
         cleanupScope.launch {
             withTimeoutOrNull(5_000) {
-                if (stopRequest != null) reportMutex.withLock { runCatching { endpoint.reportProgress(stopRequest) } }
+                if (stopRequest != null) reportMutex.withLock {
+                    if (runCatching { endpoint.reportProgress(stopRequest) }.getOrNull() != null) onStopCommitted()
+                }
             }
             snapshot?.sessionId?.let { id ->
                 withTimeoutOrNull(5_000) { runCatching { endpoint.stop(id) } }
