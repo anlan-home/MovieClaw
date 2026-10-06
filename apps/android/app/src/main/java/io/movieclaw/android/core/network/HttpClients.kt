@@ -54,15 +54,16 @@ private fun userAgentInterceptor() = Interceptor { chain ->
     )
 }
 
-/** 为当前活跃服务器的请求附带 Bearer token(登录探测等匿名请求自动跳过) */
-internal fun authInterceptor(vault: TokenVault) = Interceptor { chain ->
+/** 仅对显式绑定身份且同 origin 的请求附带 Bearer；原始探测与分享保持匿名。 */
+internal fun authInterceptor(@Suppress("UNUSED_PARAMETER") vault: TokenVault) = Interceptor { chain ->
     val request = chain.request()
-    val token = vault.activeToken()
-    if (token != null && vault.activeOrigin?.let { request.url.toString().startsWith(it) } == true) {
-        chain.proceed(request.newBuilder().header("Authorization", "Bearer $token").build())
-    } else {
-        chain.proceed(request)
-    }
+    val binding = request.tag(RequestIdentity::class.java)
+    val identity = binding?.identity
+    val authorized = identity != null && sameOrigin(request.url, identity.origin) && !isShareUrl(request.url)
+    val builder = request.newBuilder()
+    if (authorized) builder.header("Authorization", "Bearer ${identity!!.token}")
+    else builder.removeHeader("Authorization")
+    chain.proceed(builder.build())
 }
 
 private fun baseClient(vault: TokenVault): OkHttpClient.Builder =
@@ -76,15 +77,18 @@ private fun baseClient(vault: TokenVault): OkHttpClient.Builder =
         .addInterceptor(loggingInterceptor())
         .addInterceptor(authInterceptor(vault))
 
-/**
- * 非 2xx 一律打日志：URL、状态码、服务端返回体（前 400 字）。
- * 服务端的 VALIDATION_ERROR 会带 details，据此能直接定位是哪个参数不对。
- */
+/** 非 2xx 仅记录状态、方法和路径；查询参数、用户信息和响应体可能含凭据。 */
 private fun loggingInterceptor(): Interceptor = Interceptor { chain ->
     val response = chain.proceed(chain.request())
     if (!response.isSuccessful) {
-        val body = response.peekBody(400).string()
-        android.util.Log.w("McHttp", "${response.code} ${chain.request().method} ${chain.request().url} -> $body")
+        val request = chain.request()
+        val safeUrl = request.url.newBuilder()
+            .username("")
+            .password("")
+            .query(null)
+            .fragment(null)
+            .build()
+        android.util.Log.w("McHttp", "${response.code} ${request.method} $safeUrl")
     }
     response
 }

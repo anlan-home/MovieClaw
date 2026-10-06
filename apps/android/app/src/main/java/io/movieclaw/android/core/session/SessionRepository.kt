@@ -20,20 +20,22 @@ import io.movieclaw.android.core.network.newDeviceClientInfo
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import retrofit2.HttpException
 
 private val Context.serverStore by preferencesDataStore(name = "mc_servers")
@@ -63,11 +65,13 @@ data class SavedServer(
     val origin: String,
     val accounts: List<SavedAccount> = emptyList(),
     val activeAccount: String? = null,
+    /** 探活后的 API 基址；跨进程保留反向代理子路径。 */
+    val apiBase: String? = null,
 )
 
 /**
  * 会话仓库:登录(探测 → bootstrap 检查 → 设备登录)、多服务器多账号、
- * 冷启动快开(缓存快照直出 + 后台 revalidate)、401 全局回落登录页。
+ * 冷启动快开(缓存快照直出 + 后台 revalidate)、身份校验 401 回落登录页。
  */
 @Singleton
 class SessionRepository @Inject constructor(
@@ -79,6 +83,7 @@ class SessionRepository @Inject constructor(
     private val cacheCleaner: SessionCacheCleaner,
 ) {
     private val scope = AppScopes.io("SessionRepository")
+    private val sessionMutex = Mutex()
 
     private val _ui = MutableStateFlow(SessionUi())
     val ui: StateFlow<SessionUi> = _ui.asStateFlow()
@@ -87,55 +92,70 @@ class SessionRepository @Inject constructor(
     val servers: StateFlow<List<SavedServer>> = _servers.asStateFlow()
 
     init {
-        scope.launch { _servers.value = loadServers() }
+        scope.launch { sessionMutex.withLock { _servers.value = loadServers() } }
     }
 
     /** 冷启动:令牌 + 会话快照存在则直接进主界面,再后台校验 */
     suspend fun boot() {
-        val servers = loadServers()
-        _servers.value = servers
-        vault.warmUp()
-        val server = servers.firstOrNull { it.activeAccount != null } ?: servers.firstOrNull()
-        val account = server?.let { s ->
-            s.accounts.firstOrNull { it.username == s.activeAccount } ?: s.accounts.firstOrNull()
+        val restored = sessionMutex.withLock {
+            if (_ui.value.phase != SessionPhase.BOOTING) return@withLock null
+            val servers = loadServers()
+            _servers.value = servers
+            vault.warmUp()
+            val server = servers.firstOrNull { it.activeAccount != null } ?: servers.firstOrNull()
+            val account = server?.let { s ->
+                s.accounts.firstOrNull { it.username == s.activeAccount } ?: s.accounts.firstOrNull()
+            }
+            val token = if (server != null && account != null) vault.token(server.origin, account.username) else null
+            if (server == null || account == null || token == null) {
+                _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN, presetUsername = account?.username)
+                return@withLock null
+            }
+            server.apiBase?.let { apiFactory.registerApiBase(server.origin, it) }
+            vault.activate(server.origin, account.username, token)
+            _ui.value = SessionUi(
+                phase = SessionPhase.READY,
+                origin = server.origin,
+                session = account.session,
+                cached = true,
+            )
+            server.origin
         }
-        val token = if (server != null && account != null) vault.token(server.origin, account.username) else null
-        if (server == null || account == null || token == null) {
-            _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN, presetUsername = account?.username)
-            return
-        }
-        vault.activate(server.origin, account.username, token)
-        _ui.value = SessionUi(
-            phase = SessionPhase.READY,
-            origin = server.origin,
-            session = account.session,
-            cached = true,
-        )
-        revalidate(server.origin)
+        restored?.let { revalidate(it) }
     }
 
+    /** 播放/实时请求捕获同一份身份，回调只允许更新仍活跃的这一代。 */
+    fun requestIdentity(origin: String): TokenVault.Identity? = vault.snapshot()?.takeIf { it.origin == origin }
+    fun isCurrentIdentity(identity: TokenVault.Identity?): Boolean = identity != null && vault.isCurrent(identity)
+
     suspend fun revalidate(origin: String) {
-        runCatching { apiFactory.forOrigin(origin).me().dataOrThrow() }
-            .onSuccess { session ->
-                if (_ui.value.origin == origin) {
-                    _ui.value = _ui.value.copy(session = session)
-                }
-                updateActiveSession(origin, session)
+        val expected = vault.snapshot()?.takeIf { it.origin == origin } ?: return
+        try {
+            val fresh = apiFactory.forIdentity(origin, expected).me().dataOrThrow()
+            sessionMutex.withLock {
+                if (!vault.isCurrent(expected) || fresh.username != expected.username) return@withLock
+                _ui.value = _ui.value.copy(session = fresh, cached = false)
+                updateActiveSession(origin, fresh)
             }
-            .onFailure { failure ->
-                if (failure is HttpException && failure.code() == 401) {
-                    val username = _ui.value.session?.username
-                    if (username != null) markExpired(origin, username)
-                    backToLogin(presetUsername = username)
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (failure: Exception) {
+            if (failure is HttpException && failure.code() == 401) {
+                sessionMutex.withLock {
+                    if (!vault.isCurrent(expected)) return@withLock
+                    markExpired(origin, expected.username)
+                    vault.deactivateActive(expected)
+                    _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN, presetUsername = expected.username)
                 }
             }
+        }
     }
 
     /** 一次提交:探测 + bootstrap 检查 + 设备登录 */
     suspend fun login(serverInput: String, username: String, password: String): SessionView {
         val addr = requireNormalized(serverInput)
         val probed = probe(addr)
-        val api = apiFactory.forOrigin(probed.origin)
+        val api = apiFactory.forIdentity(probed.origin, null)
         val initialized = runCatching { api.bootstrapStatus().dataOrThrow().initialized }.getOrDefault(true)
         if (!initialized) throw SetupRequiredException(probed.origin)
         return deviceLogin(probed.origin, username, password)
@@ -145,14 +165,14 @@ class SessionRepository @Inject constructor(
     suspend fun createAdminAndLogin(serverInput: String, username: String, password: String): SessionView {
         val addr = requireNormalized(serverInput)
         val probed = probe(addr)
-        apiFactory.forOrigin(probed.origin).bootstrapCreate(CreateAdminRequest(username, password)).dataOrThrow()
+        apiFactory.forIdentity(probed.origin, null).bootstrapCreate(CreateAdminRequest(username, password)).dataOrThrow()
         return deviceLogin(probed.origin, username, password)
     }
 
-    private suspend fun deviceLogin(origin: String, username: String, password: String): SessionView {
+    private suspend fun deviceLogin(origin: String, username: String, password: String): SessionView = sessionMutex.withLock {
         val info = newDeviceClientInfo(installationId())
         val view = try {
-            apiFactory.forOrigin(origin).deviceLogin(DeviceLoginRequest(username, password, info)).dataOrThrow()
+            apiFactory.forIdentity(origin, null).deviceLogin(DeviceLoginRequest(username, password, info)).dataOrThrow()
         } catch (e: HttpException) {
             val detail = httpDetail(e)
             throw when (e.code()) {
@@ -178,11 +198,16 @@ class SessionRepository @Inject constructor(
             setActive = true,
         )
         _ui.value = SessionUi(phase = SessionPhase.READY, origin = origin, session = view.session, cached = false)
-        return view.session
+        view.session
     }
 
     /** 从本机移除一个已保存的账号(不动服务端凭证;要撤销请用设备管理) */
-    suspend fun removeAccount(origin: String, username: String) {
+    suspend fun removeAccount(origin: String, username: String) = sessionMutex.withLock {
+        val active = vault.snapshot()?.takeIf { it.origin == origin && it.username == username }
+        if (active != null) {
+            vault.clearActive(active)
+            _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN, presetUsername = username)
+        }
         vault.deleteToken(origin, username)
         val servers = _servers.value.map { server ->
             if (server.origin != origin) {
@@ -201,7 +226,7 @@ class SessionRepository @Inject constructor(
     }
 
     /** 退出全部账号(仅清本机;服务端凭证需逐台在设备管理里撤销) */
-    suspend fun logoutAll() {
+    suspend fun logoutAll() = sessionMutex.withLock {
         val origin = _ui.value.origin
         if (origin != null) {
             runCatching { apiFactory.forOrigin(origin).logoutCurrentDevice() }
@@ -218,26 +243,31 @@ class SessionRepository @Inject constructor(
 
     /** 切换账号:令牌不在(被移除/失效)就标记失效并回落登录 */
     suspend fun switchAccount(origin: String, username: String) {
-        val token = vault.token(origin, username)
-        if (token == null) {
-            markExpired(origin, username)
-            _ui.value = SessionUi(
-                phase = SessionPhase.NEEDS_LOGIN,
-                presetUsername = username,
-            )
-            return
+        val selected = sessionMutex.withLock {
+            val token = vault.token(origin, username)
+            if (token == null) {
+                vault.clearActive()
+                markExpired(origin, username)
+                _ui.value = SessionUi(
+                    phase = SessionPhase.NEEDS_LOGIN,
+                    presetUsername = username,
+                )
+                return@withLock false
+            }
+            _servers.value.firstOrNull { it.origin == origin }?.apiBase?.let { apiFactory.registerApiBase(origin, it) }
+            vault.activate(origin, username, token)
+            markActive(origin, username)
+            val snapshot = _servers.value
+                .firstOrNull { it.origin == origin }?.accounts
+                ?.firstOrNull { it.username == username }?.session
+            _ui.value = SessionUi(phase = SessionPhase.READY, origin = origin, session = snapshot, cached = true)
+            true
         }
-        vault.activate(origin, username, token)
-        markActive(origin, username)
-        val snapshot = _servers.value
-            .firstOrNull { it.origin == origin }?.accounts
-            ?.firstOrNull { it.username == username }?.session
-        _ui.value = SessionUi(phase = SessionPhase.READY, origin = origin, session = snapshot, cached = true)
-        revalidate(origin)
+        if (selected) revalidate(origin)
     }
 
     /** 登出本设备:尽力撤销服务端凭证,清除本地令牌 */
-    suspend fun logout() {
+    suspend fun logout() = sessionMutex.withLock {
         val origin = _ui.value.origin
         val preset = _ui.value.session?.username
         if (origin != null) {
@@ -287,9 +317,17 @@ class SessionRepository @Inject constructor(
         }
     }
 
-    private fun requireNormalized(serverInput: String): ServerAddress.Normalized =
-        ServerAddress.normalize(serverInput)
+    private fun requireNormalized(serverInput: String): ServerAddress.Normalized {
+        val address = ServerAddress.normalize(serverInput)
             ?: throw ApiException("INVALID_SERVER", "服务器地址无法解析,请检查格式")
+        // 显式输入反向代理子路径时直接探测该目录；origin 仍保持严格的凭证边界。
+        val text = serverInput.trim()
+        val url = (if (text.startsWith("http", ignoreCase = true)) text else "http://$text").toHttpUrlOrNull()
+            ?: throw ApiException("INVALID_SERVER", "服务器地址无法解析,请检查格式")
+        val path = url.encodedPath.trimEnd('/')
+        val apiPath = if (path.endsWith("/api/v1")) path else "$path/api/v1"
+        return address.copy(apiBase = address.origin + apiPath)
+    }
 
     /** 播放/进度上报的设备标识(与 installationId 同源) */
     suspend fun deviceId(): String = installationId()
@@ -323,12 +361,14 @@ class SessionRepository @Inject constructor(
             servers[index] = server.copy(
                 accounts = accounts,
                 activeAccount = if (setActive) account.username else server.activeAccount,
+                apiBase = apiFactory.apiBaseOf(origin) ?: server.apiBase,
             )
         } else {
             servers += SavedServer(
                 origin = origin,
                 accounts = listOf(account),
                 activeAccount = if (setActive) account.username else null,
+                apiBase = apiFactory.apiBaseOf(origin),
             )
         }
         if (setActive) {
@@ -402,11 +442,6 @@ class SessionRepository @Inject constructor(
         }
         _servers.value = servers
         persistServers(servers)
-    }
-
-    private suspend fun backToLogin(presetUsername: String?) {
-        vault.deactivateActive()
-        _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN, presetUsername = presetUsername)
     }
 
     /** 透传 FastAPI 422 的校验详情(缺哪个字段/哪条规则没过),避免只报状态码 */

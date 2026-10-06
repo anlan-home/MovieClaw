@@ -6,6 +6,8 @@ import javax.inject.Singleton
 import kotlin.coroutines.coroutineContext
 import kotlin.math.min
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -35,39 +37,49 @@ class EventStream @Inject constructor(
         path: String,
         terminalEvents: Set<String> = DEFAULT_TERMINAL,
     ): Flow<SseEvent> = flow {
+        val origin = sessionRepository.ui.value.origin
+            ?: throw ApiException("NO_SERVER", "尚未连接服务器")
+        val identity = sessionRepository.requestIdentity(origin)
+        val boundClient = identityClient(client, identity)
+        val base = apiFactory.apiBaseOf(origin) ?: "$origin/api/v1"
         var lastEventId: String? = null
         var attempt = 0
         while (coroutineContext.isActive) {
+            if (!sessionRepository.isCurrentIdentity(identity)) {
+                throw ApiException("SESSION_CHANGED", "账号已切换，实时连接已结束")
+            }
             var finished = false
-            try {
-                streamOnce(path, lastEventId).collect { event ->
-                    event.id?.let { lastEventId = it }
+            var failure: Throwable? = null
+            // catch 放在 emit 上游：界面处理/解码抛错不能当网络错误重放，也不能吞取消。
+            streamOnce(boundClient, base, path, lastEventId, terminalEvents)
+                .catch { error ->
+                    if (error is CancellationException) throw error
+                    failure = error
+                }.collect { event ->
+                    if (!sessionRepository.isCurrentIdentity(identity)) {
+                        throw ApiException("SESSION_CHANGED", "账号已切换，实时连接已结束")
+                    }
                     emit(event)
+                    event.id?.let { lastEventId = it }
                     if (event.name in terminalEvents) finished = true
                 }
-                // 连接自然结束:终止事件则收尾,否则视为断流重连
-                if (finished) return@flow
-            } catch (t: Throwable) {
-                if (finished) return@flow
-                attempt++
-                if (attempt > MAX_ATTEMPTS) throw t
-                delay(backoffMs(attempt))
-                continue
-            }
+            if (finished) return@flow
             attempt++
-            if (attempt > MAX_ATTEMPTS) return@flow
+            if (attempt > MAX_ATTEMPTS) {
+                throw (failure ?: ApiException("SSE_INCOMPLETE", "实时连接结束但没有完成事件，请重试"))
+            }
             delay(backoffMs(attempt))
         }
     }
 
-    /** 单次连接:URL/鉴权取自当前活跃服务器 */
-    private fun streamOnce(path: String, lastEventId: String?): Flow<SseEvent> = callbackFlow {
-        val origin = sessionRepository.ui.value.origin
-        val base = origin?.let { apiFactory.apiBaseOf(it) ?: "$it/api/v1" }
-        if (base == null) {
-            close(ApiException("NO_SERVER", "尚未连接服务器"))
-            return@callbackFlow
-        }
+    /** 单次连接绑定服务器与身份；重连不会跳到另一个账号。 */
+    internal fun streamOnce(
+        client: okhttp3.OkHttpClient,
+        base: String,
+        path: String,
+        lastEventId: String?,
+        terminalEvents: Set<String>,
+    ): Flow<SseEvent> = callbackFlow {
         val request = Request.Builder()
             .url(base.trimEnd('/') + "/" + path.trimStart('/'))
             .header("Accept", "text/event-stream")
@@ -75,12 +87,18 @@ class EventStream @Inject constructor(
             .build()
         val listener = object : EventSourceListener() {
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
-                trySend(SseEvent(name = type ?: "message", data = data, id = id))
+                val event = SseEvent(name = type ?: "message", data = data, id = id)
+                if (trySend(event).isFailure) {
+                    // 有界缓冲满即断线，从最后已处理的 id 续传，禁止静默丢字/终态。
+                    close(ApiException("SSE_BACKPRESSURE", "实时事件过快，正在恢复连接"))
+                    eventSource.cancel()
+                } else if (event.name in terminalEvents) {
+                    close()
+                    eventSource.cancel()
+                }
             }
 
-            override fun onClosed(eventSource: EventSource) {
-                close()
-            }
+            override fun onClosed(eventSource: EventSource) { close() }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 close(t ?: ApiException("SSE_FAILED", "实时连接中断(HTTP ${response?.code})"))

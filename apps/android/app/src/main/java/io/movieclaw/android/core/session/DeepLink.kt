@@ -1,6 +1,7 @@
 package io.movieclaw.android.core.session
 
 import io.movieclaw.android.core.model.ShareLink
+import io.movieclaw.android.core.network.ServerAddress
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,8 +32,10 @@ class DeepLinkBus @Inject constructor() {
             if (parsed.host != "share") return null
             val slug = parsed.pathSegments.firstOrNull() ?: return null
             val origin = parsed.getQueryParameter("origin") ?: return null
-            return ShareLink(origin = origin.trimEnd('/'), slug = slug)
+            val normalized = ServerAddress.normalize(origin) ?: return null
+            return ShareLink(origin = normalized.origin, slug = slug)
         }
+        if (scheme != "http" && scheme != "https") return null
         val segments = parsed.pathSegments ?: return null
         if (segments.size < 2 || segments[0] != "s") return null
         val slug = segments[1]

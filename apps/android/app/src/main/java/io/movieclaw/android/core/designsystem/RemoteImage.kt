@@ -35,6 +35,8 @@ fun RemoteImage(
     aspect: Float? = null,
     /** 预放大系数（如 Hero 慢推 1.1 倍，取图时就按放大后的尺寸要） */
     zoom: Float = 1f,
+    /** 分享图片必须走独立 Cookie 通道，不能附带成员身份。 */
+    guest: Boolean = false,
     /**
      * 没有地址或**加载失败**时的回落内容。null = 渐变占位。
      *
@@ -50,7 +52,10 @@ fun RemoteImage(
         return
     }
     val context = LocalContext.current.applicationContext
-    val loader = remember(context) { (context as io.movieclaw.android.MovieClawApp).imageLoaders.loader }
+    val loader = remember(context, guest) {
+        val loaders = (context as io.movieclaw.android.MovieClawApp).imageLoaders
+        if (guest) loaders.guestLoader else loaders.loader
+    }
     var failed by remember { mutableStateOf(false) }
     if (failed) {
         if (fallback != null) fallback() else PosterPlaceholder(seed = url, modifier = modifier)

@@ -124,7 +124,7 @@ class ShareViewModel @Inject constructor(
     val ui = _ui.asStateFlow()
 
     /** 分享通道的图片要经 API 基址(/api/v1)访问 */
-    private val apiBase: String get() = "$origin/api/v1"
+    private val apiBase: String get() = apiFactory.apiBaseOf(origin) ?: "$origin/api/v1"
 
     fun imageUrl(path: String?): String? =
         path?.takeIf { it.isNotEmpty() }?.let { if (it.startsWith("http")) it else apiBase + it }
@@ -139,7 +139,7 @@ class ShareViewModel @Inject constructor(
     fun probe() {
         viewModelScope.launch {
             _ui.update { it.copy(loading = true, error = null) }
-            val api = apiFactory.forOrigin(origin)
+            val api = apiFactory.guestForOrigin(origin)
             runCatching { api.sharePublic(slug).dataOrThrow() }
                 .onSuccess { view ->
                     _ui.update { it.copy(loading = false, probe = view) }
@@ -154,7 +154,7 @@ class ShareViewModel @Inject constructor(
         if (password.isEmpty()) return
         viewModelScope.launch {
             _ui.update { it.copy(loading = true, error = null) }
-            val api = apiFactory.forOrigin(origin)
+            val api = apiFactory.guestForOrigin(origin)
             runCatching { api.shareUnlock(slug, io.movieclaw.android.core.model.ShareUnlockRequest(password)).dataOrThrow() }
                 .onSuccess { view ->
                     _ui.update { it.copy(loading = false, probe = view, password = "") }
@@ -168,7 +168,7 @@ class ShareViewModel @Inject constructor(
 
     private fun loadContent() {
         viewModelScope.launch {
-            val api = apiFactory.forOrigin(origin)
+            val api = apiFactory.guestForOrigin(origin)
             val probe = _ui.value.probe
             if (probe?.collectionId != null) {
                 runCatching { api.shareCollection(slug).dataOrThrow() }
@@ -193,7 +193,7 @@ class ShareViewModel @Inject constructor(
 
     private fun loadEpisodes(season: Int) {
         viewModelScope.launch {
-            val api = apiFactory.forOrigin(origin)
+            val api = apiFactory.guestForOrigin(origin)
             runCatching { api.shareEpisodes(slug, season).dataOrThrow() }
                 .onSuccess { view -> _ui.update { it.copy(episodes = view.episodes) } }
         }
@@ -347,6 +347,7 @@ private fun SharedCollectionList(collection: SharedCollection, imageUrl: (String
                     RemoteImage(
                         url = imageUrl(item.posterUrl),
                         origin = null,
+                        guest = true,
                         contentDescription = item.title,
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -387,6 +388,7 @@ private fun SharedItemDetail(
             RemoteImage(
                 url = imageUrl(item.backdropUrl ?: item.posterUrl),
                 origin = null,
+                        guest = true,
                 contentDescription = item.title,
                 modifier = Modifier.fillMaxSize(),
             )
@@ -400,6 +402,7 @@ private fun SharedItemDetail(
                     RemoteImage(
                         url = imageUrl(item.posterUrl),
                         origin = null,
+                        guest = true,
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
                     )

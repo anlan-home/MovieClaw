@@ -6,7 +6,8 @@ import coil3.disk.DiskCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.movieclaw.android.core.network.GeneralChannel
-import io.movieclaw.android.core.network.authInterceptor
+import io.movieclaw.android.core.network.identityClient
+import io.movieclaw.android.core.network.ShareCookieJar
 import io.movieclaw.android.core.session.TokenVault
 import java.io.File
 import javax.inject.Inject
@@ -21,13 +22,12 @@ import okio.Path.Companion.toPath
 @Singleton
 class ImageLoaders @Inject constructor(
     @ApplicationContext context: Context,
-    vault: TokenVault,
-    @GeneralChannel baseClient: OkHttpClient,
+    private val vault: TokenVault,
+    @GeneralChannel private val baseClient: OkHttpClient,
+    shareCookies: ShareCookieJar,
 ) {
     /** 图片用的带鉴权客户端；ambient 取色也走它（服务端图片需要带 token） */
-    val http: OkHttpClient = baseClient.newBuilder()
-        .addInterceptor(authInterceptor(vault))
-        .build()
+    val http: OkHttpClient get() = identityClient(baseClient, vault.snapshot())
 
     val loader: ImageLoader = ImageLoader.Builder(context)
         .components {
@@ -41,9 +41,18 @@ class ImageLoaders @Inject constructor(
         }
         .build()
 
+    /** 访客图片只用分享 Cookie，不读成员 token，也不复用成员图片磁盘缓存。 */
+    val guestLoader: ImageLoader = ImageLoader.Builder(context)
+        .components {
+            add(OkHttpNetworkFetcherFactory(callFactory = {
+                identityClient(baseClient, null).newBuilder().cookieJar(shareCookies).build()
+            }))
+        }.build()
+
     /** 退出登录 / 移除账号时清空（内存 + 磁盘）：iOS 那边快照按账号存、退出即删，我的缓存不分账号，整份清才不串号 */
     suspend fun clear() {
         runCatching { loader.memoryCache?.clear() }
+        runCatching { guestLoader.memoryCache?.clear() }
         runCatching { loader.diskCache?.clear() }
     }
 }
