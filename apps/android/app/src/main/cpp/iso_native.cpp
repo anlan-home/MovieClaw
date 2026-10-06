@@ -7,7 +7,9 @@
 // 解码由播放内核原生完成(MPV 全量内核: HEVC/TrueHD/PGS 全支持);
 // 本文件只做"字节搬运 + 文件系统解析"。
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE // strcasestr
+#endif
 #include <jni.h>
 #include <string.h>
 #include <stdlib.h>
@@ -25,6 +27,9 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <errno.h>
+#include <atomic>
+#include <mutex>
+#include "socket_workers.h"
 #include <android/log.h>
 
 #include "iso_readahead.h"
@@ -44,17 +49,23 @@ typedef struct {
     char port[8];
     char path[1400];
     int sock;             // -1 = 未连接
-    uint64_t total;       // 远端总字节数(由 Content-Range 校准,0=未知)
+    std::atomic<uint64_t> total; // 远端总字节数(由 Content-Range 校准,0=未知)
     pthread_mutex_t lock;
 } iso_http;
 
-static iso_http g_http = { .sock = -1, .total = 0 };
+static iso_http g_http = { .sock = -1, .total = 0, .lock = PTHREAD_MUTEX_INITIALIZER };
+// open/close 串行；socket 的发布/关闭另有锁，让 shutdown 可安全打断远端读取。
+static std::mutex g_lifecycle_mutex;
+static std::mutex g_http_socket_mutex;
+static SocketWorkers g_connections;
+static pthread_t g_server_thread;
+static bool g_server_thread_running = false;
 static udfread *g_udf = NULL;
 static char g_m2ts_path[512];
 static uint64_t g_m2ts_size = 0;
 static int g_listen_fd = -1;
 static int g_server_port = 0;
-static volatile int g_run = 0;
+static std::atomic<bool> g_run{false};
 
 // ============ 顺序预读窗口 ============
 //
@@ -102,7 +113,7 @@ static ReadAheadWindow g_ra(kRaBlockBytes, kRaSlots, kRaLookahead);
 static uint8_t *g_ra_buf[kRaSlots] = {NULL};
 // 窗口只在「卷已打开、缓冲已分配」后启用：打开 UDF 卷阶段的读又小又随机，
 // 走窗口没有收益，却会在缓冲尚未分配时踩空（首版就是这么失败的）
-static volatile int g_ra_ready = 0;
+static std::atomic<bool> g_ra_ready{false};
 static pthread_mutex_t g_ra_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_ra_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_ra_prefetch_block = 0;
@@ -119,7 +130,7 @@ static int tcp_connect(const char *host, const char *port) {
     hints.ai_socktype = SOCK_STREAM;
     int fd = -1;
     if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+    for (struct addrinfo *ai = res; ai && g_run; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) continue;
         // 非阻塞 connect + poll 限时：NAS 掉线时不再卡几十秒
@@ -131,7 +142,11 @@ static int tcp_connect(const char *host, const char *port) {
             pfd.fd = fd;
             pfd.events = POLLOUT;
             pfd.revents = 0;
-            r = poll(&pfd, 1, kHttpTimeoutSec * 1000);
+            const int maxPolls = kHttpTimeoutSec * 10;
+            for (int tick = 0; tick < maxPolls && g_run; ++tick) {
+                r = poll(&pfd, 1, 100);
+                if (r != 0) break;
+            }
             if (r > 0) {
                 int err = 0;
                 socklen_t elen = sizeof(err);
@@ -146,7 +161,7 @@ static int tcp_connect(const char *host, const char *port) {
             r = -1;
         }
         fcntl(fd, F_SETFL, flags);
-        if (r == 0) {
+        if (r == 0 && g_run) {
             struct timeval tv;
             tv.tv_sec = kHttpTimeoutSec;
             tv.tv_usec = 0;
@@ -202,7 +217,7 @@ static int http_request_once(uint64_t off, uint8_t *buf, uint32_t len,
              g_http.path, g_http.host,
              (unsigned long long)off,
              (unsigned long long)(off + (len ? len - 1 : 0)));
-    if (send(g_http.sock, req, strlen(req), 0) != (ssize_t)strlen(req)) {
+    if (send(g_http.sock, req, strlen(req), MSG_NOSIGNAL) != (ssize_t)strlen(req)) {
         *why = "send";
         return -1;
     }
@@ -289,15 +304,30 @@ static int http_request_once(uint64_t off, uint8_t *buf, uint32_t len,
     return 0;
 }
 
+static void http_close_socket() {
+    std::lock_guard<std::mutex> lock(g_http_socket_mutex);
+    if (g_http.sock >= 0) close(g_http.sock);
+    g_http.sock = -1;
+}
+static void http_interrupt() {
+    std::lock_guard<std::mutex> lock(g_http_socket_mutex);
+    if (g_http.sock >= 0) shutdown(g_http.sock, SHUT_RDWR);
+}
+
 static int http_read_range(uint64_t off, uint8_t *buf, uint32_t len) {
     pthread_mutex_lock(&g_http.lock);
     const char *why = "-";
     int last_errno = 0;
     char status[192];
     status[0] = 0;
-    for (int attempt = 0; attempt < 2; attempt++) {
+    for (int attempt = 0; attempt < 2 && g_run; attempt++) {
         if (g_http.sock < 0) {
-            g_http.sock = tcp_connect(g_http.host, g_http.port);
+            int connected = tcp_connect(g_http.host, g_http.port);
+            {
+                std::lock_guard<std::mutex> lock(g_http_socket_mutex);
+                if (!g_run && connected >= 0) { close(connected); connected = -1; }
+                g_http.sock = connected;
+            }
             if (g_http.sock < 0) {
                 why = "connect";
                 last_errno = errno;
@@ -316,15 +346,13 @@ static int http_read_range(uint64_t off, uint8_t *buf, uint32_t len) {
             // （见 http_request_once 的状态判断），其余请求必定是 206 且长度精确，
             // 连接天然同步，可安全复用。
             if (off == 0) {
-                close(g_http.sock);
-                g_http.sock = -1;
+                http_close_socket();
             }
             pthread_mutex_unlock(&g_http.lock);
             return 0;
         }
         last_errno = errno;
-        close(g_http.sock);
-        g_http.sock = -1;
+        http_close_socket();
     }
     pthread_mutex_unlock(&g_http.lock);
     // 直读失败以前完全静默 —— 排查"打不开/卡住"时看不到任何线索
@@ -430,7 +458,7 @@ static void *ra_prefetch_thread(void *arg) {
 static ssize_t ra_read(uint64_t off, uint8_t *buf, size_t len) {
     size_t done = 0;
     int waits = 0;
-    while (done < len) {
+    while (done < len && g_run) {
         uint64_t cur = off + done;
         uint64_t block = g_ra.blockOf(cur);
         size_t in_block = (size_t)(cur - block * kRaBlockBytes);
@@ -499,7 +527,7 @@ static ssize_t ra_read(uint64_t off, uint8_t *buf, size_t len) {
         pthread_mutex_unlock(&g_ra_lock);
         done += chunk;
     }
-    return (ssize_t)done;
+    return done == len ? (ssize_t)done : -1;
 }
 
 // ============ libudfread 块读取回调 ============
@@ -513,6 +541,7 @@ static int bi_read(udfread_block_input *bi, uint32_t lba, void *buf,
                    uint32_t nblocks, int flags) {
     (void)bi;
     (void)flags;
+    if (!g_run) return 0;
     uint64_t off = (uint64_t)lba * 2048;
     uint32_t total = nblocks * 2048;
     if (total == 0) return 0;
@@ -606,7 +635,7 @@ static void serve_connection(int fd) {
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
     UDFFILE *f = udfread_file_open(g_udf, g_m2ts_path);
-    if (!f) { close(fd); return; }
+    if (!f) return;
 
     char hdr[2048];
     int hpos = 0;
@@ -654,7 +683,6 @@ static void serve_connection(int fd) {
         LOGW("本地请求越界: range=%llu-%llu size=%llu -> 416",
              (unsigned long long)start, (unsigned long long)end, (unsigned long long)g_m2ts_size);
         udfread_file_close(f);
-        close(fd);
         return;
     }
     if (end < start) end = start;
@@ -681,7 +709,6 @@ static void serve_connection(int fd) {
              (unsigned long long)(end - start + 1));
     if (send(fd, resp, strlen(resp), MSG_NOSIGNAL) < 0) {
         udfread_file_close(f);
-        close(fd);
         return;
     }
 
@@ -702,7 +729,6 @@ static void serve_connection(int fd) {
         }
     }
     udfread_file_close(f);
-    close(fd);
 }
 
 static void *server_thread(void *arg) {
@@ -710,11 +736,10 @@ static void *server_thread(void *arg) {
     while (g_run) {
         int fd = accept(g_listen_fd, NULL, NULL);
         if (fd < 0) break;
-        pthread_t t;
-        pthread_create(&t, NULL,
-                       (void *(*)(void *))serve_connection,
-                       (void *)(intptr_t)fd);
-        pthread_detach(t);
+        if (!g_run) { close(fd); break; }
+        if (!g_connections.start(fd, serve_connection)) {
+            LOGW("本地连接线程启动失败");
+        }
     }
     return NULL;
 }
@@ -722,21 +747,27 @@ static void *server_thread(void *arg) {
 // ============ 生命周期 ============
 
 static void iso_shutdown(void) {
-    g_run = 0;
-    g_ra_ready = 0; // 先停用窗口：避免关片过程中还有读走窗口取到已释放的缓冲
-    // 预取线程可能正阻塞在 recv 上：先广播唤醒，再 shutdown 直接打断，
-    // 最后 join —— 否则关闭 ISO 要等满一个超时（最多 kHttpTimeoutSec 秒）
+    g_run = false;
+    // 停止接收新请求，但先不 close fd，避免 accept 线程读到被复用的描述符。
+    if (g_listen_fd >= 0) shutdown(g_listen_fd, SHUT_RDWR);
     pthread_mutex_lock(&g_ra_lock);
     g_ra_prefetch_valid = 0;
     pthread_cond_broadcast(&g_ra_cv);
     pthread_mutex_unlock(&g_ra_lock);
-    if (g_http.sock >= 0) shutdown(g_http.sock, SHUT_RDWR);
+    http_interrupt();
+    if (g_server_thread_running) {
+        pthread_join(g_server_thread, NULL);
+        g_server_thread_running = false;
+    }
+    if (g_listen_fd >= 0) { close(g_listen_fd); g_listen_fd = -1; }
+    // 连接可能阻塞于收请求、向播放器发送、或读取远端；全部退出后才释放共享卷/缓冲。
+    g_connections.stopAndJoin();
     if (g_ra_thread_running) {
         pthread_join(g_ra_thread, NULL);
         g_ra_thread_running = 0;
     }
-    if (g_listen_fd >= 0) { close(g_listen_fd); g_listen_fd = -1; }
-    if (g_http.sock >= 0) { close(g_http.sock); g_http.sock = -1; }
+    http_close_socket();
+    g_ra_ready = false;
     if (g_udf) { udfread_close(g_udf); g_udf = NULL; }
     // 缓冲释放前必须清空窗口：否则下次打开会把旧块号当常驻，读到垃圾
     g_ra.reset();
@@ -754,19 +785,19 @@ static void iso_shutdown(void) {
 static int parse_url(const char *url, char *host, size_t host_len,
                      char *port, size_t port_len,
                      char *path, size_t path_len) {
-    const char *p = strstr(url, "://");
-    if (!p) return -1;
-    p += 3;
+    // 此桥仅支持明文 HTTP；HTTPS 必须由成熟 TLS 数据源接入，不能向 TLS 端口发明文。
+    if (strncmp(url, "http://", 7) != 0 || strpbrk(url, "\r\n")) return -1;
+    const char *p = url + 7;
     const char *slash = strchr(p, '/');
     if (!slash) return -1;
     const char *colon = (const char *)memchr(p, ':', (size_t)(slash - p));
     size_t hlen = colon ? (size_t)(colon - p) : (size_t)(slash - p);
-    if (hlen >= host_len) return -1;
+    if (hlen == 0 || hlen >= host_len) return -1;
     memcpy(host, p, hlen);
     host[hlen] = 0;
     if (colon) {
         size_t plen = (size_t)(slash - colon - 1);
-        if (plen >= port_len) return -1;
+        if (plen == 0 || plen >= port_len) return -1;
         memcpy(port, colon + 1, plen);
         port[plen] = 0;
     } else {
@@ -780,9 +811,11 @@ static int parse_url(const char *url, char *host, size_t host_len,
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_movieclaw_android_core_playback_IsoBridge_nativeOpenIso(JNIEnv *env, jclass clazz,
-                                           jstring jUrl, jlong jSize) {
+                                           jstring jUrl) {
     (void)clazz;
-    (void)jSize; // 总大小由首响应的 Content-Range 校准,不必预传
+    std::lock_guard<std::mutex> lifecycle(g_lifecycle_mutex);
+    iso_shutdown();
+    g_connections.reset();
     const char *url = env->GetStringUTFChars(jUrl, NULL);
     if (!url) return NULL;
 
@@ -790,18 +823,18 @@ Java_io_movieclaw_android_core_playback_IsoBridge_nativeOpenIso(JNIEnv *env, jcl
                   g_http.port, sizeof(g_http.port),
                   g_http.path, sizeof(g_http.path)) != 0) {
         env->ReleaseStringUTFChars(jUrl, url);
-        LOGE("URL 解析失败");
+        LOGE("ISO 地址不受支持：仅支持 HTTP，HTTPS 需要 TLS 数据源");
         return NULL;
     }
-    if (strncmp(g_http.host, url, 4) == 0) {} // no-op
-    g_http.sock = -1;
     g_http.total = 0;
     env->ReleaseStringUTFChars(jUrl, url);
 
+    g_run = true;
     // 首次 Range 探测:校验连通性(后续读取按需建连)
     uint8_t probe[16];
     if (http_read_range(0, probe, sizeof(probe)) != 0) {
         LOGE("无法访问远端 ISO 流");
+        iso_shutdown();
         return NULL;
     }
     LOGI("远端探测 OK: 总大小 %llu bytes", (unsigned long long)g_http.total);
@@ -813,6 +846,7 @@ Java_io_movieclaw_android_core_playback_IsoBridge_nativeOpenIso(JNIEnv *env, jcl
     // 少数几次 4MB 抓取（UDF 元数据本就成簇分布），代价只是多读几 MB。
     if (!ra_setup()) {
         LOGE("预读缓冲分配失败");
+        iso_shutdown();
         return NULL;
     }
     g_run = 1;
@@ -871,17 +905,19 @@ Java_io_movieclaw_android_core_playback_IsoBridge_nativeOpenIso(JNIEnv *env, jcl
     if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
         listen(g_listen_fd, 4) != 0) {
         LOGE("本地服务启动失败");
-        udfread_close(g_udf);
-        g_udf = NULL;
+        iso_shutdown();
         return NULL;
     }
     socklen_t alen = sizeof(addr);
     getsockname(g_listen_fd, (struct sockaddr *)&addr, &alen);
     g_server_port = ntohs(addr.sin_port);
 
-    pthread_t t;
-    pthread_create(&t, NULL, server_thread, NULL);
-    pthread_detach(t);
+    if (pthread_create(&g_server_thread, NULL, server_thread, NULL) != 0) {
+        LOGE("本地服务线程启动失败");
+        iso_shutdown();
+        return NULL;
+    }
+    g_server_thread_running = true;
 
     char local[64];
     snprintf(local, sizeof(local), "http://127.0.0.1:%d/stream.m2ts", g_server_port);
@@ -892,5 +928,6 @@ Java_io_movieclaw_android_core_playback_IsoBridge_nativeOpenIso(JNIEnv *env, jcl
 extern "C" JNIEXPORT void JNICALL
 Java_io_movieclaw_android_core_playback_IsoBridge_nativeCloseIso(JNIEnv *env, jclass clazz) {
     (void)env; (void)clazz;
+    std::lock_guard<std::mutex> lifecycle(g_lifecycle_mutex);
     iso_shutdown();
 }

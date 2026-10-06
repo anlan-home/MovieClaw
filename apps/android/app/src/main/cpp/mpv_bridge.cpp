@@ -3,11 +3,10 @@
 // 编译开关 HAS_MPV：链接预编译的 libmpv.so（我们构建的版本，静态含
 // libass/fontconfig/ffmpeg）。未启用时提供桩实现，构建不失败。
 //
-// 线程模型：mpv 的 API 全线程安全；事件经 mpv_wait_async 回调线程
-// 转发到 JNI wakeup -> Dart 侧轮询/事件通道。
+// 线程模型：事件线程由实例持有；销毁先 wakeup + join，禁止与销毁并发读取事件。
 //
-// Surface 生命周期：nativeCreate 持有 ANativeWindow 引用；
-// surfaceDestroyed 前 Kotlin 侧先发 stop，nativeDestroy 释放。
+// Surface 生命周期：实例持有 JNI Surface 全局引用，detach 停止 VO 后交还；
+// destroy 等待事件线程退出并销毁内核，最后释放 Surface。
 
 #include <jni.h>
 #include <android/log.h>
@@ -18,6 +17,8 @@
 #include <dlfcn.h>
 #include <cstring>
 #include <vector>
+#include <atomic>
+#include <mutex>
 
 #ifdef HAS_MPV
 #include <mpv/client.h>
@@ -45,17 +46,20 @@ static void (*p_free)(void *);
 static int (*p_observe)(mpv_handle *, unsigned long long, const char *, int);
 static const char *(*p_error_string)(int);
 static void (*p_wakeup)(mpv_handle *, void (*)(void *), void *);
+static void (*p_interrupt)(mpv_handle *);
 static int (*p_logreq)(mpv_handle *, const char *);
 static mpv_event_stub *(*p_waitev)(mpv_handle *, double);
 // FFmpeg JNI 桥:mpv 的 android GPU context 与 audiotrack 均经此取 JavaVM
 static void (*p_av_set_java_vm)(void *vm, void *log_ctx);
 static bool g_mpv_loaded = false;
+static std::mutex g_load_mutex;
 
 static bool load_mpv_symbols() {
+    std::lock_guard<std::mutex> lock(g_load_mutex);
     if (g_mpv_loaded) return true;
     void *h = dlopen("libmp2.so", RTLD_NOW | RTLD_LOCAL);
     if (!h) { LOGE("dlopen libmpv2.so: %s", dlerror()); return false; }
-#define DLSYM(v, n) v = reinterpret_cast<decltype(v)>(dlsym(h, n)); if (!v) { LOGE("dlsym %s", n); return false; }
+#define DLSYM(v, n) v = reinterpret_cast<decltype(v)>(dlsym(h, n)); if (!v) { LOGE("dlsym %s", n); dlclose(h); return false; }
     DLSYM(p_create, "mpv_create")
     DLSYM(p_init, "mpv_initialize")
     DLSYM(p_terminate, "mpv_terminate_destroy")
@@ -66,6 +70,7 @@ static bool load_mpv_symbols() {
     DLSYM(p_observe, "mpv_observe_property")
     DLSYM(p_error_string, "mpv_error_string")
     DLSYM(p_wakeup, "mpv_set_wakeup_callback")
+    DLSYM(p_interrupt, "mpv_wakeup")
     DLSYM(p_logreq, "mpv_request_log_messages")
     DLSYM(p_waitev, "mpv_wait_event")
     DLSYM(p_av_set_java_vm, "av_jni_set_java_vm")
@@ -92,8 +97,27 @@ static void mpv_wakeup_stub(void *ctx) { // legacy
     }
 }
 
-static inline mpv_handle *H(jlong handle) {
-    return reinterpret_cast<mpv_handle *>(handle);
+// 每个 Kotlin 引擎独占 Surface 和事件线程，不能用进程全局引用互相覆盖。
+struct MpvInstance {
+    mpv_handle *mpv;
+    jobject surface = nullptr;
+    std::atomic<bool> stopping{false};
+    std::atomic<unsigned long long> loaded_files{0};
+    std::thread events;
+    explicit MpvInstance(mpv_handle *value) : mpv(value) {}
+};
+static inline MpvInstance *I(jlong handle) {
+    return reinterpret_cast<MpvInstance *>(handle);
+}
+static inline mpv_handle *H(jlong handle) { return I(handle)->mpv; }
+static void destroy_instance(JNIEnv *env, MpvInstance *instance) {
+    instance->stopping = true;
+    // 唤醒等待者并等待它不再访问 handle/事件数据，之后才允许销毁内核。
+    p_interrupt(instance->mpv);
+    if (instance->events.joinable()) instance->events.join();
+    p_terminate(instance->mpv);
+    if (instance->surface) env->DeleteGlobalRef(instance->surface);
+    delete instance;
 }
 
 // Surface 生命周期（对齐 mpv-android 官方 render.cpp 契约）：
@@ -101,23 +125,25 @@ static inline mpv_handle *H(jlong handle) {
 //   detach = wid = 0 + DeleteGlobalRef(surface)
 // mpv 的 android 路径把 wid 当 Java Surface 的 jobject 全局引用解析，
 // 运行期换 Surface 必须走这一对，不能只设 wid 不管旧引用。
-static jobject g_surface_ref = nullptr;
-
-static bool attach_surface(JNIEnv *env, mpv_handle *mpv, jobject surface) {
+static bool attach_surface(JNIEnv *env, MpvInstance *instance, jobject surface) {
+    mpv_handle *mpv = instance->mpv;
     if (surface == nullptr) { LOGE("attach_surface: null surface"); return false; }
-    if (g_surface_ref) {
-        env->DeleteGlobalRef(g_surface_ref);
-        g_surface_ref = nullptr;
+    if (instance->surface && p_setstr(mpv, "vo", "null") < 0) {
+        LOGW("cannot stop VO before Surface replacement");
+        return false;
     }
-    g_surface_ref = env->NewGlobalRef(surface);
-    if (!g_surface_ref) { LOGE("NewGlobalRef failed"); return false; }
+    jobject next = env->NewGlobalRef(surface);
+    if (!next) { LOGE("NewGlobalRef failed"); return false; }
     char wid[32];
-    snprintf(wid, sizeof(wid), "%lld", (long long)(intptr_t)g_surface_ref);
+    snprintf(wid, sizeof(wid), "%lld", (long long)(intptr_t)next);
     int r = p_setstr(mpv, "wid", wid);
     if (r < 0) {
+        env->DeleteGlobalRef(next);
         LOGE("set wid failed: %s", p_error_string(r));
         return false;
     }
+    if (instance->surface) env->DeleteGlobalRef(instance->surface);
+    instance->surface = next;
     LOGI("surface attached, wid=%s", wid);
     return true;
 }
@@ -169,14 +195,16 @@ Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeCreate(JNIEnv *env, 
         p_terminate(mpv);
         return 0;
     }
+    auto *instance = new MpvInstance(mpv);
     // 事件泵线程:log-message → logcat;mpv 日志是唯一可靠的渲染诊断源
-    std::thread([mpv]() {
-        while (true) {
-            mpv_event_stub *ev = p_waitev(mpv, 10000);
+    instance->events = std::thread([instance]() {
+        while (!instance->stopping) {
+            mpv_event_stub *ev = p_waitev(instance->mpv, -1);
             // 枚举值以 client.h 为准:LOG_MESSAGE=2,SHUTDOWN=1
             // (此前误写 6=LOG_MESSAGE,实为 START_FILE,data 结构不同,解析即崩)
             if (!ev || ev->event_id == 0) continue;   // MPV_EVENT_NONE
             if (ev->event_id == 1) break;             // MPV_EVENT_SHUTDOWN
+            if (ev->event_id == 8) ++instance->loaded_files; // MPV_EVENT_FILE_LOADED
             if (ev->event_id == 2) {                  // MPV_EVENT_LOG_MESSAGE
                 mpv_event_log_stub *m = (mpv_event_log_stub *)ev->data;
                 // prefix/text 可能为 NULL(空消息),直接 %s 会 strlen 崩溃
@@ -189,17 +217,17 @@ Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeCreate(JNIEnv *env, 
                 }
             }
         }
-    }).detach();
+    });
 
     // mpv 的 android 路径(video/out/android_common.c)把 WinID 当作
     // Java Surface 的 jobject 全局引用,内部 ANativeWindow_fromSurface
     // 解析 —— 与 mpv-android 官方架构一致。传 ANativeWindow 指针会被
     // 当 jobject 解析而崩溃(真机 SIGSEGV 实证)。
-    if (!attach_surface(env, mpv, surface)) {
-        p_terminate(mpv);
+    if (!attach_surface(env, instance, surface)) {
+        destroy_instance(env, instance);
         return 0;
     }
-    return reinterpret_cast<jlong>(mpv);
+    return reinterpret_cast<jlong>(instance);
 #else
     (void)env; (void)surface;
     LOGW("HAS_MPV not enabled");
@@ -210,12 +238,7 @@ Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeCreate(JNIEnv *env, 
 extern "C" JNIEXPORT void JNICALL
 Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeDestroy(JNIEnv *env, jclass, jlong handle) {
 #ifdef HAS_MPV
-    if (handle) p_terminate(H(handle));
-    // 释放 Surface 全局引用（否则每建一次核泄漏一个 jobject）
-    if (g_surface_ref) {
-        env->DeleteGlobalRef(g_surface_ref);
-        g_surface_ref = nullptr;
-    }
+    if (handle) destroy_instance(env, I(handle));
 #else
     (void)env; (void)handle;
 #endif
@@ -228,7 +251,7 @@ Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeAttachSurface(JNIEnv
                                                  jlong handle, jobject surface) {
 #ifdef HAS_MPV
     if (!handle || !g_mpv_loaded) return JNI_FALSE;
-    return attach_surface(env, H(handle), surface) ? JNI_TRUE : JNI_FALSE;
+    return attach_surface(env, I(handle), surface) ? JNI_TRUE : JNI_FALSE;
 #else
     (void)env; (void)handle; (void)surface; return JNI_FALSE;
 #endif
@@ -241,11 +264,15 @@ Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeDetachSurface(JNIEnv
                                                  jlong handle) {
 #ifdef HAS_MPV
     if (handle && g_mpv_loaded) {
-        if (p_setstr(H(handle), "wid", "0") < 0) LOGW("set wid=0 failed");
+        if (p_setstr(H(handle), "vo", "null") < 0) return;
+        if (p_setstr(H(handle), "wid", "0") < 0) {
+            LOGW("set wid=0 failed; Surface retained until destroy");
+            return;
+        }
     }
-    if (g_surface_ref) {
-        env->DeleteGlobalRef(g_surface_ref);
-        g_surface_ref = nullptr;
+    if (handle && I(handle)->surface) {
+        env->DeleteGlobalRef(I(handle)->surface);
+        I(handle)->surface = nullptr;
     }
 #else
     (void)env; (void)handle;
@@ -257,7 +284,9 @@ Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeCommand(JNIEnv *env,
                                            jlong handle, jstring cmd) {
 #ifdef HAS_MPV
     if (!handle || !g_mpv_loaded) return JNI_FALSE;
+    if (!cmd) return JNI_FALSE;
     const char *c = env->GetStringUTFChars(cmd, nullptr);
+    if (!c) return JNI_FALSE;
     // mpv_command 需要参数数组：按空格拆分（带引号的段保留整体）
     std::vector<std::string> parts;
     std::string cur;
@@ -271,12 +300,16 @@ Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeCommand(JNIEnv *env,
         cur += *p;
     }
     if (!cur.empty()) parts.push_back(cur);
-    env->ReleaseStringUTFChars(cmd, c);
+    if (inQuote || parts.empty()) {
+        env->ReleaseStringUTFChars(cmd, c);
+        return JNI_FALSE;
+    }
     std::vector<const char *> argv;
     for (auto &p : parts) argv.push_back(p.c_str());
     argv.push_back(nullptr);
     int r = p_cmd(H(handle), argv.data());
-    if (r < 0) LOGW("command failed: %s (err=%d)", c, r);
+    if (r < 0) LOGW("command failed (err=%d)", r);
+    env->ReleaseStringUTFChars(cmd, c);
     return r >= 0 ? JNI_TRUE : JNI_FALSE;
 #else
     (void)env; (void)handle; (void)cmd; return JNI_FALSE;
@@ -306,6 +339,12 @@ Java_io_movieclaw_android_core_playback_mpv_MpvNative_nativeGetProperty(JNIEnv *
 #ifdef HAS_MPV
     if (!handle || !g_mpv_loaded) return nullptr;
     const char *n = env->GetStringUTFChars(name, nullptr);
+    // 宿主以 FILE_LOADED 代次判断本次打开完成，不再拿上个文件的 duration 猜时序。
+    if (strcmp(n, "movieclaw-file-loaded") == 0) {
+        std::string generation = std::to_string(I(handle)->loaded_files.load());
+        env->ReleaseStringUTFChars(name, n);
+        return env->NewStringUTF(generation.c_str());
+    }
     char *v = p_getstr(H(handle), n);
     env->ReleaseStringUTFChars(name, n);
     if (!v) return nullptr;

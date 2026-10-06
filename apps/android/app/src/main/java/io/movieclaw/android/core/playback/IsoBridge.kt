@@ -26,6 +26,7 @@ object IsoBridge {
     /** 上次成功探测到的正片（换片时先关再开；同一部片重进会命中原生侧的扫描缓存） */
     @Volatile
     private var currentUrl: String? = null
+    private var currentOwner: Any? = null
 
     /**
      * 打开 ISO 并起本地流服务，返回可交给播放引擎的地址（`http://127.0.0.1:PORT/stream.m2ts`）。
@@ -34,17 +35,40 @@ object IsoBridge {
      * **会阻塞**：开卷与扫描目录是几十次远端小读（原生侧有 4MB 预读窗口兜着），
      * 真机实测几百毫秒到两秒级，所以调用方要放到 IO 线程。
      */
-    fun open(isoUrl: String): String? {
+    @Synchronized
+    fun open(isoUrl: String, owner: Any? = null): String? {
         if (!loaded) return null
         return runCatching {
-            nativeOpenIso(isoUrl).also { currentUrl = it }
+            nativeOpenIso(isoUrl).also {
+                currentUrl = it
+                currentOwner = if (it != null) owner else null
+            }
         }.onFailure { Log.w(TAG, "打开 ISO 失败: ${it.message}") }.getOrNull()
     }
 
+    @Synchronized
     fun close() {
         if (!loaded) return
         currentUrl = null
+        currentOwner = null
         runCatching { nativeCloseIso() }
+    }
+
+    /** 旧会话的异步收尾只能关闭它自己开的卷，不能误关新片；调用方需在 IO 线程执行。 */
+    @Synchronized
+    fun closeIfCurrent(localUrl: String?, owner: Any? = null): Boolean {
+        if (localUrl == null || localUrl != currentUrl) return false
+        if (owner != null && currentOwner !== owner) return false
+        close()
+        return true
+    }
+
+    /** open 的 IO 返回值可能因协程取消而丢失；owner 仍能回收它自己创建的卷。 */
+    @Synchronized
+    fun closeOwner(owner: Any): Boolean {
+        if (currentOwner !== owner) return false
+        close()
+        return true
     }
 
     private external fun nativeOpenIso(url: String): String?

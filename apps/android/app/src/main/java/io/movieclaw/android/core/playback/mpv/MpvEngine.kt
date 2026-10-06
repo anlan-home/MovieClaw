@@ -30,11 +30,16 @@ class MpvEngine(private val context: Context) : PlayerEngine {
     val surfaceView: SurfaceView = SurfaceView(context)
 
     private var handle = 0L
+    private var released = false
+    private var desiredPlaying = true
+    private var desiredSpeed = 1.0f
+    private var pendingInitialAudioIndex: Int? = null
+    private var loadedGenerationBeforeOpen = 0L
 
     /** 引擎自己的字幕渲染：默认关（字幕一律交本机叠层）；只有光盘镜像才翻成开 */
     private var subtitleRendering = false
 
-    /** 这个文件是否已经补落过字幕可见性（见 positionMs 的说明） */
+    /** FILE_LOADED 后才补落文件选项，避免 loadfile 的异步重置覆盖宿主选择。 */
     private var visibilityAppliedForFile = false
     private var surfaceReady = false
     private val pending = ArrayDeque<(Surface) -> Unit>()
@@ -118,8 +123,13 @@ class MpvEngine(private val context: Context) : PlayerEngine {
     }
 
     override fun open(source: EngineSource, sidecars: List<Sidecar>) {
-        // sidecars:MPV 侧外挂字幕走 sub-add,在 M1c 轨道管线统一接;当前忽略
+        if (released) return
+        // sidecars 仍由上层字幕叠层处理。
         visibilityAppliedForFile = false
+        pendingInitialAudioIndex = source.initialAudioRef
+            ?.takeIf { it.startsWith("embedded:") }
+            ?.removePrefix("embedded:")?.toIntOrNull()?.takeIf { it >= 0 }
+        pending.clear() // Surface 未就绪时，替换起播请求，不排队打开已过期的源。
         runWhenSurface { surface ->
             if (handle == 0L) {
                 handle = MpvNative.nativeCreate(surface)
@@ -138,10 +148,12 @@ class MpvEngine(private val context: Context) : PlayerEngine {
                     "start",
                     if (source.startPositionMs > 0) "${source.startPositionMs / 1000.0}" else "none",
                 )
+                loadedGenerationBeforeOpen = fileLoadedGeneration()
                 MpvNative.nativeCommand(handle, "loadfile \"${source.url}\" replace")
                 // 关键时序：`sub-visibility` 是 mpv 的**每文件选项**——loadfile 时会被配置默认值
                 // （yes）重置，所以「建句柄时设一次」保不住（实机：灵魂摆渡仍被 mpv 画了一层，
                 // 和本机叠层叠成两个）。加载之后立刻再落一次，按粘住的开关值来。
+                applyDesiredPlaybackState()
                 applySubtitleVisibility()
             }
         }
@@ -171,17 +183,25 @@ class MpvEngine(private val context: Context) : PlayerEngine {
             (seconds * 1000).toLong()
         }
 
+    private fun fileLoadedGeneration(): Long = if (handle == 0L) 0L else
+        MpvNative.nativeGetProperty(handle, "movieclaw-file-loaded")?.toLongOrNull() ?: 0L
+
+    private fun applyDesiredPlaybackState() {
+        setProperty("pause", if (desiredPlaying) "no" else "yes")
+        setProperty("speed", "$desiredSpeed")
+    }
+
     override fun positionMs(): Long {
-        val ms = getSecondsMs("time-pos")
-        // 字幕可见性要在**文件真正打开之后**才落得住：`sub-visibility` 是 mpv 的每文件选项，
-        // 重置发生在打开文件那一刻，而不是 loadfile 刚返回时（实机时序：我 56.789 落、
-        // mpv 57.662 才打开并重置——落早了就被冲掉，屏幕上仍是 mpv + 本机叠层两层字幕）。
-        // duration 有值 = 文件已打开，这时候补一次，每个文件只补一次。
-        if (!visibilityAppliedForFile && durationMs() > 0) {
+        if (!visibilityAppliedForFile && fileLoadedGeneration() > loadedGenerationBeforeOpen) {
             visibilityAppliedForFile = true
+            applyDesiredPlaybackState()
             applySubtitleVisibility()
+            pendingInitialAudioIndex?.let { index ->
+                trackIds("audio").getOrNull(index)?.let { id -> setProperty("aid", "$id") }
+            }
+            pendingInitialAudioIndex = null
         }
-        return ms
+        return getSecondsMs("time-pos")
     }
 
     override fun durationMs(): Long = getSecondsMs("duration")
@@ -191,7 +211,10 @@ class MpvEngine(private val context: Context) : PlayerEngine {
         return MpvNative.nativeGetProperty(handle, "pause")?.let { it == "no" } ?: false
     }
 
-    override fun setPlaying(playing: Boolean) = setProperty("pause", if (playing) "no" else "yes")
+    override fun setPlaying(playing: Boolean) {
+        desiredPlaying = playing
+        setProperty("pause", if (playing) "no" else "yes")
+    }
 
     override fun seekTo(playerMs: Long) {
         if (handle != 0L) {
@@ -205,7 +228,10 @@ class MpvEngine(private val context: Context) : PlayerEngine {
         }
     }
 
-    override fun setSpeed(speed: Float) = setProperty("speed", "$speed")
+    override fun setSpeed(speed: Float) {
+        desiredSpeed = speed
+        setProperty("speed", "$speed")
+    }
 
     /** track-list JSON 中按类型取轨道 id 序(升序),与服务端枚举序对齐 */
     private fun trackIds(type: String): List<Int> {
@@ -251,6 +277,7 @@ class MpvEngine(private val context: Context) : PlayerEngine {
     }
 
     override fun selectAudioIndex(index: Int) {
+        pendingInitialAudioIndex = null
         trackIds("audio").getOrNull(index)?.let { setProperty("aid", "$it") }
     }
 
@@ -267,6 +294,9 @@ class MpvEngine(private val context: Context) : PlayerEngine {
         handle != 0L && MpvNative.nativeGetProperty(handle, "paused-for-cache") == "yes"
 
     override fun release() {
+        released = true
+        surfaceView.holder.removeCallback(holderCallback)
+        surfaceReady = false
         if (handle != 0L) {
             MpvNative.nativeDestroy(handle)
             handle = 0L
