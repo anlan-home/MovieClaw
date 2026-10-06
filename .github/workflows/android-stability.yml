@@ -1,13 +1,15 @@
 name: Android stability
 
 on:
+  # 分支列表同时含 main（上游主分支）与 android（本仓库开发分支）：合并到上游后，
+  # main 上的改动也照跑；只写 [android] 的话上游 CI 里这条永远不触发。
   pull_request:
-    branches: [android]
+    branches: [main, android]
     paths:
       - 'apps/android/**'
       - '.github/workflows/android-stability.yml'
   push:
-    branches: [android]
+    branches: [main, android]
     paths:
       - 'apps/android/**'
       - '.github/workflows/android-stability.yml'

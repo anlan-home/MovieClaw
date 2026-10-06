@@ -21,7 +21,7 @@ echo "sdk.dir=<你的 Android SDK 路径>" > local.properties   # 或设 ANDROID
 ### 预编译依赖(FFmpeg / mpv / libass)
 
 `app/src/main/jniLibs/arm64-v8a/` 下的 10 个 `.so` 是第三方二进制(入库前约 116MB、
-strip 进 APK 后约 33MB),**不入库**,作为 [Release 附件](https://github.com/anlan-home/MovieClaw/releases/tag/android-native-libs) 提供:
+strip 进 APK 后约 33MB),**不入库**,作为 [Release 附件](https://github.com/movieclaw/MovieClaw/releases/tag/android-native-libs) 提供:
 
 | 文件 | 作用 |
 | --- | --- |
@@ -40,6 +40,13 @@ dlopen;缺库时 `MpvNative.available` 为 false,应用干净地只用 Exo 内�
 
 二进制再分发注意许可:mpv GPL-2.0+、FFmpeg LGPL-2.1+ 或 GPL-2.0+(视构建开关)、
 libass ISC、libc++ Apache-2.0 with LLVM exception;附件里的 `NOTICE.md` 有逐项来源。
+
+附件地址写在 `gradle.properties` 的 `nativeLibsUrl`(换地址时 `nativeLibsSha256` 要同步换)。
+想从别处取(镜像 / fork / 本地文件),按这个优先级覆盖,不必改仓库里的文件:
+
+1. 命令行:`./gradlew :app:assembleRelease -PnativeLibsUrl=<url> -PnativeLibsSha256=<sha256>`
+2. `local.properties`(机器本地、不入库)加 `nativeLibsUrl=` / `nativeLibsSha256=`
+3. 仓库 `gradle.properties` 里的默认值
 
 ## 代码结构
 

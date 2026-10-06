@@ -1,6 +1,7 @@
 import java.net.URI
 import java.security.MessageDigest
 import java.time.LocalDate
+import java.util.Properties
 import java.util.zip.ZipInputStream
 import org.gradle.api.DefaultTask
 import org.gradle.api.provider.Property
@@ -157,11 +158,23 @@ abstract class DownloadNativeLibsTask : DefaultTask() {
 
 /**
  * 发布附件地址与校验和（换版本改 gradle.properties 里那两行）。
- * 这里全部落成 `File` / 字符串常量，供任务在配置期读取。
+ * 覆盖优先级：`-P` > `local.properties`（机器本地、不入库）> `gradle.properties` > 这里的默认值
+ * ——所以镜像 / fork / 本地文件都不必改仓库里的文件（见 README 的「预编译依赖」一节）。
  */
-val nativeLibsUrl: String = (findProperty("nativeLibsUrl") as String?)
-    ?: "https://github.com/anlan-home/MovieClaw/releases/download/android-native-libs/movieclaw-android-native-arm64-v8a.zip"
-val nativeLibsSha256: String = (findProperty("nativeLibsSha256") as String?)
+fun localProperty(key: String): String? {
+    val file = rootProject.file("local.properties")
+    if (!file.isFile) return null
+    return Properties().apply { file.inputStream().use(::load) }.getProperty(key)
+}
+
+val cliProperties = project.gradle.startParameter.projectProperties
+val nativeLibsUrl: String = cliProperties["nativeLibsUrl"]
+    ?: localProperty("nativeLibsUrl")
+    ?: (findProperty("nativeLibsUrl") as String?)
+    ?: "https://github.com/movieclaw/MovieClaw/releases/download/android-native-libs/movieclaw-android-native-arm64-v8a.zip"
+val nativeLibsSha256: String = cliProperties["nativeLibsSha256"]
+    ?: localProperty("nativeLibsSha256")
+    ?: (findProperty("nativeLibsSha256") as String?)
     ?: "c64766c609d6e8b1096385e0fdac46ba810e06a30b81176d809ad96ff7277f72"
 
 /** 跳过自动下载（离线打包用 -PskipNativeLibsDownload=true） */
