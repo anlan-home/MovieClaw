@@ -190,6 +190,10 @@ private fun androidx.compose.foundation.layout.BoxScope.LiquidCapsule(
     var pillMoving by remember { mutableStateOf(false) }
     var dragActive by remember { mutableStateOf(false) }
     var springEpoch by remember { mutableIntStateOf(0) }
+    // 首次落位（见下面的弹簧循环）：底栏被「移出合成再回来」（去设置页返回、跳别的路由再回来）
+    // 时 remember 重建、pillX 回到初值 0，胶囊就会从最左格一路弹到当前页签——看着就是闪一下
+    // （实机反馈：从服务器设置退出时）。第一次拿到有效几何且没有按压预览时直接落位，之后才走弹簧。
+    var pillPlaced by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     // 换页兜底：无论手势收尾在哪条路径上漏掉（被取消/指针流中断），换页后都把辉光熄掉
@@ -373,6 +377,16 @@ private fun androidx.compose.foundation.layout.BoxScope.LiquidCapsule(
                 if (TabBarMinimize.minimized) return@LaunchedEffect
                 val targetCell = previewCell ?: selectedIndex
                 val target = cellWpx * targetCell
+                // 首次落位：几何有效（tabsW > 0）且没有按压预览时，直接落到目标格、不做弹簧动画。
+                // 不然重建后 pillX=0，会从最左格弹到当前页签（一闪）。按压预览一律走弹簧——
+                // 那是用户手指下的即时反馈，瞬移反而会像「瞬移，没有滑动动画」。
+                if (!pillPlaced) {
+                    if (tabsW.value > 0f && previewCell == null) {
+                        pillPlaced = true
+                        pillX = target; pillV = 0f; pillMoving = false
+                    }
+                    return@LaunchedEffect
+                }
                 if (abs(pillX - target) < 0.5f && abs(pillV) < 1f) {
                     pillX = target; pillV = 0f; pillMoving = false
                     return@LaunchedEffect

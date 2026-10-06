@@ -25,18 +25,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Notifications
-import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.SystemUpdateAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -49,7 +44,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,7 +69,6 @@ import io.movieclaw.android.core.designsystem.McTabBarContentPadding
 import io.movieclaw.android.core.designsystem.McTopBar
 import io.movieclaw.android.core.designsystem.McTopBarVariant
 import io.movieclaw.android.core.designsystem.McType
-import io.movieclaw.android.core.designsystem.RemoteImage
 import io.movieclaw.android.core.designsystem.tabGlassSource
 import io.movieclaw.android.core.designsystem.MenuSurface
 import io.movieclaw.android.core.designsystem.TextFaint
@@ -91,7 +84,6 @@ import io.movieclaw.android.core.network.dataOrThrow
 import io.movieclaw.android.core.network.friendlyMessage
 import io.movieclaw.android.core.session.LocalPermissions
 import io.movieclaw.android.core.session.SessionRepository
-import io.movieclaw.android.core.session.initials
 import javax.inject.Inject
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -275,16 +267,7 @@ class MoreViewModel @Inject constructor(
     }
 }
 
-/**
- * 「我的」—— 版式照 iOS `MorePage.swift`（Web `/my` 同构）：
- *   账户卡（头像 56 + 昵称 + 身份小字，整卡进「个人信息」）
- *   → 提醒组（仅管理员、有事才出现：待处理红字+条数胶囊 / 「新版本 vX / 新识别模型 X」）
- *   → 服务器设置（**按用户要求保留本页原有的服务器分组**：设置 + 已保存的服务器 /
- *     客户端 / 成员权限，账户卡之外的部分不再照 iOS 收成一行）
- *   → 最近会话（仅管理员：首行「新会话」+ 会话列表，长按出三项菜单）。
- *
- * 顶栏用**大标题**（同活动页 `largeTitle`），**右上角没有搜索键**（用户要求去掉）。
- */
+/** 账号、连接、外观与最近会话；各入口保留原有权限和导航行为。 */
 @Composable
 fun MoreScreen(
     /** 账户卡 → 个人信息（同 iOS：整张卡点进个人信息，不垫设置列表） */
@@ -341,7 +324,9 @@ fun MoreScreen(
         ) {
             // ── 账户卡（头像 + 昵称 + 身份小字 + 雪佛龙，整卡进「个人信息」）──
             item(key = "profile") {
-                AccountRow(session = ui.session, origin = vm.origin, onClick = onOpenProfile)
+                Box(Modifier.padding(horizontal = McMetrics.pagePadding, vertical = 8.dp)) {
+                    MoreAccountCard(session = ui.session, origin = vm.origin, onClick = onOpenProfile)
+                }
             }
 
             // ── 提醒组（仅管理员，且「有事」才出现；待处理 30 秒轮询）──
@@ -371,49 +356,17 @@ fun MoreScreen(
                 }
             }
 
-            // ── 服务器（按你的要求：保留本页原有的这一组，只有账户卡按 iOS 进了「个人信息」）──
+            // 连接信息只出现一次；外观开关独立分组，客户端版本放到页尾。
             item(key = "server") {
-                GroupLabel("服务器", modifier = Modifier.padding(top = 22.dp))
-                FlatCard(Modifier.padding(horizontal = McMetrics.pagePadding).fillMaxWidth()) {
-                    FlatRow(
-                        title = "服务器设置",
-                        subtitle = ui.origin,
-                        icon = Icons.Rounded.Settings,
-                        onClick = onOpenSettings,
-                    )
-                    RowDivider()
-                    FlatRow(
-                        title = "地址",
-                        subtitle = ui.origin ?: "-",
-                        icon = Icons.Rounded.Language,
-                        showChevron = false,
-                    )
-                    RowDivider()
-                    FlatRow(title = "已保存的服务器", subtitle = "${servers.size} 个", showChevron = false)
-                    RowDivider()
-                    FlatRow(
-                        title = "客户端",
-                        subtitle = "MovieClaw-Android/${BuildInfo.APP_VERSION}",
-                        showChevron = false,
-                    )
-                    RowDivider()
-                    // 底栏形态 A/B 试用：开 = 液态玻璃新版（弹簧胶囊 / 按压辉光 / 高光边 /
-                    // 收缩形态对齐 / 拖动擦选），关 = 当前形态。两边对齐稳定后删一边
-                    FlatRow(
-                        title = "底栏液态玻璃",
-                        subtitle = "试用：新版底栏动效与形态；关 = 当前形态",
-                        icon = Icons.Rounded.Star,
-                        showChevron = false,
-                        trailing = {
-                            Switch(
-                                checked = liquidTabBar,
-                                onCheckedChange = { vm.setLiquidTabBar(it) },
-                                colors = SwitchDefaults.colors(checkedTrackColor = Accent),
-                            )
-                        },
-                    )
-                    RowDivider()
-                    FlatRow(title = "成员权限", subtitle = capabilityText(ui.session), showChevron = false)
+                GroupLabel("连接", modifier = Modifier.padding(top = 16.dp))
+                Box(Modifier.padding(horizontal = McMetrics.pagePadding)) {
+                    MoreConnectionCard(origin = ui.origin, savedCount = servers.size, onClick = onOpenSettings)
+                }
+            }
+            item(key = "appearance") {
+                GroupLabel("显示与外观", modifier = Modifier.padding(top = 20.dp))
+                Box(Modifier.padding(horizontal = McMetrics.pagePadding)) {
+                    MoreAppearanceCard(liquidTabBar, vm::setLiquidTabBar)
                 }
             }
 
@@ -421,7 +374,11 @@ fun MoreScreen(
             if (permissions.isAdmin) {
                 item(key = "sessions") {
                     GroupLabel("最近会话", modifier = Modifier.padding(top = 22.dp))
-                    FlatCard(Modifier.padding(horizontal = McMetrics.pagePadding).fillMaxWidth()) {
+                    if (sessions.items.isEmpty() && !sessions.loading && sessions.error == null) {
+                        Box(Modifier.padding(horizontal = McMetrics.pagePadding)) {
+                            MoreEmptySessions(onOpenNewSession)
+                        }
+                    } else FlatCard(Modifier.padding(horizontal = McMetrics.pagePadding).fillMaxWidth()) {
                         FlatRow(
                             title = "新会话",
                             icon = Icons.Rounded.Add,
@@ -441,12 +398,6 @@ fun MoreScreen(
                     when {
                         sessions.items.isEmpty() && sessions.loading -> Text(
                             "正在读取会话…",
-                            style = McType.caption,
-                            color = TextFaint,
-                            modifier = Modifier.padding(start = McMetrics.pagePadding + 4.dp, top = 12.dp),
-                        )
-                        sessions.items.isEmpty() -> Text(
-                            "还没有会话，点上方的「新会话」开始。",
                             style = McType.caption,
                             color = TextFaint,
                             modifier = Modifier.padding(start = McMetrics.pagePadding + 4.dp, top = 12.dp),
@@ -471,14 +422,21 @@ fun MoreScreen(
             if (ui.cached) {
                 item(key = "cached-note") {
                     Text(
-                        "已用本地快照渲染，后台校验中",
+                        "正在刷新账号信息…",
                         style = McType.micro,
                         color = TextFaint,
                         modifier = Modifier.padding(start = McMetrics.pagePadding, top = 12.dp),
                     )
                 }
             }
-            item(key = "tail") { Spacer(Modifier.height(16.dp)) }
+            item(key = "tail") {
+                Text(
+                    "MovieClaw Android · ${BuildInfo.APP_VERSION}",
+                    style = McType.micro, color = TextFaint,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 22.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
         }
 
         // 顶栏：大标题（同活动页 `largeTitle`），**右上角不再有搜索键**
@@ -736,86 +694,4 @@ private fun RowDivider() {
             .height(1.dp)
             .background(LineSoft),
     )
-}
-
-/**
- * 账户卡：头像 56 + 昵称 + 身份小字 + 雪佛龙，整卡点进「个人信息」。
- *
- * 身份小字照 iOS `MorePage.identityLine`：**昵称与用户名相同时只写角色**（不重复写一遍
- * `@用户名`），不同才写 `@用户名 · 角色`。服务器地址不再挤在这一行（服务器分组里已有「地址」）。
- */
-@Composable
-private fun AccountRow(session: SessionView?, origin: String?, onClick: () -> Unit) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = McMetrics.pagePadding, vertical = 14.dp),
-    ) {
-        // 有同步头像显示头像（iOS MorePage / 网页 AvatarBadge 同口径），否则首字徽标
-        if (!session?.avatarUrl.isNullOrBlank()) {
-            RemoteImage(
-                url = session?.avatarUrl,
-                origin = origin,
-                widthHint = 192,
-                contentDescription = session?.nickname,
-                modifier = Modifier.size(56.dp).clip(CircleShape),
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .size(56.dp)
-                    .background(Brush.linearGradient(listOf(Color.White, Color(0xFFDFE4EC))), CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(session.initials(), style = McType.title2, color = Color(0xFF141821))
-            }
-        }
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                session?.nickname?.takeIf { it.isNotBlank() } ?: session?.username ?: "未登录",
-                style = McType.title3,
-                color = TextPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(3.dp))
-            Text(identityLine(session), style = McType.body, color = TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        Icon(
-            Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-            contentDescription = null,
-            tint = TextFaint,
-            modifier = Modifier.size(15.dp),
-        )
-    }
-}
-
-/** 身份小字（iOS `identityLine`）：昵称与用户名相同时只写角色 */
-private fun identityLine(session: SessionView?): String {
-    if (session == null) return "未登录"
-    val nickname = session.nickname?.takeIf { it.isNotBlank() }
-    return if (nickname != null && nickname != session.username) {
-        "@${session.username} · ${roleLabel(session.role)}"
-    } else {
-        roleLabel(session.role)
-    }
-}
-
-private fun roleLabel(role: String?): String = when (role) {
-    "admin" -> "超级管理员"
-    "member" -> "成员"
-    else -> "访客"
-}
-
-private fun capabilityText(session: SessionView?): String {
-    val caps = session?.capabilities ?: return "-"
-    return listOfNotNull(
-        // 「站点搜索」已更名「资源搜索」（member-permissions-v2）：搜影视、搜媒体库不受这个开关限制
-        if (caps.allowSearch) "资源搜索" else null,
-        if (caps.allowSubscribe) "订阅" else null,
-        if (caps.allowDirectDownload) "一键下载" else null,
-    ).ifEmpty { listOf("仅浏览") }.joinToString(" / ")
 }
