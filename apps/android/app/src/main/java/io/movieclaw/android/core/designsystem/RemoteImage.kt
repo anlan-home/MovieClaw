@@ -56,7 +56,7 @@ fun RemoteImage(
         val loaders = (context as io.movieclaw.android.MovieClawApp).imageLoaders
         if (guest) loaders.guestLoader else loaders.loader
     }
-    var failed by remember { mutableStateOf(false) }
+    var failed by remember(url, origin, guest) { mutableStateOf(false) }
     if (failed) {
         if (fallback != null) fallback() else PosterPlaceholder(seed = url, modifier = modifier)
         return

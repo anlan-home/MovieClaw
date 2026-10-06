@@ -49,6 +49,19 @@ class NetworkIdentityProtocolTest {
 
     @After fun tearDown() { server.shutdown() }
     private fun origin(): String = server.url("/").toString().trimEnd('/')
+
+    @Test fun `discovery source selection uses provider query and decodes selected feed`() = runBlocking {
+        listOf("tmdb", "douban").forEach { provider ->
+            server.enqueue(envelope("""{"provider":"$provider","media_type":"movie","sections":[{"collection_ref":"$provider:movie:hot","title":"热门"}]}"""))
+            val page = factory.forOrigin(origin()).discoveryPage("movie", source = provider).dataOrThrow()
+            val request = server.takeRequest()
+            assertEquals("/api/v1/ui/discovery/movie", request.requestUrl!!.encodedPath)
+            assertEquals(provider, request.requestUrl!!.queryParameter("provider"))
+            assertNull(request.requestUrl!!.queryParameter("source"))
+            assertEquals(provider, page.provider)
+            assertEquals("$provider:movie:hot", page.sections.single().collectionRef)
+        }
+    }
     private fun envelope(data: String) = MockResponse().setBody("""{"success":true,"code":"OK","message":"","data":$data}""")
 
     @Test fun `error logging preserves status and path without credentials or response body`() {

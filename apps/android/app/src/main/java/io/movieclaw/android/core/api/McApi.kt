@@ -891,7 +891,7 @@ interface McApi {
     suspend fun discoveryPage(
         @Path("mediaType") mediaType: String,
         /** tmdb / douban */
-        @Query("source") source: String? = null,
+        @Query("provider") source: String? = null,
         /** TMDB 类型 ID，逗号分隔 */
         @Query("genres") genres: String? = null,
         /** ISO 国家码 */
