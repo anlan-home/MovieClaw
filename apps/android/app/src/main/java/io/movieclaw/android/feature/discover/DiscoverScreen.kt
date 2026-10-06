@@ -489,6 +489,12 @@ fun DiscoverScreen(
                     contentFade = (1f - scroll.value / 260f).coerceIn(0f, 1f),
                 )
             }
+            // 非沉浸档：服务端没给 hero（豆瓣源）或 hero 还没到（骨架态）时，正文让出悬浮顶栏
+            // 占的那一段——否则首行标题会顶到状态栏、被顶栏压住（豆瓣源的实机反馈）。
+            // 有 hero 才是沉浸式（大图从屏幕顶边铺下来），与 iOS `immersive` 同一判据；
+            // 这一条同时覆盖骨架态（`rows` 空）与 hero 行没内容被滤掉的情况（装载是 awaitAll
+            // 一次性赋值，不存在「声明了 hero 但 slides 未到」的中间态，所以不必再画骨架）。
+            if (heroSlides.isEmpty()) Spacer(Modifier.height(topBarTotal))
 
         when {
             state.loading && state.rows.isEmpty() -> Column {
