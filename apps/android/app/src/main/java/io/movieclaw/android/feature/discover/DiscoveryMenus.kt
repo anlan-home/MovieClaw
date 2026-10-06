@@ -56,13 +56,17 @@ import io.movieclaw.android.core.designsystem.TextPrimary
  * 发现页的筛选状态 —— 口径与移动端网页 lib/discovery-filters.ts 一致：
  * 类型传 **TMDB 数字 ID**、国家传 **ISO 码**，其余传原始值；URL 是筛选状态的唯一来源。
  * 「全部」胶囊的文案规则也来自那里：没选 = 全部；选一项 = 该项值；多选 = 首项 +N。
+ *
+ * 字段名同网页 / iOS 的 `DiscoveryFilters`（`originCountry` / `ratingGte` / `runtimeLte`）：
+ * 与服务端参数一一对应，翻译层（`McApi.discoverTitles`）就是纯搬运——此前叫
+ * `country` / `rating` / `runtime`，翻译时对成了不存在的参数名，条件全部静默失效。
  */
 data class DiscoveryFilter(
     val genreIds: List<String> = emptyList(),
-    val country: String? = null,
+    val originCountry: String? = null,
     val year: String? = null,
-    val rating: String? = null,
-    val runtime: String? = null,
+    val ratingGte: String? = null,
+    val runtimeLte: String? = null,
     val sort: String? = null,
 ) {
     /**
@@ -72,10 +76,10 @@ data class DiscoveryFilter(
     val activeCount: Int
         get() = listOf(
             genreIds.isNotEmpty(),
-            country != null,
+            originCountry != null,
             year != null,
-            rating != null,
-            runtime != null,
+            ratingGte != null,
+            runtimeLte != null,
             sort != null && sort != DEFAULT_SORT,
         ).count { it }
 
@@ -196,10 +200,10 @@ private fun dimValue(dim: Dim, filter: DiscoveryFilter): String = when (dim.key)
         filter.genreIds.size == 1 -> GenreLabel[filter.genreIds.first()] ?: "1 个类型"
         else -> "${GenreLabel[filter.genreIds.first()] ?: ""} +${filter.genreIds.size - 1}"
     }
-    "country" -> filter.country?.let { CountryLabel[it] ?: it } ?: "不限"
+    "country" -> filter.originCountry?.let { CountryLabel[it] ?: it } ?: "不限"
     "year" -> filter.year ?: "不限"
-    "rating" -> filter.rating?.let { "$it 分以上" } ?: "不限"
-    "runtime" -> filter.runtime?.let { "$it 分钟以内" } ?: "不限"
+    "rating" -> filter.ratingGte?.let { "$it 分以上" } ?: "不限"
+    "runtime" -> filter.runtimeLte?.let { "$it 分钟以内" } ?: "不限"
     else -> filter.sort?.takeIf { it != DEFAULT_SORT }
         ?.let { s -> SORT_OPTIONS.firstOrNull { it.first == s }?.second ?: s } ?: "热门优先"
 }
@@ -222,10 +226,10 @@ private const val DEFAULT_SORT = "popular"
 
 private fun dimEnabled(dim: Dim, filter: DiscoveryFilter): Boolean = when (dim.key) {
     "genres" -> filter.genreIds.isNotEmpty()
-    "country" -> filter.country != null
+    "country" -> filter.originCountry != null
     "year" -> filter.year != null
-    "rating" -> filter.rating != null
-    "runtime" -> filter.runtime != null
+    "rating" -> filter.ratingGte != null
+    "runtime" -> filter.runtimeLte != null
     // 默认档「热门优先」不算启用（与 activeCount 同口径）
     else -> filter.sort != null && filter.sort != DEFAULT_SORT
 }
@@ -255,10 +259,10 @@ fun DiscoveryFilterOptionsPanel(
             dim.options.forEach { (value, label) ->
                 val on = when (dim.key) {
                     "genres" -> filter.genreIds.contains(value)
-                    "country" -> filter.country == value
+                    "country" -> filter.originCountry == value
                     "year" -> filter.year == value
-                    "rating" -> filter.rating == value
-                    "runtime" -> filter.runtime == value
+                    "rating" -> filter.ratingGte == value
+                    "runtime" -> filter.runtimeLte == value
                     else -> filter.sort == value
                 }
                 OptionRow(label, selected = on) { onApply(toggle(dim.key, value, filter)) }
@@ -269,19 +273,19 @@ fun DiscoveryFilterOptionsPanel(
 
 private fun clear(key: String, f: DiscoveryFilter): DiscoveryFilter = when (key) {
     "genres" -> f.copy(genreIds = emptyList())
-    "country" -> f.copy(country = null)
+    "country" -> f.copy(originCountry = null)
     "year" -> f.copy(year = null)
-    "rating" -> f.copy(rating = null)
-    "runtime" -> f.copy(runtime = null)
+    "rating" -> f.copy(ratingGte = null)
+    "runtime" -> f.copy(runtimeLte = null)
     else -> f.copy(sort = null)
 }
 
 private fun toggle(key: String, value: String, f: DiscoveryFilter): DiscoveryFilter = when (key) {
     "genres" -> f.copy(genreIds = if (f.genreIds.contains(value)) f.genreIds - value else f.genreIds + value)
-    "country" -> f.copy(country = if (f.country == value) null else value)
+    "country" -> f.copy(originCountry = if (f.originCountry == value) null else value)
     "year" -> f.copy(year = if (f.year == value) null else value)
-    "rating" -> f.copy(rating = if (f.rating == value) null else value)
-    "runtime" -> f.copy(runtime = if (f.runtime == value) null else value)
+    "rating" -> f.copy(ratingGte = if (f.ratingGte == value) null else value)
+    "runtime" -> f.copy(runtimeLte = if (f.runtimeLte == value) null else value)
     else -> f.copy(sort = if (f.sort == value) null else value)
 }
 

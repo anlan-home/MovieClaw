@@ -156,9 +156,10 @@ class DiscoverViewModel @Inject constructor(
     val source: String get() = _ui.value.source
     val filters: DiscoveryFilter get() = _ui.value.filters
 
+    /** 切源清空筛选条件（iOS「切类型保留数据源、切数据源保留类型，**都清空筛选**，同 Web」） */
     fun switchSource(source: String) {
         if (_ui.value.source == source) return
-        _ui.update { it.copy(source = source, rows = emptyList()) }
+        _ui.update { it.copy(source = source, filters = DiscoveryFilter(), rows = emptyList()) }
         refresh()
     }
 
@@ -226,11 +227,11 @@ class DiscoverViewModel @Inject constructor(
             runCatching {
                 apiFactory.forOrigin(origin).discoverTitles(
                     mediaType = s.mediaType,
-                    genres = s.filters.genreIds.takeIf { it.isNotEmpty() }?.joinToString(","),
-                    country = s.filters.country,
+                    genreIds = s.filters.genreIds.takeIf { it.isNotEmpty() },
+                    originCountry = s.filters.originCountry,
                     year = s.filters.year,
-                    rating = s.filters.rating,
-                    runtime = s.filters.runtime,
+                    ratingGte = s.filters.ratingGte,
+                    runtimeLte = s.filters.runtimeLte,
                     sort = s.filters.sort,
                     page = 1,
                 ).dataOrThrow().jsonObject
@@ -269,11 +270,11 @@ class DiscoverViewModel @Inject constructor(
             runCatching {
                 apiFactory.forOrigin(origin).discoverTitles(
                     mediaType = s.mediaType,
-                    genres = s.filters.genreIds.takeIf { it.isNotEmpty() }?.joinToString(","),
-                    country = s.filters.country,
+                    genreIds = s.filters.genreIds.takeIf { it.isNotEmpty() },
+                    originCountry = s.filters.originCountry,
                     year = s.filters.year,
-                    rating = s.filters.rating,
-                    runtime = s.filters.runtime,
+                    ratingGte = s.filters.ratingGte,
+                    runtimeLte = s.filters.runtimeLte,
                     sort = s.filters.sort,
                     page = next,
                 ).dataOrThrow().jsonObject
@@ -295,9 +296,12 @@ class DiscoverViewModel @Inject constructor(
         }
     }
 
+    /** 切类型也清空筛选条件（见 [switchSource]） */
     fun switchMediaType(mediaType: String) {
         if (_ui.value.mediaType == mediaType) return
-        _ui.update { it.copy(mediaType = mediaType, rows = emptyList(), filtered = emptyList()) }
+        _ui.update {
+            it.copy(mediaType = mediaType, filters = DiscoveryFilter(), rows = emptyList(), filtered = emptyList())
+        }
         refresh()
     }
 
@@ -314,15 +318,10 @@ class DiscoverViewModel @Inject constructor(
             val api = apiFactory.forOrigin(origin)
             try {
                 // 首页数据并行拉取:继续观看、资料库、服务端编排的发现页板块
+                // （板块接口只认 provider；筛选不走这里，见 McApi.discoveryPage）
                 val pageDeferred = async { runCatching { api.discoveryPage(
                         mediaType = _ui.value.mediaType,
                         source = _ui.value.source,
-                        genres = _ui.value.filters.genreIds.takeIf { it.isNotEmpty() }?.joinToString(","),
-                        country = _ui.value.filters.country,
-                        year = _ui.value.filters.year,
-                        rating = _ui.value.filters.rating,
-                        runtime = _ui.value.filters.runtime,
-                        sort = _ui.value.filters.sort,
                     ).dataOrThrow() }.getOrNull() }
 
                 val rows = pageDeferred.await()?.sections?.let { sections ->

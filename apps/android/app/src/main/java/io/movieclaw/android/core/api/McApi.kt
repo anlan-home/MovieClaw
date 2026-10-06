@@ -887,35 +887,38 @@ interface McApi {
         @Body body: io.movieclaw.android.core.model.UiPreferencesSetting,
     ): McEnvelope<io.movieclaw.android.core.model.UiPreferencesSetting>
 
+    /**
+     * 发现页展示编排（分区引用与呈现方式）。服务端这条路由**只认 provider**
+     * （`/ui/discovery/{media_type}?provider=`，网页与 iOS 也只发它）——筛选不走这里，
+     * 条件生效时正文换成 [discoverTitles] 的结果网格。
+     */
     @GET("ui/discovery/{mediaType}")
     suspend fun discoveryPage(
         @Path("mediaType") mediaType: String,
         /** tmdb / douban */
         @Query("provider") source: String? = null,
-        /** TMDB 类型 ID，逗号分隔 */
-        @Query("genres") genres: String? = null,
-        /** ISO 国家码 */
-        @Query("country") country: String? = null,
-        @Query("year") year: String? = null,
-        @Query("rating") rating: String? = null,
-        @Query("runtime") runtime: String? = null,
-        @Query("sort") sort: String? = null,
     ): McEnvelope<DiscoveryPage>
 
     /** 发现页筛选（chips 用的可选值：类型/国家/年份/评分/片长） */
     @GET("discover/filters")
     suspend fun discoveryFilters(@Query("media_type") mediaType: String = "movie"): McEnvelope<JsonElement>
 
-    /** 筛选结果（与 discoveryPage 同一套参数，返回平铺列表 + 分页） */
+    /**
+     * 筛选结果（服务端 `discover.filter-titles`：TMDB 原生 discover 分页 + 平铺列表）。
+     * 参数名逐项对齐契约——**此前这四个名字都是错的**（`genres`/`country`/`rating`/`runtime`），
+     * 服务端对不认识的参数静默忽略，表现就是「条件点了没反应」：
+     * `genre_ids` 是**重复参数**（`genre_ids=35&genre_ids=18`，不是逗号串）、`origin_country`
+     * （ISO 两字母）、`rating_gte`、`runtime_lte`。这条路由是 TMDB 专属，**没有** provider/source
+     * 参数——豆瓣源不给筛选（见 DiscoverScreen 按 tmdb 收窄入口）。
+     */
     @GET("discover/titles")
     suspend fun discoverTitles(
         @Query("media_type") mediaType: String = "movie",
-        @Query("source") source: String = "tmdb",
-        @Query("genres") genres: String? = null,
-        @Query("country") country: String? = null,
+        @Query("genre_ids") genreIds: List<String>? = null,
+        @Query("origin_country") originCountry: String? = null,
         @Query("year") year: String? = null,
-        @Query("rating") rating: String? = null,
-        @Query("runtime") runtime: String? = null,
+        @Query("rating_gte") ratingGte: String? = null,
+        @Query("runtime_lte") runtimeLte: String? = null,
         @Query("sort") sort: String? = null,
         @Query("page") page: Int = 1,
     ): McEnvelope<JsonElement>

@@ -326,4 +326,34 @@ class NetworkIdentityProtocolTest {
         bus.publish(link)
         assertEquals(link, bus.pendingShare.value)
     }
+
+    @Test fun `discover filter sends server parameter names and repeats genre ids`() = runBlocking {
+        // 服务端契约（OpenAPI / iOS 生成客户端 / 网页同口径）：`genre_ids` 是**重复参数**、
+        // `origin_country` / `rating_gte` / `runtime_lte`；这条路由是 TMDB 专属，没有 provider/source。
+        // 此前安卓发的是 genres（逗号串）/ country / rating / runtime —— 服务端对不认识的参数
+        // 静默忽略，表现就是「筛选条件点了没反应」（PR #2 讨论里抓到的）。
+        server.enqueue(envelope("{}"))
+        factory.forOrigin(origin()).discoverTitles(
+            mediaType = "movie",
+            genreIds = listOf("35", "18"),
+            originCountry = "CN",
+            year = "2024",
+            ratingGte = "7",
+            runtimeLte = "120",
+            sort = "rating",
+            page = 2,
+        ).dataOrThrow()
+        val url = server.takeRequest().requestUrl!!
+        assertEquals("/api/v1/discover/titles", url.encodedPath)
+        assertEquals(listOf("35", "18"), url.queryParameterValues("genre_ids"))
+        assertEquals("CN", url.queryParameter("origin_country"))
+        assertEquals("2024", url.queryParameter("year"))
+        assertEquals("7", url.queryParameter("rating_gte"))
+        assertEquals("120", url.queryParameter("runtime_lte"))
+        assertEquals("rating", url.queryParameter("sort"))
+        assertEquals("2", url.queryParameter("page"))
+        listOf("source", "provider", "genres", "country", "rating", "runtime").forEach {
+            assertNull("这条路由不认这个参数，发了也没用：$it", url.queryParameter(it))
+        }
+    }
 }
