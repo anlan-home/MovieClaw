@@ -222,7 +222,10 @@ fun AppNav() {
                 onOpenItem = { libId, itemId -> navController.navigate("item/$libId/$itemId") },
             )
         }
-        composable("libraryManage") { entry ->
+        composable(
+            "libraryManage?tab={tab}",
+            arguments = listOf(androidx.navigation.navArgument("tab") { defaultValue = "" }),
+        ) { entry ->
             if (!adminOnly(navController)) return@composable
             LibraryManageScreen(
                 onBack = { navController.popBackStack() },
@@ -232,6 +235,8 @@ fun AppNav() {
                     if ((libraryId ?: -1L) > 0) navController.navigate("libraryForm?libraryId=$libraryId")
                     else navController.navigate("libraryForm")
                 },
+                // 详情页文件区「处理重复」带页签进来（iOS `.libraryManage(tab: "duplicates")`）
+                initialTab = entry.arguments?.getString("tab")?.toIntOrNull(),
             )
         }
         // 批准设备登录（v0.31 /activate 的对应页）
@@ -465,6 +470,8 @@ fun AppNav() {
                 },
                 // 演职员 → 库内影人页（iOS `LibraryItemDetailView` 的 `.person`）
                 onOpenPerson = { tmdbPersonId -> navController.navigate("person/$tmdbPersonId") },
+                // 文件区「处理重复」→ 媒体库管理的「重复文件」页签（iOS `.libraryManage(tab: "duplicates")`）
+                onOpenDuplicates = { navController.navigate("libraryManage?tab=2") },
             )
         }
         composable("player") {

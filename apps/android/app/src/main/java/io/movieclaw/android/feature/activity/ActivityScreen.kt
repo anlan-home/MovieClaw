@@ -384,6 +384,10 @@ internal fun SectionLabel(
 @Composable
 private fun PlaybackSessionCard(session: ActivePlaybackSession, onEnd: () -> Unit) {
     FlatCard(Modifier.padding(horizontal = McMetrics.pagePadding).fillMaxWidth()) {
+        // FlatCard 只有底色与描边，内边距由调用方给（网页 `ActivityCard` 手机档 p-3 / pb-3.5；
+        // 本端统一 14dp，与「进行中」任务卡同款）。此前这张卡漏了内距：设备行贴着卡片左边、
+        // 顶到圆角上，进度条还压着底边——看着像被裁了一刀（实机反馈）。
+        Column(Modifier.padding(14.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(
@@ -421,6 +425,7 @@ private fun PlaybackSessionCard(session: ActivePlaybackSession, onEnd: () -> Uni
         session.progressPercent?.let { percent ->
             Spacer(Modifier.height(8.dp))
             ProgressBar(fraction = percent / 100f, tint = if (session.paused) Warning else Accent)
+        }
         }
     }
 }
@@ -500,6 +505,8 @@ internal fun ActiveDownloadRow(
         }
     }
     FlatCard(Modifier.padding(horizontal = McMetrics.pagePadding).fillMaxWidth()) {
+        // 内边距由调用方给（FlatCard 只有底色与描边）：此前漏了，标题/状态贴着卡片边缘
+        Column(Modifier.padding(14.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(7.dp).background(metaColor, CircleShape))
             Spacer(Modifier.width(8.dp))
@@ -527,6 +534,7 @@ internal fun ActiveDownloadRow(
         }
         Spacer(Modifier.height(4.dp))
         Text(status.joinToString(" · "), fontSize = 10.5.sp, color = TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 
@@ -539,6 +547,8 @@ internal fun ActiveDownloadRow(
 private fun DeviceDownloadRow(download: ActiveFileDownload, origin: String?) {
     val media = download.media
     FlatCard(Modifier.padding(horizontal = McMetrics.pagePadding).fillMaxWidth()) {
+        // 内边距由调用方给（FlatCard 只有底色与描边）：此前漏了，海报上下贴边、被圆角切
+        Column(Modifier.padding(14.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             media?.posterUrl?.let { poster ->
                 Box(Modifier.width(34.dp).height(50.dp).clip(RoundedCornerShape(6.dp))) {
@@ -589,6 +599,7 @@ private fun DeviceDownloadRow(download: ActiveFileDownload, origin: String?) {
                     Text(download.fileName, fontSize = 10.sp, color = TextFaint, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
+        }
         }
     }
 }

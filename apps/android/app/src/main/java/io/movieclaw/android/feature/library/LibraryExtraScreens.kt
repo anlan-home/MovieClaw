@@ -1120,6 +1120,8 @@ fun LibraryManageScreen(
     onOpenLibrary: (Long, String) -> Unit,
     /** 创建（"create"）/ 编辑（"edit:<id>"）→ 原生媒体库表单 */
     onOpenForm: (Long?) -> Unit = {},
+    /** 进页时预选的页签（详情页文件区「处理重复」= 2 重复文件；null = 默认第一页） */
+    initialTab: Int? = null,
     vm: LibraryManageViewModel = hiltViewModel(),
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
@@ -1127,6 +1129,9 @@ fun LibraryManageScreen(
     var deleteTarget by remember { mutableStateOf<io.movieclaw.android.core.model.LibraryView?>(null) }
     var chaptersTarget by remember { mutableStateOf<io.movieclaw.android.core.model.LibraryView?>(null) }
     var reordering by remember { mutableStateOf(false) }
+
+    // 带页签进来（详情页文件区「处理重复」）：只落一次，进来之后由用户点
+    LaunchedEffect(initialTab) { if (initialTab != null) vm.setTab(initialTab) }
 
     LaunchedEffect(state.notice) {
         state.notice?.let {

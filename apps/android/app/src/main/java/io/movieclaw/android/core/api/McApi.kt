@@ -539,6 +539,36 @@ interface McApi {
     @POST("libraries/duplicate-files/scan")
     suspend fun scanDuplicates(): McEnvelope<JsonElement>
 
+    /* ---------------- 条目内单个文件（详情页文件区的三个动作，iOS `LibraryItemDetailView` 同款） ---------------- */
+
+    /**
+     * 从磁盘删除条目的单个文件（含同名 NFO/字幕/图片附属文件）。
+     * 该条目在本库只剩这一行台账（含缺失行）时，服务端会升级为**整条目删除**——
+     * 结果里的 `errors` 为空即表示删成功了，调用方据「是不是最后一个文件」决定要不要离开详情页。
+     */
+    @DELETE("libraries/{libraryId}/items/{mediaItemId}/files/{fileId}")
+    suspend fun deleteLibraryFile(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+        @Path("fileId") fileId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.ItemDeleteResultView>
+
+    /** 立即清理一个待回收的文件（真删磁盘，不等保留期） */
+    @POST("libraries/{libraryId}/items/{mediaItemId}/files/{fileId}/purge")
+    suspend fun purgeLibraryFile(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+        @Path("fileId") fileId: Long,
+    ): McEnvelope<JsonElement>
+
+    /** 把待回收的文件恢复为在位版本 */
+    @POST("libraries/{libraryId}/items/{mediaItemId}/files/{fileId}/restore")
+    suspend fun restoreLibraryFile(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+        @Path("fileId") fileId: Long,
+    ): McEnvelope<JsonElement>
+
     /* ---------------- 条目状态：已看 / 收藏 ---------------- */
 
     /**

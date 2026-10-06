@@ -49,6 +49,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -68,6 +70,17 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.KeyboardArrowRight
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.runtime.mutableStateOf
@@ -83,6 +96,7 @@ import io.movieclaw.android.core.designsystem.McNavButton
 import io.movieclaw.android.core.designsystem.RemoteImage
 import io.movieclaw.android.core.designsystem.Accent
 import io.movieclaw.android.core.designsystem.Bg
+import io.movieclaw.android.core.designsystem.Danger
 import io.movieclaw.android.core.designsystem.ErrorPane
 import io.movieclaw.android.core.designsystem.GlassCard
 import io.movieclaw.android.core.designsystem.Loadable
@@ -93,6 +107,8 @@ import io.movieclaw.android.core.designsystem.TextMuted
 import io.movieclaw.android.core.designsystem.Warning
 import io.movieclaw.android.core.model.EpisodeView
 import io.movieclaw.android.core.model.LibraryItemDetailView
+import io.movieclaw.android.core.model.LibraryFileView
+import io.movieclaw.android.core.model.ItemDeleteResultView
 import io.movieclaw.android.core.network.ApiFactory
 import io.movieclaw.android.core.network.dataOrThrow
 import io.movieclaw.android.core.network.friendlyMessage
@@ -324,6 +340,38 @@ class ItemDetailViewModel @Inject constructor(
             }
         }
     }
+
+    /* ---------------- 文件区动作（iOS `LibraryItemDetailView` 的 delete/restore/purge） ---------------- */
+
+    /**
+     * 从磁盘删除一个文件（回收站语义由服务端定）。
+     * 返回结果交给调用方：`errors` 为空 + 「这是最后一个文件」= 整条目已删，要离开详情页。
+     */
+    suspend fun deleteFile(fileId: Long): Result<io.movieclaw.android.core.model.ItemDeleteResultView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).deleteLibraryFile(libraryId, itemId, fileId).dataOrThrow()
+        }
+    }
+
+    /** 把待回收的文件恢复为在位版本 */
+    suspend fun restoreFile(fileId: Long): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).restoreLibraryFile(libraryId, itemId, fileId).dataOrThrow()
+        }.map { }
+    }
+
+    /** 立即清理一个待回收的文件（真删磁盘，不等保留期） */
+    suspend fun purgeFile(fileId: Long): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).purgeLibraryFile(libraryId, itemId, fileId).dataOrThrow()
+        }.map { }
+    }
 }
 
 @Composable
@@ -334,6 +382,8 @@ fun ItemDetailScreen(
     onPlay: (PlayTarget) -> Unit,
     /** 演职员点进「库内影人页」（iOS `LibraryItemDetailView` 的 `AppRoute.person` 同款） */
     onOpenPerson: (Int) -> Unit = {},
+    /** 文件区「处理重复」→ 媒体库管理的「重复文件」页签（iOS `.libraryManage(tab: "duplicates")`） */
+    onOpenDuplicates: () -> Unit = {},
     vm: ItemDetailViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -344,6 +394,12 @@ fun ItemDetailScreen(
     val resume by vm.resume.collectAsStateWithLifecycle()
     val origin = vm.origin
     val feedback = LocalFeedback.current
+    val permissions = io.movieclaw.android.core.session.LocalPermissions.current
+    // 文件区动作：删除走底部确认单（iOS `DeleteFileSheet`），立即清理走确认弹窗
+    var trashTarget by remember { mutableStateOf<io.movieclaw.android.core.model.LibraryFileView?>(null) }
+    var purgeTarget by remember { mutableStateOf<io.movieclaw.android.core.model.LibraryFileView?>(null) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     // 只在换条目时拉一次标记（marks 自身变化不能再触发，否则死循环）
     val loadedItemId = (state as? Loadable.Ready)?.value?.item?.mediaItemId
@@ -407,12 +463,77 @@ fun ItemDetailScreen(
                     )
                 }
                 CastSection(detail = s.value.item, origin = origin, onOpenPerson = onOpenPerson)
-                if (s.value.item.kind != "tv" || s.value.episodes.isEmpty()) {
-                    FilesSection(detail = s.value.item)
+                // 文件区（iOS `isMovie ? detail.files : selectedEpisode.files`）：
+                // 电影 = 整条的文件；剧集 = 当前选中那一集的文件（没选中就不显示这一区）
+                val sectionFiles = sectionFilesFor(s.value.item, selectedUnit, s.value.episodes)
+                if (sectionFiles.isNotEmpty()) {
+                    FilesSection(
+                        detail = s.value.item,
+                        files = sectionFiles,
+                        canManage = permissions.canManageLibraries,
+                        onOpenDuplicates = onOpenDuplicates,
+                        onTrash = { trashTarget = it },
+                        onRestore = { file ->
+                            scope.launch {
+                                vm.restoreFile(file.id)
+                                    .onSuccess {
+                                        feedback.show(McNotice("「${file.fileName}」已恢复为在位版本", FeedbackTone.Success))
+                                        vm.load()
+                                    }
+                                    .onFailure { feedback.show(McNotice(friendlyMessage(it), FeedbackTone.Error)) }
+                            }
+                        },
+                        onPurge = { purgeTarget = it },
+                        onCopyPath = { file ->
+                            val path = file.filePath.orEmpty()
+                            if (path.isNotEmpty()) {
+                                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("path", path))
+                                feedback.show(McNotice("已拷贝路径", FeedbackTone.Success))
+                            }
+                        },
+                    )
                 }
                 Spacer(Modifier.height(32.dp))
             }
         }
+    }
+
+    // 文件区动作的宿主：删除底部单（iOS `DeleteFileSheet`）与立即清理确认弹窗。
+    // 放在 when 之外——两者都是窗口级浮层，不该跟着页面一起滚
+    val readyDetail = (state as? Loadable.Ready)?.value?.item
+    trashTarget?.let { file ->
+        if (readyDetail != null) {
+            DeleteFileSheet(
+                detail = readyDetail,
+                file = file,
+                isLast = readyDetail.files.size == 1,
+                onDismiss = { trashTarget = null },
+                run = { vm.deleteFile(file.id) },
+                onFinished = { deletedItem ->
+                    trashTarget = null
+                    // 最后一个文件删成功 = 整条目已删：离开详情页（iOS `onItemDeleted: leaveToLibrary`）
+                    if (deletedItem) onBack() else vm.load()
+                },
+            )
+        }
+    }
+    purgeTarget?.let { file ->
+        PurgeFileDialog(
+            file = file,
+            onDismiss = { purgeTarget = null },
+            onConfirm = {
+                purgeTarget = null
+                scope.launch {
+                    vm.purgeFile(file.id)
+                        .onSuccess {
+                            feedback.show(McNotice("「${file.fileName}」已清理", FeedbackTone.Success))
+                            vm.load()
+                        }
+                        .onFailure { feedback.show(McNotice(friendlyMessage(it), FeedbackTone.Error)) }
+                }
+            },
+        )
     }
 }
 
@@ -1301,38 +1422,529 @@ private fun EpisodeCard(
     }
 }
 
+/* ---------------- 文件区（iOS `fileSection` + `LibraryFileRow` 的手机版） ---------------- */
+
+/**
+ * 文件区要显示的文件（iOS `isMovie ? detail.files : (selectedEpisode?.files ?? [])`）：
+ * 电影 = 整条的文件；剧集 = 当前选中那一集（没选中 → 空，整区不显示）。
+ * 注意与 Hero 里给音轨/字幕用的 `unitFiles`（取不到时回落整条）不同：那是"至少能显示点东西"，
+ * 这里是"显示的就该是这一集的"。
+ */
+private fun sectionFilesFor(
+    detail: LibraryItemDetailView,
+    unit: ItemDetailViewModel.SelectedUnit?,
+    episodes: Map<Int, List<EpisodeView>>,
+): List<LibraryFileView> {
+    if (detail.kind != "tv") return detail.files
+    val ids = unit?.let { u -> episodes[u.season]?.firstOrNull { it.episodeNumber == u.episode }?.fileIds }.orEmpty()
+    if (ids.isEmpty()) return emptyList()
+    return detail.files.filter { f -> f.id in ids }
+}
+
+/**
+ * 文件区：
+ *   · 每行可展开：保存目录 / 入库时间 / 来源 / 多版本 / 文件尺寸 / 片源 / 画面规格 / 视频编码 /
+ *     色深 / 帧率 / 色彩空间 / 视频码率（12 项逐项对齐 iOS `LibraryFileRow.details`）
+ *   · 状态：待回收（划掉文件名 + 恢复 / 立即清理 + 清理倒计时）、文件缺失（标签）
+ *   · 管理员：每行删除（底部确认单）、头部「N 个版本 / N 集有重复 · 处理重复」入口
+ */
 @Composable
-private fun FilesSection(detail: LibraryItemDetailView) {
-    if (detail.files.isEmpty()) return
-    Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
-        Text("文件 · ${detail.files.size}", style = McType.title3)
-        Spacer(Modifier.height(8.dp))
-        GlassCard(Modifier.fillMaxWidth()) {
-            detail.files.forEachIndexed { index, file ->
-                if (index > 0) Spacer(Modifier.height(10.dp))
-                Column {
-                    Text(
-                        file.fileName,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Spacer(Modifier.height(3.dp))
-                    val specs = buildList {
-                        add(file.resolution ?: "未知分辨率")
-                        file.videoCodec?.let { add(it.uppercase()) }
-                        file.hdr?.let { add(it) }
-                        file.container?.let { add(it) }
-                        file.sizeBytes.takeIf { it > 0 }?.let { add("%.1f GB".format(it / 1e9)) }
-                        val channels = file.audioStreams?.maxOfOrNull { it.channels ?: 0 } ?: 0
-                        if (channels > 0) add("${channels}.1 声道")
-                        val subtitleCount = file.subtitleStreams.size
-                        if (subtitleCount > 0) add("字幕 ×$subtitleCount")
-                    }
-                    Text(specs.joinToString(" · "), fontSize = 11.sp, color = TextFaint)
+private fun FilesSection(
+    detail: LibraryItemDetailView,
+    files: List<LibraryFileView>,
+    canManage: Boolean,
+    onOpenDuplicates: () -> Unit,
+    onTrash: (LibraryFileView) -> Unit,
+    onRestore: (LibraryFileView) -> Unit,
+    onPurge: (LibraryFileView) -> Unit,
+    onCopyPath: (LibraryFileView) -> Unit,
+) {
+    if (files.isEmpty()) return
+    // 重复口径（iOS `fileSection`）：在位文件按「季:集」分组，多于一格才算重复；
+    // 电影报「N 个版本」、剧集报「N 集有重复」
+    val inPlace = detail.files.filter { it.state == "in_place" }
+    val duplicateUnits = inPlace.groupBy { "${it.seasonNumber}:${it.episodeNumber}" }.values.count { it.size > 1 }
+    val duplicateLabel = when {
+        duplicateUnits == 0 -> null
+        detail.kind == "tv" -> "$duplicateUnits 集有重复"
+        else -> "${inPlace.size} 个版本"
+    }
+    Column(Modifier.padding(horizontal = McMetrics.pagePadding, vertical = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("文件", style = McType.subheadlineSemibold, color = TextMuted)
+            Text("${files.size}", fontSize = 12.sp, color = TextFaint)
+            if (canManage && duplicateLabel != null) {
+                Text(
+                    "$duplicateLabel · 处理重复",
+                    fontSize = 12.sp,
+                    color = Warning,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .clickable(onClick = onOpenDuplicates)
+                        .padding(horizontal = 6.dp, vertical = 3.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.White.copy(alpha = 0.015f))
+                .border(1.dp, Color.White.copy(alpha = 0.04f), RoundedCornerShape(12.dp)),
+        ) {
+            files.forEachIndexed { index, file ->
+                FileRow(
+                    file = file,
+                    canManage = canManage,
+                    onTrash = { onTrash(file) },
+                    onRestore = { onRestore(file) },
+                    onPurge = { onPurge(file) },
+                    onCopyPath = { onCopyPath(file) },
+                )
+                if (index != files.lastIndex) {
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.035f)))
                 }
             }
         }
+    }
+}
+
+/**
+ * 一条文件（iOS `LibraryFileRow`）：折叠 = chevron + 文件名（待回收划掉）+ 状态标签 + 操作；
+ * 展开 = 12 项元数据；长按文件名 = 拷贝路径。
+ */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun FileRow(
+    file: LibraryFileView,
+    canManage: Boolean,
+    onTrash: () -> Unit,
+    onRestore: () -> Unit,
+    onPurge: () -> Unit,
+    onCopyPath: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val trashed = file.state == "trashed"
+    val chevronAngle by animateFloatAsState(if (expanded) 90f else 0f, label = "file-chevron")
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                Modifier
+                    .weight(1f)
+                    .combinedClickable(onClick = { expanded = !expanded }, onLongClick = onCopyPath)
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Rounded.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = TextFaint,
+                    modifier = Modifier.size(14.dp).rotate(chevronAngle),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    file.fileName,
+                    fontSize = 13.sp,
+                    color = if (trashed) TextFaint else TextMuted,
+                    textDecoration = if (trashed) TextDecoration.LineThrough else null,
+                    maxLines = if (expanded) Int.MAX_VALUE else 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (file.missing) FileTag("文件缺失", Warning)
+            if (trashed) {
+                FileTag("待回收", TextFaint)
+                if (canManage) {
+                    TextButton(
+                        onClick = onRestore,
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) { Text("恢复", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold) }
+                    TextButton(
+                        onClick = onPurge,
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) { Text("立即清理", fontSize = 12.sp, color = Danger, fontWeight = FontWeight.SemiBold) }
+                }
+            } else if (canManage) {
+                IconButton(onClick = onTrash) {
+                    Icon(Icons.Rounded.Delete, contentDescription = "删除此文件", tint = TextFaint, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+        if (trashed) {
+            Text(
+                purgeCountdown(file.purgeAfter) + (file.trashNote?.let { " · $it" } ?: ""),
+                fontSize = 11.sp,
+                color = TextFaint,
+                modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 8.dp),
+            )
+        }
+        if (expanded) FileDetails(file)
+    }
+}
+
+/** 展开态 12 项元数据（iOS `LibraryFileRow.details` 逐项同款） */
+@Composable
+private fun FileDetails(file: LibraryFileView) {
+    val picture = listOfNotNull(file.resolution?.let { resolutionLabel(it) }, file.hdr).joinToString(" · ")
+    val addedAt = file.addedAt
+    Column(
+        Modifier.padding(start = 34.dp, end = 14.dp, top = 2.dp, bottom = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        FileDetailRow("保存目录", directoryOf(file.filePath.orEmpty()), mono = true)
+        FileDetailRow("入库时间", if (addedAt.isNullOrEmpty()) "—" else "${McFormat.dateTime(addedAt)} · ${McFormat.relative(addedAt)}")
+        FileDetailRow("来源", file.origin?.label ?: "—", note = file.origin?.detail)
+        file.keptAt?.let {
+            FileDetailRow("多版本", "你留下的 · ${McFormat.dateTime(it)}（不会再列为重复文件）")
+        }
+        FileDetailRow("文件尺寸", McFormat.bytes(file.sizeBytes))
+        FileDetailRow("片源", mediaSourceLabel(file))
+        FileDetailRow("画面规格", picture.ifEmpty { "未能探测（文件不可达或尚未扫描）" })
+        FileDetailRow("视频编码", codecLabel(file.videoCodec) ?: "尚未探测")
+        FileDetailRow("色深", file.bitDepth?.let { "$it-bit" } ?: "尚未探测")
+        FileDetailRow("帧率", frameRateLabel(file.frameRate) ?: "尚未探测")
+        FileDetailRow("色彩空间", file.colorSpace ?: "尚未探测")
+        FileDetailRow("视频码率", file.bitRate?.let { "%.1f Mbps".format(it / 1_000_000.0) } ?: "尚未探测")
+    }
+}
+
+@Composable
+private fun FileDetailRow(label: String, value: String, mono: Boolean = false, note: String? = null) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(label, fontSize = 12.sp, color = TextFaint, modifier = Modifier.width(56.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                value,
+                fontSize = 12.sp,
+                color = TextMuted,
+                fontFamily = if (mono) FontFamily.Monospace else null,
+                lineHeight = 17.sp,
+            )
+            if (!note.isNullOrEmpty()) {
+                Text(note, fontSize = 11.sp, color = TextFaint, fontFamily = FontFamily.Monospace, lineHeight = 15.sp)
+            }
+        }
+    }
+}
+
+/** 状态小标签（iOS `tag`）：细描边小圆角 */
+@Composable
+private fun FileTag(text: String, color: Color) {
+    Text(
+        text,
+        fontSize = 10.sp,
+        color = color.copy(alpha = 0.85f),
+        modifier = Modifier
+            .padding(horizontal = 4.dp)
+            .border(1.dp, color.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 5.dp, vertical = 1.dp),
+    )
+}
+
+/** 危险动作按钮（删除 / 立即清理 / 完成）：iOS `DangerButton` 的手机版 */
+@Composable
+private fun DangerButton(text: String, enabled: Boolean = true, busy: Boolean = false, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        enabled = enabled && !busy,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Danger,
+            contentColor = Color.White,
+            disabledContainerColor = Danger.copy(alpha = 0.35f),
+            disabledContentColor = Color.White.copy(alpha = 0.6f),
+        ),
+        shape = RoundedCornerShape(999.dp),
+    ) {
+        if (busy) {
+            CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(14.dp))
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * 删除文件确认单（iOS `DeleteFileSheet` 的手机版）：
+ * 确认步 = 说明 + 文件块 + 「最后一份文件会升级为整条目删除」警告 + 订阅说明 + 「我已明白」勾选；
+ * 结果步 = 删掉的路径清单 / 错误 / 「已清理 N 条台账，释放 X」。
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun DeleteFileSheet(
+    detail: LibraryItemDetailView,
+    file: LibraryFileView,
+    isLast: Boolean,
+    onDismiss: () -> Unit,
+    run: suspend () -> Result<ItemDeleteResultView>,
+    onFinished: (deletedItem: Boolean) -> Unit,
+) {
+    var confirmed by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<ItemDeleteResultView?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = { if (!busy && result == null) onDismiss() },
+        containerColor = Color(0xFF15161A),
+        contentColor = TextPrimary,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = McMetrics.pagePadding, vertical = 4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Rounded.Delete, contentDescription = null, tint = Danger, modifier = Modifier.size(18.dp))
+                Text("删除文件", style = McType.bodySemibold, color = TextPrimary)
+            }
+            Spacer(Modifier.height(12.dp))
+            val done = result
+            if (done != null) {
+                Text(
+                    if (done.errors.isEmpty()) "已从磁盘删除" else "删除失败",
+                    style = McType.bodySemibold,
+                    color = if (done.errors.isEmpty()) TextPrimary else Danger,
+                )
+                Spacer(Modifier.height(12.dp))
+                if (done.removedPaths.isEmpty()) {
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.White.copy(alpha = 0.03f))
+                            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                            .padding(14.dp),
+                    ) {
+                        Text(
+                            "没有删除任何磁盘路径" + if (file.missing) "（文件本就缺失，仅清除了台账记录）" else "",
+                            fontSize = 13.sp,
+                            color = TextMuted,
+                        )
+                    }
+                } else {
+                    Column(
+                        Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.White.copy(alpha = 0.03f))
+                            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        done.removedPaths.forEach { path ->
+                            Text(path, fontSize = 12.sp, color = Color.White.copy(alpha = 0.7f), fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                }
+                if (done.errors.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        done.errors.forEach { Text(it, fontSize = 13.sp, color = Danger) }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text("已清理 ${done.rowsDeleted} 条台账，释放 ${McFormat.bytes(done.freedBytes)}。", fontSize = 13.sp, color = TextMuted)
+                Spacer(Modifier.height(16.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    DangerButton("完成") { onFinished(isLast && done.errors.isEmpty()) }
+                }
+                Spacer(Modifier.height(12.dp))
+            } else {
+                Text(
+                    if (file.missing) "该文件在磁盘上已缺失，删除只会清掉这条台账记录。"
+                    else "将把下列文件从磁盘彻底删除，同名的 NFO/字幕/图片附属文件一并清除。此操作不可恢复。",
+                    fontSize = 14.sp,
+                    color = Color.White.copy(alpha = 0.8f),
+                    lineHeight = 20.sp,
+                )
+                Spacer(Modifier.height(12.dp))
+                Column(
+                    Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.White.copy(alpha = 0.03f))
+                        .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                        .padding(14.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (detail.kind != "movie" && (file.episodeNumber > 0 || file.seasonNumber > 0)) {
+                            Text(
+                                "S%02dE%02d".format(file.seasonNumber, file.episodeNumber),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Accent,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text(
+                            file.fileName,
+                            fontSize = 13.sp,
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(McFormat.bytes(file.sizeBytes), fontSize = 12.sp, color = TextMuted)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        file.filePath.orEmpty(),
+                        fontSize = 11.sp,
+                        color = Color.White.copy(alpha = 0.5f),
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (isLast) {
+                    Spacer(Modifier.height(12.dp))
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Warning.copy(alpha = 0.06f))
+                            .border(1.dp, Warning.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                            .padding(14.dp),
+                    ) {
+                        Text(
+                            "这是「${detail.title}」在本库的最后一个文件——删除将升级为整条目删除，整个刮削目录（含 NFO/海报）一并清除，条目将从库存消失。",
+                            fontSize = 13.sp,
+                            color = Warning,
+                            lineHeight = 19.sp,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "若该作品有订阅且删除后此单元不再有其他拷贝，订阅会将其视为缺失并自动重新下载。",
+                    fontSize = 11.sp,
+                    color = TextFaint,
+                    lineHeight = 16.sp,
+                )
+                Spacer(Modifier.height(14.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = confirmed,
+                        onCheckedChange = { confirmed = it },
+                        colors = CheckboxDefaults.colors(checkedColor = Danger, uncheckedColor = TextFaint),
+                    )
+                    Text(
+                        "我已明白：${if (isLast) "整个条目目录及其中全部文件" else "该文件及其同名附属文件"}将被永久删除，无法恢复。",
+                        fontSize = 13.sp,
+                        color = Color.White.copy(alpha = 0.8f),
+                        lineHeight = 19.sp,
+                    )
+                }
+                error?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Text(it, fontSize = 13.sp, color = Danger)
+                }
+                Spacer(Modifier.height(14.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    DangerButton("删除", enabled = confirmed, busy = busy) {
+                        scope.launch {
+                            busy = true
+                            error = null
+                            run()
+                                .onSuccess { result = it }
+                                .onFailure { error = friendlyMessage(it) }
+                            busy = false
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+    }
+}
+
+/** 立即清理确认弹窗（iOS `purge` 的两段文案逐字同款） */
+@Composable
+private fun PurgeFileDialog(file: LibraryFileView, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    val seeding = file.purgeAfter == null
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF171A23),
+        title = { Text("立即清理「${file.fileName}」？", style = McType.bodySemibold, color = TextPrimary) },
+        text = {
+            Text(
+                if (seeding) "该文件处于做种保护，可能仍被下载器做种。清理会从磁盘删除文件并可能中断做种任务（PT 站请留意保种要求），此操作不可恢复。"
+                else "将立即从回收站删除该文件，不再等待保留期，此操作不可恢复。",
+                style = McType.sub,
+                color = TextMuted,
+            )
+        },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("立即清理", color = Danger) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = TextMuted) } },
+    )
+}
+
+/** 分辨率标注（iOS `resolutionLabel` / Web 同口径）：4320p→8K、2160p→4K、1440p→2K */
+private fun resolutionLabel(raw: String): String {
+    val normalized = raw.trim().lowercase()
+    val key = if (normalized.isNotEmpty() && normalized.all(Char::isDigit)) normalized + "p" else normalized
+    return when (key) {
+        "4320p" -> "8K"
+        "2160p" -> "4K"
+        "1440p" -> "2K"
+        "4k" -> "4K"
+        "2k" -> "2K"
+        else -> raw
+    }
+}
+
+/** 视频编码短名（iOS `codecs` 映射） */
+private fun codecLabel(raw: String?): String? = raw?.let {
+    when (it.lowercase()) {
+        "hevc", "h265" -> "HEVC"
+        "h264" -> "H.264"
+        "av1" -> "AV1"
+        "vc1" -> "VC-1"
+        "mpeg2video" -> "MPEG-2"
+        "vp9" -> "VP9"
+        else -> it.uppercase()
+    }
+}
+
+/** 帧率：整数不带 .0（iOS `frameRate` 同款） */
+private fun frameRateLabel(raw: Float?): String? = raw?.takeIf { it > 0 }?.let { f ->
+    val rounded = kotlin.math.round(f * 1000) / 1000
+    if (rounded % 1f == 0f) "${rounded.toInt()} fps" else "$rounded fps"
+}
+
+/** 片源标注（iOS `source` 映射）：原盘 / 最低档（人工标注）/ 人工标注后缀 / 未识别 */
+private fun mediaSourceLabel(file: LibraryFileView): String {
+    val source = file.mediaSource?.takeIf { it.isNotEmpty() } ?: return "未识别"
+    val label = when (source) {
+        "user-lowest" -> "最低档（人工标注）"
+        "Disc" -> "原盘"
+        else -> source
+    }
+    return label + if (file.mediaSourceManual && source != "user-lowest") "（人工标注）" else ""
+}
+
+/** 待回收的清理倒计时（iOS `purgeCountdown` 逐字同款）：null = 做种保护中，不自动清理 */
+private fun purgeCountdown(raw: String?): String {
+    if (raw == null) return "做种保护中，不自动清理"
+    val instant = runCatching { java.time.OffsetDateTime.parse(raw).toInstant() }
+        .recoverCatching { java.time.Instant.parse(raw) }
+        .getOrNull() ?: return "即将自动清理"
+    val ms = instant.toEpochMilli() - System.currentTimeMillis()
+    if (ms <= 0) return "即将自动清理"
+    val days = (ms / 86_400_000).toInt()
+    val hours = ((ms % 86_400_000) / 3_600_000).toInt()
+    return when {
+        days > 0 -> "预计 $days 天 $hours 小时后自动清理"
+        hours > 0 -> "预计 $hours 小时后自动清理"
+        else -> "预计 1 小时内自动清理"
+    }
+}
+
+/** 保存目录（iOS `directory(_:)`）：去掉末尾分隔符、取最后一段之前的路径；没有分隔符回「—」 */
+private fun directoryOf(path: String): String {
+    var normalized = path
+    while (normalized.endsWith("/") || normalized.endsWith("\\")) normalized = normalized.dropLast(1)
+    val index = normalized.indexOfLast { it == '/' || it == '\\' }
+    return when {
+        index < 0 -> "—"
+        index == 0 -> normalized.take(1)
+        else -> normalized.take(index)
     }
 }

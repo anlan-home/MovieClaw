@@ -180,6 +180,9 @@ private fun androidx.compose.foundation.layout.BoxScope.LiquidCapsule(
     var glowCenter by remember { mutableStateOf(Offset.Zero) }
     val glow = remember { Animatable(0f) }
     var pressed by remember { mutableStateOf(false) }
+    /** 辉光的当前任务：按下（亮起）与抬手（熄灭）各一个；换新任务前显式取消旧的，
+     *  避免两个协程抢同一个 Animatable（后启动的快照会把已在跑的熄灭动画顶掉 → 辉光卡住不灭） */
+    var glowJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     // 弹簧胶囊 / 拖动擦选
     var pillX by remember { mutableFloatStateOf(0f) }   // px，相对页签层左缘
@@ -188,6 +191,12 @@ private fun androidx.compose.foundation.layout.BoxScope.LiquidCapsule(
     var dragActive by remember { mutableStateOf(false) }
     var springEpoch by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
+
+    // 换页兜底：无论手势收尾在哪条路径上漏掉（被取消/指针流中断），换页后都把辉光熄掉
+    LaunchedEffect(selectedIndex) {
+        glowJob?.cancel()
+        glowJob = scope.launch { glow.animateTo(0f, tween(520, easing = LinearOutSlowInEasing)) }
+    }
 
     Box(
         Modifier
@@ -206,7 +215,8 @@ private fun androidx.compose.foundation.layout.BoxScope.LiquidCapsule(
                     pressed = true
                     dragActive = false
                     glowCenter = down.position
-                    scope.launch { glow.snapTo(1f) }
+                    glowJob?.cancel()
+                    glowJob = scope.launch { glow.snapTo(1f) }
                     val cell = (size.width - 6.dp.toPx()) / count
                     // 按下即时反馈：胶囊先滑到手指所在格（iOS 液态底栏的按压预览）
                     val downCell = ((down.position.x - 3.dp.toPx()).coerceIn(0f, size.width - 6.dp.toPx()) / cell)
@@ -215,7 +225,8 @@ private fun androidx.compose.foundation.layout.BoxScope.LiquidCapsule(
                     val tracker = VelocityTracker()
                     tracker.addPosition(down.uptimeMillis, down.position)
                     var moved = false
-                    while (true) {
+                    try {
+                        while (true) {
                         val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
                         if (change.positionChange() != Offset.Zero || !change.pressed) {
                             runCatching { tracker.addPosition(change.uptimeMillis, change.position) }
@@ -228,8 +239,15 @@ private fun androidx.compose.foundation.layout.BoxScope.LiquidCapsule(
                         }
                         if (!change.pressed) break
                     }
-                    pressed = false
-                    scope.launch { glow.animateTo(0f, tween(520, easing = LinearOutSlowInEasing)) }
+                    } finally {
+                        // 收尾一律走这里：手势被取消（换页 / 布局变化 / 指针流中断）也不能
+                        // 把「按下态 + 辉光」留在屏幕上（实机反馈：点一下底栏后光斑不灭）
+                        pressed = false
+                        previewCell = null
+                        dragActive = false
+                        glowJob?.cancel()
+                        glowJob = scope.launch { glow.animateTo(0f, tween(520, easing = LinearOutSlowInEasing)) }
+                    }
                     if (!moved) {
                         // 点按：按下时预览的那格就是要去的那格
                         previewCell = null

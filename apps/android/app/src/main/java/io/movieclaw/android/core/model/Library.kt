@@ -96,6 +96,17 @@ data class TrackDefaultsView(
     val subtitleNote: String = "",
 )
 
+/** 文件来源快照（服务端 `FileOriginView`）：这个文件是怎么进库的 */
+@Serializable
+data class FileOriginView(
+    /** subscription / manual_download / watch_import / scan */
+    val kind: String = "",
+    /** 一句话：订阅《九门》自动投递 / 手动下载 / 监听目录自动识别入库 / 存量扫描发现 */
+    val label: String = "",
+    /** 第二行：站点 · 种子标题 · 下载器 · 搬运方式 */
+    val detail: String? = null,
+)
+
 @Serializable
 data class LibraryFileView(
     val id: Long,
@@ -109,13 +120,39 @@ data class LibraryFileView(
     val durationSeconds: Long? = null,
     val bitRate: Long? = null,
     val frameRate: Float? = null,
+    /** 视频轨探测：色深 / 色彩空间（详情页文件区展开态显示；null = 尚未探测） */
+    val bitDepth: Int? = null,
+    val colorSpace: String? = null,
+    /** 片源标注：原盘（Disc）/ user-lowest（最低档，人工标注）等 */
+    val mediaSource: String? = null,
+    /** 片源是人工标注的（真值来自文件扫描之外的判断） */
+    val mediaSourceManual: Boolean = false,
     val seasonNumber: Int = 0,
     val episodeNumber: Int = 0,
     val state: String = "in_place",
+    /** 文件当前不在磁盘（missing 标记）：台账还在、文件没了 */
+    val missing: Boolean = false,
+    /** 待回收：预计自动清理时间；null = 做种保护中（不自动清理） */
+    val purgeAfter: String? = null,
+    val trashNote: String? = null,
+    /** 来源快照：这个文件是怎么进库的 */
+    val origin: FileOriginView? = null,
+    /** 多版本：用户「留下这个版本」的时间（留下后不再列为重复文件） */
+    val keptAt: String? = null,
+    val addedAt: String? = null,
     val audioStreams: List<AudioStreamView>? = null,
     val subtitleStreams: List<SubtitleStreamView> = emptyList(),
     /** null = 原盘或尚未探测轨道（界面退回按片源默认旗标显示） */
     val playbackDefaults: TrackDefaultsView? = null,
+)
+
+/** 删除文件的结果（服务端 `ItemDeleteResultView`）：实际从磁盘删掉的路径、台账行数、释放字节与错误 */
+@Serializable
+data class ItemDeleteResultView(
+    val removedPaths: List<String> = emptyList(),
+    val rowsDeleted: Int = 0,
+    val freedBytes: Long = 0,
+    val errors: List<String> = emptyList(),
 )
 
 @Serializable
