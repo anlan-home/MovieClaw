@@ -709,9 +709,15 @@ class PlaybackController(
         return segs.any { it.type == "outro" && it.toEnd && pos >= it.startMs }
     }
 
-    /** 「跳过」按钮的文案（other 段观众眼里也是片头，只写「跳过」看不出跳的是什么） */
-    fun skipLabel(seg: io.movieclaw.android.core.model.PlaybackSegmentView): String =
-        if (seg.type == "outro") "跳过片尾" else "跳过片头"
+    /** 「跳过」按钮的文案（照 iOS `SkipSegments.label` + 网页同款）：类型只认服务端给的——
+     *  广告、预告、未分类段各有各的文案，不再统统写成「跳过片头」（上游 2026-10-04 拆开后的口径） */
+    fun skipLabel(seg: io.movieclaw.android.core.model.PlaybackSegmentView): String = when (seg.type) {
+        "intro" -> "跳过片头"
+        "outro" -> "跳过片尾"
+        "ad" -> "跳过广告"
+        "preview" -> "跳过预告"
+        else -> "跳过此段"
+    }
 
     fun seekBy(deltaMs: Long) {
         lastSeekAtMs = System.currentTimeMillis()

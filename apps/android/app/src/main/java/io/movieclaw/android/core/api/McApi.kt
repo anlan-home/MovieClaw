@@ -592,6 +592,10 @@ interface McApi {
      * track 是中性轨引用：`external:<文件名>` / `embedded:<序号>`；
      * token 用会话流地址里的**签名令牌**（与取流同一个）。
      * 返回原始字节（可能是 SRT / ASS），交给 SubtitleAss 统一成 ASS。
+     *
+     * `startMs/endMs`（文件时间）走**窗口抽取**：只抽这一段。内封轨整轨要服务端通读
+     * 整个容器（实测 5.7 GB / 39.7 秒），窗口走单独的闸门、几秒就回来——先用它把
+     * 字幕画上，整轨到了再整表替换。整轨已有缓存时窗口直接给整轨。
      */
     @retrofit2.http.Streaming
     @GET("playback/files/{fileId}/subtitles")
@@ -600,7 +604,20 @@ interface McApi {
         @Query("track") track: String,
         @Query("token") token: String,
         @Query("format") format: String? = null,
+        @Query("start_ms") startMs: Long? = null,
+        @Query("end_ms") endMs: Long? = null,
     ): okhttp3.ResponseBody
+
+    /**
+     * 内封字幕预热：服务端登记后**立即返回**（`pending`），后台把这条轨抽好落缓存。
+     * 与播放旁挂共用同一份产物；**不随请求断开取消**——快速切集、离开播放页也不白读
+     * （服务端 `subtitles/preview`，详情页的字幕徽章用的是同一个口子）。
+     */
+    @GET("libraries/files/{fileId}/subtitles/preview")
+    suspend fun subtitlePreview(
+        @Path("fileId") fileId: Long,
+        @Query("track") track: String,
+    ): McEnvelope<JsonElement>
 
     @POST("playback/progress")
     suspend fun reportProgress(@Body body: PlaybackProgressRequest): McEnvelope<PlaybackStateView>

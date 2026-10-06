@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -68,6 +69,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -75,6 +77,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -95,6 +98,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import io.movieclaw.android.core.designsystem.McFormat
+import io.movieclaw.android.core.designsystem.GlassCapsule
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.Success
 import io.movieclaw.android.core.designsystem.TextMuted
@@ -148,7 +152,13 @@ class PlayerViewModel @Inject constructor(
     ) = subtitleStyles.update(transform)
 
     /** 下一集(iOS 语义:同季内第一个「有文件且集号更大」的集,本季没有就看下一季) */
-    data class UpNext(val seasonNumber: Int, val episodeNumber: Int, val label: String)
+    data class UpNext(
+        val seasonNumber: Int,
+        val episodeNumber: Int,
+        val label: String,
+        /** 下一集的默认文件（字幕预热的落点；解析不到就是 null，预热跳过） */
+        val fileId: Long? = null,
+    )
 
     val state = holder.state
 
@@ -178,18 +188,29 @@ class PlayerViewModel @Inject constructor(
         val origin = sessionRepository.ui.value.origin ?: return null
         val api = apiFactory.forOrigin(origin)
         return runCatching {
-            val seasons = api.libraryItemDetail(target.libraryId, target.mediaItemId).dataOrThrow().seasons
+            val detail = api.libraryItemDetail(target.libraryId, target.mediaItemId).dataOrThrow()
+            // 下一集要播哪个文件（字幕预热的落点）：服务端选版的逻辑客户端看不见，
+            // 取第一个在位文件——多版本剧集可能预热到另一个版本，代价是多读一次，不伤正确性
+            fun fileIdOf(season: Int, episode: Int): Long? = detail.files
+                .firstOrNull {
+                    it.seasonNumber == season && it.episodeNumber == episode &&
+                        !it.missing && it.state == "in_place"
+                }
+                ?.id
+            val seasons = detail.seasons
             val current = api.seasonEpisodes(target.libraryId, target.mediaItemId, target.seasonNumber).dataOrThrow()
             current.episodes
                 .filter { it.owned && it.episodeNumber > target.episodeNumber }
                 .minByOrNull { it.episodeNumber }
-                ?.let { UpNext(target.seasonNumber, it.episodeNumber, it.name.orEmpty()) }
+                ?.let {
+                    UpNext(target.seasonNumber, it.episodeNumber, it.name.orEmpty(), fileIdOf(target.seasonNumber, it.episodeNumber))
+                }
                 ?: seasons.filter { it > target.seasonNumber }.minOrNull()?.let { nextSeason ->
                     api.seasonEpisodes(target.libraryId, target.mediaItemId, nextSeason).dataOrThrow()
                         .episodes
                         .filter { it.owned }
                         .minByOrNull { it.episodeNumber }
-                        ?.let { UpNext(nextSeason, it.episodeNumber, it.name.orEmpty()) }
+                        ?.let { UpNext(nextSeason, it.episodeNumber, it.name.orEmpty(), fileIdOf(nextSeason, it.episodeNumber)) }
                 }
         }.getOrNull()
     }
@@ -217,19 +238,50 @@ class PlayerViewModel @Inject constructor(
     /**
      * 取一条字幕的原始内容（供 libass 渲染）。token 用会话流地址里的签名令牌。
      * 失败返回 null —— 调用方据此回落到 Exo 自带字幕，保证"最差也能看"。
+     * `startMs/endMs`（文件时间）= 只要这一段（内封轨的窗口抽取，几秒回来）。
      */
-    suspend fun loadSubtitleContent(fileId: Long, track: String, token: String): ByteArray? {
+    suspend fun loadSubtitleContent(
+        fileId: Long,
+        track: String,
+        token: String,
+        startMs: Long? = null,
+        endMs: Long? = null,
+    ): ByteArray? {
         val origin = sessionRepository.ui.value.origin ?: return null
         // 必须切到 IO：Retrofit 的 suspend 函数把响应交回调用方调度器（主线程），
         // 而 ResponseBody.bytes() 是阻塞读取 —— 主线程上会抛 NetworkOnMainThreadException（实机踩过）
         return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching {
                 // 走播放专用通道：字幕整轨可达几 MB，别和页面请求互相排队
-                apiFactory.playbackForOrigin(origin).subtitleContent(fileId = fileId, track = track, token = token).bytes()
+                apiFactory.playbackForOrigin(origin).subtitleContent(
+                    fileId = fileId,
+                    track = track,
+                    token = token,
+                    startMs = startMs,
+                    endMs = endMs,
+                ).bytes()
             }.onFailure {
             // 之前这里静默吞异常，导致"取不到字幕"完全没线索（实机踩过）
                 android.util.Log.w("McAss", "取字幕失败 file=$fileId track=$track: ${it::class.java.simpleName}: ${it.message}")
             }.getOrNull()
+        }
+    }
+
+    /**
+     * 预热一条内封字幕轨（当前集与下一集通用）：服务端登记后后台抽取、落缓存，
+     * **不随请求断开取消**——快速切集/离开播放页不再把读过的一半丢掉、下次又冷读 40 秒。
+     * 预热不该有存在感：只记一行日志，失败不打扰用户。
+     */
+    suspend fun warmSubtitle(fileId: Long, track: String) {
+        val origin = sessionRepository.ui.value.origin ?: return
+        runCatching {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                apiFactory.forOrigin(origin).subtitlePreview(fileId = fileId, track = track).dataOrThrow()
+            }
+        }.onSuccess {
+            android.util.Log.i("McAss", "字幕预热已发起 file=$fileId track=$track")
+        }.onFailure {
+            android.util.Log.i("McAss", "字幕预热未发起 file=$fileId track=$track: ${it.message}")
         }
     }
 
@@ -308,7 +360,8 @@ fun PlayerScreen(onExit: () -> Unit, vm: PlayerViewModel = hiltViewModel()) {
             is PlaybackSessionHolder.State.Playing -> PlayingSurface(
                 state = s,
                 upNext = upNext,
-                loadSubtitle = { f, t2, tk -> vm.loadSubtitleContent(f, t2, tk) },
+                loadSubtitle = { f, t2, tk, s2, e2 -> vm.loadSubtitleContent(f, t2, tk, s2, e2) },
+                warmSubtitle = { f, t2 -> vm.warmSubtitle(f, t2) },
                 qualityOptions = vm.qualityOptions(),
                 onSelectQuality = vm::selectQuality,
                 onPlayNext = vm::playNext,
@@ -330,8 +383,10 @@ private data class LevelHud(val brightness: Boolean, val level: Float, val gener
 private fun PlayingSurface(
     state: PlaybackSessionHolder.State.Playing,
     upNext: PlayerViewModel.UpNext?,
-    /** 取字幕内容（由调用方注入，PlayingSurface 本身拿不到 VM） */
-    loadSubtitle: suspend (Long, String, String) -> ByteArray?,
+    /** 取字幕内容（由调用方注入，PlayingSurface 本身拿不到 VM）；后两个参数是窗口（文件时间毫秒） */
+    loadSubtitle: suspend (Long, String, String, Long?, Long?) -> ByteArray?,
+    /** 预热一条内封字幕轨（服务端后台抽取、请求断开也继续；由调用方注入） */
+    warmSubtitle: suspend (Long, String) -> Unit,
     qualityOptions: List<PlayerViewModel.QualityOption>,
     onSelectQuality: (PlayerViewModel.QualityOption) -> Unit,
     onPlayNext: (PlayerViewModel.UpNext) -> Unit,
@@ -360,9 +415,9 @@ private fun PlayingSurface(
     var levelHud by remember { mutableStateOf<LevelHud?>(null) }
     var holdSpeed by remember { mutableStateOf(false) }
     var upNextDismissed by remember { mutableStateOf(false) }
-    // 自动连播（iOS autoNextArmed）：连续自动播了几集（任何用户操作清零）；倒计时秒数
+    // 自动连播（iOS autoNextArmed）：连续自动播了几集（任何用户操作清零）；倒计时进度 0...1
     var autoNextStreak by remember { mutableIntStateOf(0) }
-    var autoNextLeft by remember { mutableIntStateOf(0) }
+    var autoNextProgress by remember { mutableFloatStateOf(0f) }
     var scrubbing by remember { mutableStateOf(false) }
     var adjusting by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -385,6 +440,7 @@ private fun PlayingSurface(
 
     /** 相对跳转：基准取**播放器实时位置**（界面上的 positionMs 最多滞后 500 毫秒） */
     fun seekByRelative(deltaMs: Long) = seekTo(controller.filePositionMs() + deltaMs)
+
     val qualityOffer by controller.qualityOffer.collectAsStateWithLifecycle()
     var offerDismissed by remember { mutableStateOf(false) }
     LaunchedEffect(controller) { offerDismissed = false }
@@ -515,6 +571,21 @@ private fun PlayingSurface(
         // 样式只在本地重跑 ASS 转换（毫秒级）。
         var rawSub by remember { mutableStateOf<Pair<String, ByteArray>?>(null) }
         var fetchingSubtitle by remember { mutableStateOf(false) }
+        // 预热去重（当前集 + 下一集共用一把键）：同一个文件的一条轨只发起一次。
+        // 纯记账、不参与渲染，所以用普通 Set 而不是 State（改了也不用重组）
+        val warmedSubtitleKeys = remember { mutableSetOf<String>() }
+        // 当前集的字幕预热：**故意独立于下面那条接线 effect**。接线 effect 的键（轨、画面尺寸）
+        // 起播时会连着变两次，跟在里面发的预热会被立刻取消（实机日志：「预热未发起 …
+        // The coroutine scope left the composition」）——键稳定下来才发得出去。
+        LaunchedEffect(decision.fileId, selectedSubtitleRef) {
+            val fid = decision.fileId ?: return@LaunchedEffect
+            val ref = selectedSubtitleRef ?: return@LaunchedEffect
+            if (ref == "off" || !ref.startsWith("embedded:")) return@LaunchedEffect
+            // 位图轨（PGS）服务端抽不出文本、预热口子会 400，不白问
+            if (decision.subtitles.any { it.trackRef == ref && it.kind == "pgs" }) return@LaunchedEffect
+            if (!warmedSubtitleKeys.add("$fid:$ref")) return@LaunchedEffect
+            warmSubtitle(fid, ref)
+        }
         LaunchedEffect(selectedSubtitleRef, subVideoSize) {
             // 只认**手动选择**的字幕轨：之前"没选就自动挑第一条"是在瞎猜——
             // 内封第 0 条常常不是你要的那条（语言/内容/时间轴都可能对不上，实机被吐槽过）。
@@ -532,27 +603,52 @@ private fun PlayingSurface(
             // "off" 不是一条轨：服务端对 track=off 会 404（实机日志抓到），别去问
             val usable = !ref.isNullOrEmpty() && ref != "off" && fileId != null &&
                 token.isNotEmpty() && subVideoSize.width > 0
-            val raw = if (!usable) {
-                null
+            var cues: List<io.movieclaw.android.core.playback.SubtitleCues.Cue> = emptyList()
+            if (!usable) {
+                // 没选轨 / 缺令牌 / 画面还没量好：什么都不做（引擎渲染开关在下面统一处理）
             } else if (rawSub?.first == ref) {
-                rawSub!!.second                       // 同一条轨：直接用缓存
+                // 同一条轨：直接用缓存（改字号/位置时不用再去拉一遍）
+                cues = io.movieclaw.android.core.playback.SubtitleCues.parse(rawSub!!.second)
             } else {
                 fetchingSubtitle = true
+                // 内封轨的整轨要服务端**通读整个容器**（实测 5.7 GB / 39.7 秒），所以分两步：
+                //  ① 后台预热由上面那条独立 effect 负责（不随断开取消，快速切集/离页不白读）；
+                //  ② 这里先只要起播点附近一个窗口（几秒回来），把这一段字幕立刻画上；
+                // 整轨到手后整表替换（时间戳都是文件时间，位置对齐，看不出换过）。
+                if (ref.startsWith("embedded:")) {
+                    val winStart = (state.session.startMs - SUBTITLE_PREROLL_MS).coerceAtLeast(0L)
+                    val winStarted = android.os.SystemClock.elapsedRealtime()
+                    val winBytes = loadSubtitle(fileId, ref, token, winStart, winStart + SUBTITLE_WINDOW_MS)
+                    val winCues = winBytes?.let { io.movieclaw.android.core.playback.SubtitleCues.parse(it) }.orEmpty()
+                    android.util.Log.i(
+                        "McAss",
+                        "窗口字幕 ${winCues.size} 条 ${winBytes?.size ?: 0} 字节，耗时 " +
+                            "${android.os.SystemClock.elapsedRealtime() - winStarted} 毫秒",
+                    )
+                    if (winCues.isNotEmpty()) {
+                        cues = winCues
+                        subCues = winCues
+                        // 这一段已经上屏：剩下的整轨是后台的活，「字幕加载中」到此为止
+                        // （否则字幕明明显示着，进度条还挂一分钟——实机观感很怪）
+                        fetchingSubtitle = false
+                        // 叠层先接管：引擎要是也在画，两层叠着就是"带黑框"的观感（实机踩过）
+                        runCatching { controller.setEngineSubtitleRendering(state.session.decision.disc == "image") }
+                    }
+                }
                 val started = android.os.SystemClock.elapsedRealtime()
-                val loaded = loadSubtitle(fileId, ref, token)
+                val loaded = loadSubtitle(fileId, ref, token, null, null)
                 android.util.Log.i(
                     "McAss",
                     "字幕内容到手 ${loaded?.size ?: 0} 字节，耗时 ${android.os.SystemClock.elapsedRealtime() - started} 毫秒",
                 )
                 fetchingSubtitle = false
                 loaded?.also { rawSub = ref to it }
+                // 整轨解析出的 cue 整表替换；空表（真的没台词 / 解析不出）保留窗口那一段
+                val full = loaded?.let { io.movieclaw.android.core.playback.SubtitleCues.parse(it) }.orEmpty()
+                if (full.isNotEmpty()) cues = full
             }
-            // 解析成**纯文本 cue**（iOS 同款）：文件自带的样式一律不要，
-            // 字号/位置/背景由本机按用户设置画——这就是"黑框"从结构上消失的原因
-            val parsed: List<io.movieclaw.android.core.playback.SubtitleCues.Cue> =
-                raw?.let { io.movieclaw.android.core.playback.SubtitleCues.parse(it) }.orEmpty()
-            android.util.Log.i("McAss", "字幕接线结果 cue=${parsed.size} 条（0 = 回落引擎渲染）")
-            subCues = parsed
+            android.util.Log.i("McAss", "字幕接线结果 cue=${cues.size} 条（0 = 回落引擎渲染）")
+            subCues = cues
             // 关键：libass 接管字幕时必须**关掉引擎自己的字幕输出**，否则两层叠着画——
             // 上层是引擎的（带黑框），看起来就像"libass 也没去掉黑框"（实机踩过）。
             // 两个内核的关法不同（Exo 关文本轨类型 / mpv 关 sub-visibility），统一交给 controller。
@@ -565,13 +661,14 @@ private fun PlayingSurface(
                 controller.setEngineSubtitleRendering(state.session.decision.disc == "image")
                 android.util.Log.i(
                     "McAss",
-                    if (parsed.isEmpty()) "引擎字幕渲染 = 关闭（本机叠层无 cue，这一条不显示）"
+                    if (cues.isEmpty()) "引擎字幕渲染 = 关闭（本机叠层无 cue，这一条不显示）"
                     else "引擎字幕渲染 = 关闭（交给本机叠层）",
                 )
             }
         }
-        // 载入提示：内封轨首次抽取要通读整个容器（实测 28 秒；服务端会缓存，第二次就秒开），
-        // 不给提示时用户只看到"选了没反应"。文案就四个字——慢的原因写日志里，不塞给用户。
+        // 载入提示：内封轨首次抽取要通读整个容器（大文件分钟级；服务端会缓存）。
+        // 窗口那一段（几秒）到了就先把字幕画上台面，所以这个提示只在"一句都还没有"时出现；
+        // 文案就四个字——慢的原因写日志里，不塞给用户。
         if (fetchingSubtitle) {
             Row(
                 Modifier
@@ -838,16 +935,18 @@ private fun PlayingSurface(
         }
 
         // ── 跳过片头/片尾（docs/design/skip-intro.md §5，逻辑照 iOS SkipSegments）──
-        // 位置进区间（终点前 3s 前）出按钮，点了跳到区间尾；「other」段观众眼里也是片头，
-        // 文案同为「跳过片头」。一直放到结尾的片尾不出（交给连播卡），两者不同时出现。
-        // 片段模式/已播完/报错/要同意/锁屏都不给（报错与同意在 Playing 分支之外，天然排除）。
-        // 不自动跳过（v1 拍板）。
+        // 位置进区间（终点前 3s 前）出按钮，点了跳到区间尾；文案只按服务端类型走
+        // （广告 / 预告 / 未分类各有各的，见 `controller.skipLabel`）。一直放到结尾的片尾不出
+        // （交给连播卡）。片段模式/已播完/报错/要同意/锁屏都不给。不自动跳过（v1 拍板）。
         val activeSkip = remember(positionMs) { controller.activeSkipSegment() }
         // 「一直放到结尾」的片尾：连播卡提前到片尾起点就弹，不必等最后 40 秒
         val inFileOutro = remember(positionMs) { controller.isInFileOutro() }
         val remaining = durationMs - positionMs
+        // 谁占右下角：照 iOS `SkipSegments.shouldShowUpNext` 的串行判断——播完必出卡；
+        // **当前有可跳的段就不出卡**（手动跳过优先，免得「最后 40 秒」的卡盖住「跳过预告」）；
+        // 认出结尾片尾提前出；否则最后 40 秒兜底。（此前这里是反的：出了卡才不出按钮。）
         val upNextShowing = upNext != null && !upNextDismissed && !locked &&
-            (ended || remaining in 1..40_000 || inFileOutro)
+            (ended || (activeSkip == null && (inFileOutro || remaining in 1..40_000)))
         if (activeSkip != null && !locked && !ended && !upNextShowing) {
             Text(
                 controller.skipLabel(activeSkip),
@@ -855,41 +954,86 @@ private fun PlayingSurface(
                 color = Color.White,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 20.dp, bottom = 96.dp)
+                    .padding(end = 16.dp, bottom = 96.dp)
                     .clip(RoundedCornerShape(999.dp))
-                    .background(Color.Black.copy(alpha = 0.55f))
-                    .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(999.dp))
+                    // iOS 是系统液态玻璃（`.buttonStyle(.glass)`）。播放页做不了真模糊：
+                    // 视频在 SurfaceView 上（mpv / PlayerView 都是系统合成），Haze 抓不到它的像素；
+                    // 所以取项目里那份「黑底等价」的玻璃（GlassCapsule 半透明灰底）+ 一圈淡白边。
+                    .background(GlassCapsule)
+                    .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(999.dp))
                     .clickable {
-                        autoNextStreak = 0   // 任何用户操作都清零连播计数
+                        autoNextStreak = 0   // 任何用户操作都清零连播计数（iOS noteUserActivity）
                         seekTo(activeSkip.endMs)
                     }
-                    .padding(horizontal = 16.dp, vertical = 9.dp),
+                    .padding(horizontal = 17.dp, vertical = 9.dp),
             )
         }
 
-        // 片尾连播卡（iOS PlayerUpNextCard）：T−40s 或服务端认出的片尾起点出现。
-        // 自动连播只在「服务端认出一直放到结尾的片尾」时启用（按最后 40 秒猜出来的
-        // 片尾，字幕还没放完画面就被抢走）：8 秒倒计时、连播 ≤3 集、任何用户操作清零——
-        // 人多半睡着了，也别让 NAS 白转一晚上。倒计时进度画在「立即播放」按钮上。
+        // 片尾连播卡（iOS PlayerUpNextCard）：T−40s、服务端认出的片尾起点、或已播完时出现。
+        // 自动连播只在「服务端认出一直放到结尾的片尾」时武装（按最后 40 秒猜出来的片尾，
+        // 字幕还没放完画面就被抢走）：8 秒倒计时、连播 ≤3 集、任何用户操作清零（人半睡着时
+        // 别让 NAS 白转一晚上）。倒计时 = 「立即播放」按钮本身的填充。
         if (upNextShowing) {
-            val armed = inFileOutro && !ended && playing && autoNextStreak < 3
-            LaunchedEffect(inFileOutro, playing, upNext, upNextDismissed, locked) {
-                if (!armed || upNext == null) return@LaunchedEffect
-                autoNextLeft = 8
-                while (autoNextLeft > 0) {
-                    delay(1_000)
-                    if (!armed) return@LaunchedEffect
-                    autoNextLeft--
-                }
-                autoNextStreak++
-                onPlayNext(upNext)
+            val nextArmed = upNext != null && inFileOutro && autoNextStreak < 3
+            // A：片尾卡一露头就**预热下一集**的字幕（内封轨）。整轨要服务端通读整部片
+            // （实测 5.7 GB / 39.7 秒），而卡最早只在结束前 40 秒出现——这段时间正好把
+            // 下一集的抽取跑掉，切过去就是缓存命中（0.01 秒）。
+            // 门槛：字幕开着且不是位图轨、此刻真的在播（暂停/卡顿时不抢盘）、每个文件只发一次。
+            // 不管网络类型：读盘发生在服务端（NAS），手机上只为那几十 KB 字幕付流量，
+            // 与"在流量上下整部片"是两回事。
+            LaunchedEffect(upNextShowing, upNext?.fileId, selectedSubtitleRef, playing) {
+                val nextFileId = upNext?.fileId ?: return@LaunchedEffect
+                val ref = selectedSubtitleRef ?: return@LaunchedEffect
+                if (!playing || !ref.startsWith("embedded:")) return@LaunchedEffect
+                // 位图轨（PGS）服务端抽不出文本、预热口子会 400，不白问
+                if (decision.subtitles.any { it.trackRef == ref && it.kind == "pgs" }) return@LaunchedEffect
+                if (!warmedSubtitleKeys.add("$nextFileId:$ref")) return@LaunchedEffect
+                kotlinx.coroutines.delay(3_000)          // 卡刚出现时正在换段/收尾，让出这几秒
+                if (!playing) return@LaunchedEffect
+                warmSubtitle(nextFileId, ref)
             }
+            // 倒计时的钟：挂在卡片上（iOS 同款）——卡片收起 / 换集 / 拖出片尾，循环随之取消。
+            // 语义照 iOS `advanceAutoNext`：**暂停冻住、播完照走**；未武装时进度清零。
+            // 进度按**帧时钟**推进，每帧只加「这一帧真实流逝的时间」（暂停的那一帧不加）：
+            // 早先是 100 毫秒跳 1/80，一格一格看得见台阶（用户反馈「不丝滑」）。
+            LaunchedEffect(upNextShowing, inFileOutro, upNext?.episodeNumber, upNextDismissed, locked) {
+                autoNextProgress = 0f
+                if (!nextArmed) return@LaunchedEffect
+                var lastFrameNs: Long? = null
+                while (true) {
+                    withFrameNanos { frameNs ->
+                        val prevNs = lastFrameNs
+                        lastFrameNs = frameNs
+                        if (prevNs != null && (playing || ended)) {
+                            autoNextProgress =
+                                (autoNextProgress + (frameNs - prevNs) / 8_000_000_000f).coerceAtMost(1f)
+                        }
+                    }
+                    if (!(inFileOutro && autoNextStreak < 3)) return@LaunchedEffect
+                    if (autoNextProgress >= 1f) {
+                        autoNextProgress = 0f
+                        autoNextStreak += 1
+                        onPlayNext(upNext)
+                        return@LaunchedEffect
+                    }
+                }
+            }
+            // 进度读取器：进度每帧都在变，在这里读值会把整个播放页拖进每帧重组；
+            // 推迟到卡片内部读，只有卡片里真用到它的那几个节点跟着动（丝滑的另一半）。
+            val autoNextProgressReader = { autoNextProgress }
             UpNextCard(
                 upNext = upNext,
-                onPlay = { onPlayNext(upNext); upNextDismissed = false },
-                onDismiss = { upNextDismissed = true },
-                autoNextInSec = if (armed) autoNextLeft else null,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 48.dp, vertical = 96.dp),
+                countdown = if (nextArmed) autoNextProgressReader else null,
+                onPlay = {
+                    autoNextStreak = 0                     // 用户操作清零（iOS noteUserActivity）
+                    upNextDismissed = false
+                    onPlayNext(upNext)
+                },
+                onDismiss = {
+                    autoNextStreak = 0
+                    upNextDismissed = true
+                },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 96.dp),
             )
         }
 
@@ -1154,64 +1298,114 @@ private fun GlassRoundButton(
     }
 }
 
-/** 片尾连播卡:宽 224,常驻到点击或关闭(不自动倒计时 —— 倒计时会在片尾没看完时抢画面) */
+/**
+ * 片尾连播卡（iOS `PlayerUpNextCard`）——手机横屏 = iOS「高度紧」那一档（紧凑款）：
+ * 宽 252、圆角 26、内距 14、**不放剧照**；眉题「即将播放 · N 秒」（等宽数字、白 50%）、
+ * 集号（白 70%）、集名（semibold、白、最多两行）；右上 ✕（可见圆 28、白 14% 底、触控 44）；
+ * 底部「立即播放」——**黑字白底高 34 的胶囊，倒计时就是它上面的白色填充**（白 35% 底打满即换集），
+ * 不倒计时是实心白。平板（高度不紧）才有左剧照 112×63，等安卓平板适配时按 iOS 的
+ * `verticalSizeClass` 再补这一档（见 preview-player-skip-ios.html 的竖屏开关）。
+ */
 @Composable
 private fun UpNextCard(
     upNext: PlayerViewModel.UpNext,
+    /** 倒计时进度 0...1 的读取器；null = 不倒计时（实心白按钮）。
+     *  传读取器不是传值：进度每帧在变，值在调用方读会把整个播放页拖进每帧重组 */
+    countdown: (() -> Float)?,
     onPlay: () -> Unit,
     onDismiss: () -> Unit,
-    /** 服务端认出「一直放到结尾」的片尾时的自动连播倒计时（秒）；null = 不倒计时 */
-    autoNextInSec: Int? = null,
     modifier: Modifier = Modifier,
 ) {
-    Box(
+    // 进度在这里读（每帧只重组这张卡自己），取一次给眉题和填充共用
+    val progress = countdown?.invoke()?.coerceIn(0f, 1f)
+    // iOS：眉题「即将播放 · N 秒」，秒数向上取整、最少 1
+    val leftSec = progress?.let { kotlin.math.ceil((1f - it) * 8f).toInt().coerceAtLeast(1) }
+    Column(
         modifier
-            .width(224.dp)
-            .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(22.dp))
+            .width(252.dp)
+            .clip(RoundedCornerShape(26.dp))
+            // 播放页的玻璃只能是「黑底等价」（视频在 SurfaceView 上，Haze 抓不到像素）：
+            // 近 iOS `Glass.regular + 黑 35%` 的观感——半透明深底 + 一圈白 12% 描边
+            .background(Color(0xFF121316).copy(alpha = 0.55f))
+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(26.dp))
             .padding(14.dp),
     ) {
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("即将播放", style = McType.caption, color = Color.White.copy(alpha = 0.7f))
-                Spacer(Modifier.weight(1f))
-                Box(
-                    Modifier
-                        .size(30.dp)
-                        .clickable(onClick = onDismiss),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("✕", style = McType.subheadline, color = Color.White.copy(alpha = 0.8f))
+        Row(verticalAlignment = Alignment.Top) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (leftSec != null) "即将播放 · $leftSec 秒" else "即将播放",
+                    style = TextStyle(fontSize = 11.sp, fontFeatureSettings = "tnum"),
+                    color = Color.White.copy(alpha = 0.5f),
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "第 ${upNext.episodeNumber} 集",
+                    style = McType.caption,
+                    color = Color.White.copy(alpha = 0.7f),
+                )
+                if (upNext.label.isNotEmpty()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        upNext.label,
+                        style = McType.subheadlineSemibold,
+                        color = Color.White,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "第 ${upNext.seasonNumber} 季 第 ${upNext.episodeNumber} 集",
-                style = McType.subheadlineSemibold,
-                color = Color.White,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (upNext.label.isNotEmpty()) {
-                Text(upNext.label, style = McType.caption, color = Color.White.copy(alpha = 0.7f), maxLines = 1)
-            }
-            Spacer(Modifier.height(10.dp))
-            Button(
-                onClick = onPlay,
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = AccentStrong, contentColor = Color(0xFF0A0E12)),
-                modifier = Modifier.fillMaxWidth(),
+            // ✕：可见圆 28 + 触控 44（负 padding 把触控区往角上贴，不撑高排版——iOS 同款）
+            Box(
+                Modifier
+                    .offset(x = 8.dp, y = (-8).dp)
+                    .size(44.dp)
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center,
             ) {
-                // 自动连播时「立即播放」本身就是这条进度（iOS 同款）：数字走到 0 自动播下一集
-                Text(
-                    if (autoNextInSec != null) "立即播放 · ${autoNextInSec}s" else "立即播放",
-                    style = McType.subheadlineSemibold,
+                Box(
+                    Modifier.size(28.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("✕", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.8f))
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        // 立即播放：黑字、高 34、胶囊；倒计时 = 白 35% 底上白色左→右填充（iOS 同款）
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(34.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(if (progress == null) Color.White else Color.White.copy(alpha = 0.35f))
+                .clickable(onClick = onPlay),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (progress != null) {
+                Box(
+                    Modifier
+                        .align(Alignment.CenterStart)
+                        .fillMaxHeight()
+                        .fillMaxWidth(progress)
+                        .background(Color.White),
                 )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = Color.Black, modifier = Modifier.size(15.dp))
+                Text("立即播放", style = McType.caption, fontWeight = FontWeight.SemiBold, color = Color.Black)
             }
         }
     }
 }
 
 private const val HOLD_SPEED = 2f
+
+/** 窗口字幕：起播点往前多要 10 秒（上集续播/跳片头的落点都盖得住） */
+private const val SUBTITLE_PREROLL_MS = 10_000L
+
+/** 窗口要多少：5 分钟就够——整轨通常 40 秒内到，这 5 分钟只是给"整轨还没好就往前拖"留余量
+ *  （服务端上限 600 秒，超了会被截断；窗口越短读得越少、回来得越快） */
+private const val SUBTITLE_WINDOW_MS = 300_000L
 
 /** 降质建议卡(iOS PlayerQualityOfferView):窄卡、圆角 22、两个按钮 */
 @Composable
