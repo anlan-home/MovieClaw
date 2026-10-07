@@ -350,7 +350,8 @@ class ActivityViewModel @Inject constructor(
     fun retryJob(job: JobView) = jobAction { it.retryJob(job.id) }
     fun dismissJob(job: JobView) = jobAction { it.dismissJob(job.id) }
 
-    private fun jobAction(block: suspend (io.movieclaw.android.core.api.McApi) -> io.movieclaw.android.core.network.McEnvelope<kotlinx.serialization.json.JsonElement>) {
+    /** 任务动作（取消 / 重跑）：只看有没有抛错，做完重拉快照——返回类型不关心 */
+    private fun jobAction(block: suspend (io.movieclaw.android.core.api.McApi) -> io.movieclaw.android.core.network.McEnvelope<*>) {
         viewModelScope.launch {
             val origin = origin ?: return@launch
             runCatching { block(apiFactory.forOrigin(origin)) }
