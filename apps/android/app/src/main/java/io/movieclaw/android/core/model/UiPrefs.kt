@@ -7,10 +7,11 @@ import kotlinx.serialization.json.JsonElement
  * 媒体库首页的一「行」偏好 —— 照抄服务端 `schemas.ui.HomeRowPref`
  * （iOS `API.HomeRowPref` 同源）。
  *
- * id 的四种形状：
+ * id 的形状：
  *  - 内置行 `up-next` / `favorites` / `libraries`：只存 `hidden`（收藏行多一个 `sort`）；
  *  - 默认库行 `lib:<library_id>`：每库一条，能藏、能改排序和名字，不能删；
- *  - 自加行 `row:<slug>`：必须且只能带 `library_id` 或 `collection_id` 之一。
+ *  - 自加行 `row:<slug>`：必须且只能带 `library_id` / `collection_id` / `media_kind` 之一；
+ *  - 类型聚合行 `kind:<media_kind>` 与 `media_kind` 来源的自加行暂不展示，保存时保留。
  *
  * 除 `id` 外全部可空：空即默认（排序用预设、名字跟随推荐、不隐藏）。
  */
@@ -27,6 +28,8 @@ data class HomeRowPref(
     val hidden: Boolean? = null,
     val libraryId: Long? = null,
     val collectionId: Long? = null,
+    /** Android 尚未展示的类型聚合行，保存首页时仍须原样保留。 */
+    val mediaKind: String? = null,
 )
 
 /** 媒体库首页的行清单（每个成员一份，超管走全局域）。空列表 = 出厂布局。 */

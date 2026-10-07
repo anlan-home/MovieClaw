@@ -86,7 +86,6 @@ import io.movieclaw.android.core.model.CollectionView
 import io.movieclaw.android.core.model.HomePrefsBus
 import io.movieclaw.android.core.model.HomeRows
 import io.movieclaw.android.core.model.LibraryView
-import io.movieclaw.android.core.model.UiPreferencesSetting
 import io.movieclaw.android.core.network.ApiFactory
 import io.movieclaw.android.core.network.dataOrThrow
 import io.movieclaw.android.core.network.friendlyMessage
@@ -132,9 +131,6 @@ class LibraryCustomizeViewModel @Inject constructor(
     private val _ui = MutableStateFlow(Ui())
     val ui = _ui.asStateFlow()
 
-    /** 完整偏好（PUT 是整体覆盖，必须带着它整份发回） */
-    private var fullPrefs: UiPreferencesSetting? = null
-
     /** 还没落地的草稿（防抖窗口里的那份） */
     private var draft: List<HomeRows.Row>? = null
     private var saveJob: Job? = null
@@ -155,7 +151,6 @@ class LibraryCustomizeViewModel @Inject constructor(
                 val libs = api.libraries().dataOrThrow()
                 val cols = runCatching { api.collections().dataOrThrow() }.getOrDefault(emptyList())
                 val prefs = api.uiPreferences().dataOrThrow()
-                fullPrefs = prefs
                 draft = null
                 _ui.value = Ui(
                     loading = false,
@@ -230,11 +225,20 @@ class LibraryCustomizeViewModel @Inject constructor(
         _ui.value = _ui.value.copy(saving = true)
         try {
             val api = apiFactory.forOrigin(origin)
-            // 以完整偏好为底，只换 home.rows（取不到就现拉一份）
-            val base = fullPrefs ?: api.uiPreferences().dataOrThrow()
-            val body = base.copy(home = base.home.copy(rows = HomeRows.toPrefs(rows)))
+            // PUT 整体覆盖：每次保存先读最新偏好，不能写回其他设备已改过的旧主题。
+            val base = api.uiPreferences().dataOrThrow()
+            val next = HomeRows.toPrefs(rows).toMutableList()
+            // 普通编辑总有内置行；空清单是用户明确点击「恢复默认」。
+            if (rows.isNotEmpty()) {
+                val editableIds = HomeRows.build(base.home.rows, _ui.value.libraries, _ui.value.collections)
+                    .map { it.id }.toSet()
+                // 未展示的类型行或暂不可见的来源不等于用户删除；保留其配置及位置。
+                base.home.rows.forEachIndexed { index, pref ->
+                    if (pref.id !in editableIds) next.add(index.coerceAtMost(next.size), pref)
+                }
+            }
+            val body = base.copy(home = base.home.copy(rows = next))
             val saved = api.updateUiPreferences(body).dataOrThrow()
-            fullPrefs = saved
             if (draft == rows) draft = null
             _ui.value = _ui.value.copy(
                 saving = false,
