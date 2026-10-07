@@ -68,6 +68,12 @@ data class JobView(
     val resources: List<JobResourceView> = emptyList(),
     /** 已确认的任务输入（永不包含密钥） */
     val inputData: JsonObject? = null,
+    /** 结束结果（成功时的摘要等；服务端 `JobView.result`） */
+    val result: JsonObject? = null,
+    /** 用量：模型调用次数与 token（服务端 `JobView.usage`） */
+    val usage: JobUsage = JobUsage(),
+    /** 开始时间；「已用时」由它算出来（缺失按 0） */
+    val startedAt: String? = null,
     /** 被用户忽略的时间；非空 = 不再出现在「需要处理」里 */
     val dismissedAt: String? = null,
     /** 取消是谁发起的；`system:` 前缀 = 系统取消（不给「重新执行」，重跑了也白跑） */
@@ -86,6 +92,13 @@ data class JobView(
 data class JobListView(
     val items: List<JobView> = emptyList(),
     val running: Boolean = false,
+)
+
+/** 任务用量（服务端 `JobView.usage`）：模型调用次数与 token 数 */
+@Serializable
+data class JobUsage(
+    val requestCount: Int = 0,
+    val totalTokens: Long = 0,
 )
 
 /** `GET /jobs/events` 的 SSE 载荷（job_id + 事件类型 + 载荷） */

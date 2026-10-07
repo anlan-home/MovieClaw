@@ -439,6 +439,8 @@ fun AppNav() {
                     PlaybackSettingsScreen(onBack = { navController.popBackStack() })
                 io.movieclaw.android.feature.settings.SettingsSection.MEMBERS ->
                     MembersSettingsScreen(onBack = { navController.popBackStack() })
+                io.movieclaw.android.feature.settings.SettingsSection.LLM ->
+                    io.movieclaw.android.feature.settings.LlmSettingsScreen(onBack = { navController.popBackStack() })
                 io.movieclaw.android.feature.settings.SettingsSection.MAINTENANCE ->
                     MaintenanceSettingsScreen(onBack = { navController.popBackStack() })
                 io.movieclaw.android.feature.settings.SettingsSection.NETWORK ->
@@ -472,6 +474,10 @@ fun AppNav() {
                 onOpenPerson = { tmdbPersonId -> navController.navigate("person/$tmdbPersonId") },
                 // 文件区「处理重复」→ 媒体库管理的「重复文件」页签（iOS `.libraryManage(tab: "duplicates")`）
                 onOpenDuplicates = { navController.navigate("libraryManage?tab=2") },
+                // 「去接入」→ 设置「模型接入」（iOS `.settingsSection(.llm)`）
+                onOpenLlmSettings = { navController.navigate("settings/LLM") },
+                // 「交给 Agent 处理」建好会话 → 会话页
+                onOpenAgentSession = { id -> navController.navigate("agentConversation/$id") },
             )
         }
         composable("player") {

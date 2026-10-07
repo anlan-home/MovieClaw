@@ -4,6 +4,7 @@ import io.movieclaw.android.core.model.AgentAttachment
 import io.movieclaw.android.core.model.AgentSessionStart
 import io.movieclaw.android.core.model.FsBrowseView
 import io.movieclaw.android.core.model.HandoffPrompt
+import io.movieclaw.android.core.model.JobView
 import io.movieclaw.android.core.model.HandoffRequest
 import io.movieclaw.android.core.model.LibraryGalleryGroupView
 import io.movieclaw.android.core.model.ActivePlaybackSession
@@ -619,6 +620,32 @@ interface McApi {
         @Query("track") track: String,
     ): McEnvelope<JsonElement>
 
+    /**
+     * AI 字幕生成·预检（管理员）：只读 DB 与现成产物、**不读视频**——客户端 20 秒超时，
+     * 超了就是异常。参数变了就重发（客户端要先把在途请求掐掉，免得同一大文件起多次抽取）。
+     */
+    @GET("libraries/files/{fileId}/subtitles/generation-preview")
+    suspend fun subtitleGenerationPreview(
+        @Path("fileId") fileId: Long,
+        @Query("target_language") targetLanguage: String = "chs",
+        @Query("secondary_language") secondaryLanguage: String? = null,
+        @Query("source_candidate_key") sourceCandidateKey: String? = null,
+    ): McEnvelope<io.movieclaw.android.core.model.SubtitleGenPreviewView>
+
+    /** AI 字幕生成·启动（管理员）：202 + 任务视图；同参数的重复请求会返回既有任务 */
+    @POST("libraries/files/{fileId}/subtitles/generations")
+    suspend fun startSubtitleGeneration(
+        @Path("fileId") fileId: Long,
+        @Body body: io.movieclaw.android.core.model.SubtitleGenStartPayload,
+    ): McEnvelope<JobView>
+
+    /** 删除一条外挂字幕（含 AI 产物）；filename 是不含目录的文件名 */
+    @DELETE("libraries/files/{fileId}/subtitles")
+    suspend fun deleteFileSubtitle(
+        @Path("fileId") fileId: Long,
+        @Query("filename") filename: String,
+    ): McEnvelope<JsonElement>
+
     @POST("playback/progress")
     suspend fun reportProgress(@Body body: PlaybackProgressRequest): McEnvelope<PlaybackStateView>
 
@@ -841,10 +868,20 @@ interface McApi {
     /* ---------------- 活动中心(M2b) ---------------- */
 
     @GET("jobs")
-    suspend fun jobs(@Query("active_only") activeOnly: Boolean = false): McEnvelope<JobListView>
+    suspend fun jobs(
+        @Query("active_only") activeOnly: Boolean = false,
+        /** 只要某一类任务（如 `subtitle.generate`） */
+        @Query("job_type") jobType: String? = null,
+        /** 按资源过滤（`library_file` + resource_id = 文件台账 id） */
+        @Query("resource_type") resourceType: String? = null,
+        @Query("resource_id") resourceId: Long? = null,
+        @Query("status") status: String? = null,
+        @Query("limit") limit: Int? = null,
+    ): McEnvelope<JobListView>
 
+    /** 停止任务：返回 `{cancelled, job}`，job 是停止请求之后的任务快照 */
     @POST("jobs/{jobId}/cancel")
-    suspend fun cancelJob(@Path("jobId") jobId: String): McEnvelope<JsonElement>
+    suspend fun cancelJob(@Path("jobId") jobId: String): McEnvelope<io.movieclaw.android.core.model.JobCancelView>
 
     @POST("jobs/{jobId}/retry")
     suspend fun retryJob(@Path("jobId") jobId: String): McEnvelope<JsonElement>
@@ -968,7 +1005,33 @@ interface McApi {
 
     /** 已接入的模型供应商；**空数组 = 未配置**（AI 入口的门禁口径） */
     @GET("llm/providers")
-    suspend fun llmProviders(): McEnvelope<List<JsonElement>>
+    suspend fun llmProviders(): McEnvelope<List<io.movieclaw.android.core.model.LlmProviderView>>
+
+    /** 可接入的供应商预设（含各自的模型目录） */
+    @GET("llm/presets")
+    suspend fun llmPresets(): McEnvelope<List<io.movieclaw.android.core.model.LlmPresetView>>
+
+    /** 新建供应商；返回写入后的实例（API Key 不回传），状态先 pending、后台自动测试连接 */
+    @POST("llm/providers")
+    suspend fun createLlmProvider(
+        @Body body: io.movieclaw.android.core.model.LlmProviderPayload,
+    ): McEnvelope<io.movieclaw.android.core.model.LlmProviderView>
+
+    /** 编辑供应商（每次都要重新填 API Key：已保存的密钥不回显） */
+    @PUT("llm/providers/{providerId}")
+    suspend fun updateLlmProvider(
+        @Path("providerId") providerId: Int,
+        @Body body: io.movieclaw.android.core.model.LlmProviderPayload,
+    ): McEnvelope<io.movieclaw.android.core.model.LlmProviderView>
+
+    /** 手动重测连接 */
+    @POST("llm/providers/{providerId}/verify")
+    suspend fun verifyLlmProvider(
+        @Path("providerId") providerId: Int,
+    ): McEnvelope<io.movieclaw.android.core.model.LlmProviderView>
+
+    @DELETE("llm/providers/{providerId}")
+    suspend fun deleteLlmProvider(@Path("providerId") providerId: Int): McEnvelope<JsonElement>
 
     @POST("sessions/{sessionId}/stop")
     suspend fun stopAgentSession(@Path("sessionId") sessionId: String): McEnvelope<JsonElement>

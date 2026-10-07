@@ -115,6 +115,10 @@ import io.movieclaw.android.core.network.friendlyMessage
 import io.movieclaw.android.core.playback.PlayTarget
 import io.movieclaw.android.core.session.SessionRepository
 import javax.inject.Inject
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.DisposableEffect
+import io.movieclaw.android.feature.activity.LlmGate
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -140,6 +144,7 @@ class ItemDetailViewModel @Inject constructor(
     private val repository: SessionRepository,
     private val apiFactory: ApiFactory,
     private val preconnect: io.movieclaw.android.core.playback.PlaybackPreconnect,
+    private val eventStream: io.movieclaw.android.core.network.EventStream,
 ) : ViewModel() {
 
     val libraryId: Long = savedStateHandle.get<String>("libraryId")?.toLongOrNull() ?: -1L
@@ -179,6 +184,291 @@ class ItemDetailViewModel @Inject constructor(
         // 详情页是播放入口：进页就把起播要用的两条连接连好（iOS `LibraryItemDetailView.task` 同款）
         preconnect.warm()
         load()
+    }
+
+    // ───────────────────────── AI 字幕生成（iOS `TrackGenModel` 同款） ─────────────────────────
+    // 全是管理员接口；能力门禁 `GET /llm/providers` 非空 = 已配置（网页 `LlmCapabilityState` 口径）。
+
+    private val _subtitleGen = MutableStateFlow(SubtitleGenUiState())
+    val subtitleGen = _subtitleGen.asStateFlow()
+
+    /** 生成完成时回调（详情页据此重拉字幕清单，新字幕立刻可见） */
+    var onSubtitleChanged: (() -> Unit)? = null
+
+    private val _agentHandoff = MutableStateFlow<String?>(null)
+    val agentHandoff = _agentHandoff.asStateFlow()
+    fun consumeAgentHandoff() { _agentHandoff.value = null }
+
+    private var previewSeq = 0
+    private var previewTask: Job? = null
+    private var trackedFileId: Long? = null
+
+    /** 亲眼看到「活跃 → succeeded」才回调（初次读到历史成功任务不算，同 iOS `apply()`） */
+    private var sawActiveJob = false
+
+    fun closeSubtitleGen() {
+        _subtitleGen.update { it.copy(mode = null, preview = null, requestError = null, pendingMessage = null) }
+        previewTask?.cancel()
+    }
+
+    /** 能力门禁：探测失败 fail-open（按 unavailable 处理，交给提交时的服务端报错兜底） */
+    fun checkLlmGate() {
+        viewModelScope.launch {
+            val origin = origin ?: return@launch
+            val gate = runCatching { apiFactory.forOrigin(origin).llmProviders().dataOrThrow() }
+                .fold(
+                    onSuccess = { if (it.isEmpty()) LlmGate.MISSING else LlmGate.CONFIGURED },
+                    onFailure = { LlmGate.UNAVAILABLE },
+                )
+            _subtitleGen.update { it.copy(gate = gate) }
+        }
+    }
+
+    /** 点入口：运行中 / 有终态问题 → 状态弹层；未接 AI → 由界面跳「模型接入」；否则开预检 */
+    fun openSubtitleGen(fileId: Long, onNeedLlmSettings: () -> Unit) {
+        val job = _subtitleGen.value.job
+        if (job != null && (job.status in SUBTITLE_RUNNING_STATUSES || job.status in SUBTITLE_ISSUE_STATUSES)) {
+            _subtitleGen.update { it.copy(mode = SubtitleGenMode.STATUS) }
+            return
+        }
+        if (_subtitleGen.value.gate == LlmGate.MISSING) {
+            onNeedLlmSettings()
+            return
+        }
+        checkLlmGate()
+        _subtitleGen.update { it.copy(mode = SubtitleGenMode.PREVIEW) }
+        runPreview(fileId)
+    }
+
+    /**
+     * 预检：参数（语言/参考字幕）一改就重发，且**先把在途预检掐掉**——不掐的话后端会对同一个
+     * 大文件起多次抽取（iOS 同一纪律，issue #432）。客户端 20 秒超时：预检只读库，超了就是异常。
+     */
+    private fun runPreview(fileId: Long) {
+        previewTask?.cancel()
+        val seq = ++previewSeq
+        previewTask = viewModelScope.launch {
+            _subtitleGen.update {
+                it.copy(previewing = true, requestError = null, pendingMessage = null)
+            }
+            val origin = origin ?: return@launch
+            while (true) {
+                val current = _subtitleGen.value
+                val preview = try {
+                    kotlinx.coroutines.withTimeout(20_000) {
+                        apiFactory.forOrigin(origin).subtitleGenerationPreview(
+                            fileId = fileId,
+                            targetLanguage = current.targetLanguage,
+                            secondaryLanguage = current.secondaryLanguage.takeIf { current.bilingual },
+                            sourceCandidateKey = current.sourceKey,
+                        ).dataOrThrow()
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (seq == previewSeq) {
+                        _subtitleGen.update { it.copy(previewing = false, requestError = friendlyMessage(e)) }
+                    }
+                    return@launch
+                }
+                if (seq != previewSeq) return@launch
+                val pending = preview.pending
+                if (pending == null) {
+                    _subtitleGen.update { it.copy(previewing = false, preview = preview, pendingMessage = null) }
+                    return@launch
+                }
+                // 旧服务端：还在抽。这份快照的 chosen/blocker 都是空的，写进 preview 会误导成
+                // 「没有参考字幕」——只显示等待文案，按服务端建议的间隔重拉。
+                _subtitleGen.update { it.copy(pendingMessage = pending.message) }
+                delay(pending.retryAfterMs.coerceAtLeast(1_000))
+            }
+        }
+    }
+
+    fun setTargetLanguage(fileId: Long, token: String) {
+        _subtitleGen.update { s ->
+            val secondary = if (s.bilingual && s.secondaryLanguage == token) firstOtherLanguage(token) else s.secondaryLanguage
+            s.copy(targetLanguage = token, secondaryLanguage = secondary)
+        }
+        runPreview(fileId)
+    }
+
+    fun setSecondaryLanguage(fileId: Long, token: String) {
+        _subtitleGen.update { it.copy(secondaryLanguage = token) }
+        runPreview(fileId)
+    }
+
+    fun setBilingual(fileId: Long, on: Boolean) {
+        _subtitleGen.update { s ->
+            val secondary = if (on && s.secondaryLanguage == s.targetLanguage) firstOtherLanguage(s.targetLanguage) else s.secondaryLanguage
+            s.copy(bilingual = on, secondaryLanguage = secondary)
+        }
+        runPreview(fileId)
+    }
+
+    /** 指定参考字幕（null 传不了，界面只在用户点选时调用） */
+    fun setSourceKey(fileId: Long, ref: String) {
+        _subtitleGen.update { it.copy(sourceKey = ref) }
+        runPreview(fileId)
+    }
+
+    /** PGS 的「原字幕语言」：**不重发预检**，只在提交时带上（iOS 同款） */
+    fun setPgsOcrLanguage(token: String) {
+        _subtitleGen.update { it.copy(pgsOcrLanguage = token) }
+    }
+
+    fun confirmSubtitleGen(fileId: Long) {
+        val s = _subtitleGen.value
+        val canPreparePgs = s.preview?.blocker?.code == "pgs_conversion_required" &&
+            s.preview.pgsConversion?.available == true
+        viewModelScope.launch {
+            _subtitleGen.update { it.copy(starting = true, requestError = null) }
+            val origin = origin ?: return@launch
+            val result = runCatching {
+                apiFactory.forOrigin(origin).startSubtitleGeneration(
+                    fileId = fileId,
+                    body = io.movieclaw.android.core.model.SubtitleGenStartPayload(
+                        targetLanguage = s.targetLanguage,
+                        secondaryLanguage = s.secondaryLanguage.takeIf { s.bilingual },
+                        sourceCandidateKey = s.sourceKey,
+                        convertPgs = canPreparePgs,
+                        pgsOcrLanguage = s.pgsOcrLanguage.takeIf { canPreparePgs && it.isNotBlank() },
+                    ),
+                ).dataOrThrow()
+            }
+            result.onSuccess { job ->
+                if (job.status in SUBTITLE_RUNNING_STATUSES) sawActiveJob = true
+                _subtitleGen.update { it.copy(starting = false, job = job, mode = SubtitleGenMode.STATUS) }
+                trackSubtitleJob(fileId)
+            }.onFailure { e ->
+                _subtitleGen.update { it.copy(starting = false, requestError = friendlyMessage(e)) }
+            }
+        }
+    }
+
+    fun cancelSubtitleJob() {
+        val job = _subtitleGen.value.job ?: return
+        viewModelScope.launch {
+            val origin = origin ?: return@launch
+            runCatching { apiFactory.forOrigin(origin).cancelJob(job.id).dataOrThrow().job }
+                .getOrNull()?.let { updated -> _subtitleGen.update { it.copy(job = updated) } }
+        }
+    }
+
+    /** 「重新检查 / 重新预检」：回到预检模式重跑（状态弹层里点它是同一个语义） */
+    fun retrySubtitlePreview(fileId: Long) {
+        _subtitleGen.update { it.copy(mode = SubtitleGenMode.PREVIEW, preview = null) }
+        runPreview(fileId)
+    }
+
+    /** 「交给 Agent 处理」：新会话的首条消息就是那段诊断提示词（逐字照 iOS/网页） */
+    fun handOffSubtitleGenToAgent(fileId: Long) {
+        val file = (state.value as? Loadable.Ready)?.value?.item?.files?.firstOrNull { it.id == fileId }
+        viewModelScope.launch {
+            _subtitleGen.update { it.copy(agentStarting = true) }
+            val origin = origin ?: return@launch
+            val prompt = subtitleGenAgentPrompt(fileId, file)
+            val created = runCatching {
+                apiFactory.forOrigin(origin)
+                    .startAgentSession(io.movieclaw.android.core.model.AgentSessionStart(content = prompt))
+                    .dataOrThrow()
+            }
+            _subtitleGen.update { it.copy(agentStarting = false) }
+            created.onSuccess { accepted -> _agentHandoff.value = accepted.sessionId }
+                .onFailure { e ->
+                    _subtitleGen.update { it.copy(requestError = "无法启动 Agent：${friendlyMessage(e)}") }
+                }
+        }
+    }
+
+    /** 字幕任务的跟踪：SSE（ready/job，120ms 去抖）+ 15 秒兜底轮询（iOS `.polling(every: 15)`） */
+    fun trackSubtitleJob(fileId: Long?) {
+        if (fileId == null || trackedFileId == fileId) return
+        trackedFileId = fileId
+        viewModelScope.launch {
+            runCatching {
+                eventStream.reliableEvents("jobs/stream").collect { event ->
+                    if (event.name == "ready" || event.name == "job") {
+                        delay(120)
+                        refreshSubtitleJob(fileId)
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            while (true) {
+                refreshSubtitleJob(fileId)
+                delay(15_000)
+            }
+        }
+    }
+
+    private suspend fun refreshSubtitleJob(fileId: Long) {
+        val origin = origin ?: return
+        val job = runCatching {
+            apiFactory.forOrigin(origin).jobs(
+                jobType = "subtitle.generate",
+                resourceType = "library_file",
+                resourceId = fileId,
+                limit = 5,
+            ).dataOrThrow().items.maxByOrNull { it.updatedAt.orEmpty() }
+        }.getOrNull() ?: return
+        val wasActive = sawActiveJob
+        if (job.status in SUBTITLE_RUNNING_STATUSES) sawActiveJob = true
+        _subtitleGen.update { it.copy(job = job) }
+        if (wasActive && job.status == "succeeded") {
+            sawActiveJob = false
+            onSubtitleChanged?.invoke()
+        }
+    }
+
+    /** 双语第二行默认取表里第一条不同语言（iOS `nextSecondary`） */
+    private fun firstOtherLanguage(token: String): String =
+        SubtitleGenText.outputLanguages.map { it.first }.firstOrNull { it != token } ?: token
+
+    /** 「交给 Agent 处理」的提示词（逐字照 iOS/Web 的模板） */
+    private fun subtitleGenAgentPrompt(
+        fileId: Long,
+        file: io.movieclaw.android.core.model.LibraryFileView?,
+    ): String {
+        val s = _subtitleGen.value
+        val job = s.job
+        val target = job?.progress?.details?.get("target_language")?.let { runCatching { it.toString().trim('"') }.getOrNull() }
+            ?.takeIf { it.isNotBlank() } ?: s.targetLanguage
+        val secondary = job?.progress?.details?.get("secondary_language")?.let { runCatching { it.toString().trim('"') }.getOrNull() }
+            ?.takeIf { it.isNotBlank() && it != "null" } ?: s.secondaryLanguage.takeIf { s.bilingual }
+        val sourceKey = job?.progress?.details?.get("source_candidate_key")?.let { runCatching { it.toString().trim('"') }.getOrNull() }
+            ?.takeIf { it.isNotBlank() && it != "null" } ?: s.sourceKey
+        val running = job != null && job.status in SUBTITLE_RUNNING_STATUSES
+        val reason = if (running) {
+            job?.progress?.message?.takeIf { it.isNotBlank() } ?: "任务未完成"
+        } else {
+            s.requestError ?: s.preview?.blocker?.message ?: "字幕生成预检没有通过"
+        }
+        val output = SubtitleGenText.outputLabel(target, secondary)
+        val args = buildString {
+            append("--target-language ").append(target)
+            if (secondary != null) append(" --secondary-language ").append(secondary)
+            if (sourceKey != null) append(" --source-candidate-key ").append(sourceKey)
+        }
+        val pgs = s.preview?.pgsConversion
+        val lines = buildList {
+            add("请帮我处理 MovieClaw 的 AI 字幕生成问题。")
+            add("文件：${file?.fileName.orEmpty()}")
+            add("文件台账 ID：$fileId")
+            add("文件路径：${file?.filePath.orEmpty()}")
+            add("期望输出：$output")
+            add("对应参数：$args")
+            add("当前问题：$reason")
+            pgs?.let {
+                val engine = it.engine ?: "未找到可用识别引擎"
+                add("预检环境：${it.platform} ${it.architecture} · $engine")
+                if (it.message.isNotBlank()) add("预检诊断：${it.message}")
+            }
+            s.preview?.blocker?.suggestions?.forEach { add("已有建议：$it") }
+            add("请先判断原因；如果能通过 MovieClaw 的工具安全解决，请按上面的「对应参数」直接执行（不要换回默认参数），否则给出明确的操作步骤。不要修改影片原文件。")
+        }
+        return lines.joinToString("\n")
     }
 
     fun load() {
@@ -384,6 +674,10 @@ fun ItemDetailScreen(
     onOpenPerson: (Int) -> Unit = {},
     /** 文件区「处理重复」→ 媒体库管理的「重复文件」页签（iOS `.libraryManage(tab: "duplicates")`） */
     onOpenDuplicates: () -> Unit = {},
+    /** 「去接入」→ 设置里的「模型接入」（iOS `.settingsSection(.llm)`） */
+    onOpenLlmSettings: () -> Unit = {},
+    /** 「交给 Agent 处理」建好会话后跳会话页 */
+    onOpenAgentSession: (String) -> Unit = {},
     vm: ItemDetailViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -400,6 +694,22 @@ fun ItemDetailScreen(
     var purgeTarget by remember { mutableStateOf<io.movieclaw.android.core.model.LibraryFileView?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    // ── AI 字幕生成：状态 / 能力探测 / 任务跟踪 / 交付回调（iOS `TrackGenModel` 同款）──
+    val subtitleGen by vm.subtitleGen.collectAsStateWithLifecycle()
+    // 生成完成后重拉详情，新的 AI 字幕立刻出现在字幕清单里
+    DisposableEffect(vm) {
+        vm.onSubtitleChanged = { vm.load() }
+        onDispose { vm.onSubtitleChanged = null }
+    }
+    // 「交给 Agent 处理」建好会话 → 跳会话页（一次性）
+    val agentHandoff by vm.agentHandoff.collectAsStateWithLifecycle()
+    LaunchedEffect(agentHandoff) {
+        agentHandoff?.let {
+            vm.consumeAgentHandoff()
+            onOpenAgentSession(it)
+        }
+    }
 
     // 只在换条目时拉一次标记（marks 自身变化不能再触发，否则死循环）
     val loadedItemId = (state as? Loadable.Ready)?.value?.item?.mediaItemId
@@ -441,6 +751,23 @@ fun ItemDetailScreen(
                 onTogglePlayed = { season, episode ->
                     vm.togglePlayed(s.value.item.mediaItemId, season, episode)
                 },
+                // AI 字幕生成：状态 + 动作集（Hero 拿不到 VM，与其它回调同一个路子）
+                subtitleGen = subtitleGen,
+                isAdmin = permissions.isAdmin,
+                subtitleGenActions = SubtitleGenActions(
+                    onEntryClick = { id -> vm.openSubtitleGen(id, onNeedLlmSettings = onOpenLlmSettings) },
+                    onTrack = { id -> vm.checkLlmGate(); vm.trackSubtitleJob(id) },
+                    onDismiss = { vm.closeSubtitleGen() },
+                    onTargetLanguage = { id, token -> vm.setTargetLanguage(id, token) },
+                    onSecondaryLanguage = { id, token -> vm.setSecondaryLanguage(id, token) },
+                    onBilingual = { id, on -> vm.setBilingual(id, on) },
+                    onSourceKey = { id, ref -> vm.setSourceKey(id, ref) },
+                    onPgsLanguage = { vm.setPgsOcrLanguage(it) },
+                    onConfirm = { id -> vm.confirmSubtitleGen(id) },
+                    onRetryPreview = { id -> vm.retrySubtitlePreview(id) },
+                    onCancelJob = { vm.cancelSubtitleJob() },
+                    onHandOffToAgent = { id -> vm.handOffSubtitleGenToAgent(id) },
+                ),
             ) {
                 // 网页正文顺序：分集区 → 章节 → **演职员** → 文件区
                 if (s.value.item.kind == "tv" && s.value.episodes.isNotEmpty()) {
@@ -562,6 +889,10 @@ private fun Hero(
     onResumeUnitChanged: (Int, Int) -> Unit,
     onToggleFavorite: () -> Unit,
     onTogglePlayed: (Int?, Int?) -> Unit,
+    /** AI 字幕生成的状态与动作（同 iOS `TrackSubtitleGenButton`：仅管理员 + 文件在盘才出现） */
+    subtitleGen: SubtitleGenUiState,
+    isAdmin: Boolean,
+    subtitleGenActions: SubtitleGenActions,
     /** 正文其余部分（分集 / 演职员 / 文件）：与简介同用那一块上提 124 的列 */
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -740,18 +1071,40 @@ private fun Hero(
                 )
             }
 
-            Spacer(Modifier.height(14.dp))
-            Row(
-                Modifier
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(Color(0x1AF5C451))
-                    .border(1.dp, Color(0x57F5C451), RoundedCornerShape(999.dp))
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("接入 AI 模型后即可解锁生成字幕能力。", style = McType.sub, color = Color(0xFFF7D488))
-                Spacer(Modifier.width(6.dp))
-                Text("去接入", style = McType.subSemibold, color = Color(0xFFFBE3A6))
+            // ── AI 生成字幕入口（iOS `TrackSubtitleGenButton`：仅管理员 + 文件在盘）──
+            // 三态：未接 AI = 「接入… 去接入」引导（点了进「模型接入」）；运行中 / 有终态问题 =
+            // 状态徽章（忽略门禁，永远显示）；空闲 = 「AI 生成字幕」按钮（点开预检弹层）。
+            if (isAdmin && file != null && !file.missing) {
+                Spacer(Modifier.height(12.dp))
+                SubtitleGenEntry(
+                    generated = file.subtitleStreams.any { it.external && SubtitleGenText.isAiSubtitle(it.fileName.orEmpty()) },
+                    gate = subtitleGen.gate,
+                    job = subtitleGen.job,
+                    previewing = subtitleGen.previewing,
+                    targetLanguage = subtitleGen.targetLanguage,
+                    secondaryLanguage = subtitleGen.secondaryLanguage.takeIf { subtitleGen.bilingual },
+                    onClick = { subtitleGenActions.onEntryClick(file.id) },
+                )
+            }
+
+            // 能力探测 + 任务跟踪（换文件重建；从「模型接入」回来时这条 effect 会重跑 → 门禁自动刷新）
+            LaunchedEffect(file?.id) { subtitleGenActions.onTrack(file?.id) }
+            subtitleGen.mode?.let { mode ->
+                val fid = file?.id
+                SubtitleGenSheet(
+                    mode = mode,
+                    state = subtitleGen,
+                    onDismiss = subtitleGenActions.onDismiss,
+                    onTargetLanguage = { token -> fid?.let { subtitleGenActions.onTargetLanguage(it, token) } },
+                    onSecondaryLanguage = { token -> fid?.let { subtitleGenActions.onSecondaryLanguage(it, token) } },
+                    onBilingual = { on -> fid?.let { subtitleGenActions.onBilingual(it, on) } },
+                    onSourceKey = { ref -> fid?.let { subtitleGenActions.onSourceKey(it, ref) } },
+                    onPgsLanguage = subtitleGenActions.onPgsLanguage,
+                    onConfirm = { fid?.let { subtitleGenActions.onConfirm(it) } },
+                    onRetryPreview = { fid?.let { subtitleGenActions.onRetryPreview(it) } },
+                    onCancelJob = subtitleGenActions.onCancelJob,
+                    onHandOffToAgent = { fid?.let { subtitleGenActions.onHandOffToAgent(it) } },
+                )
             }
 
             Spacer(Modifier.height(18.dp))

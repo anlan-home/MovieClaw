@@ -148,6 +148,8 @@ enum class SettingsSection(
     DOWNLOADERS_WEB("下载器", "在网页端管理下载器与限速", "播放与内容"),
     IMPORT_WATCH_WEB("导入与观看记录", "在网页端管理导入监听与记录导入", "播放与内容"),
     OVERVIEW_WEB("总览", "服务器概况与体检", "服务器"),
+    /** 模型供应商接入（iOS `.settingsSection(.llm)`「模型接入」）：AI 字幕生成等能力的落点 */
+    LLM("模型接入", "接入 OpenAI、百炼等模型供应商，可同时接入多家", "服务器"),
     MAINTENANCE("更新与维护", "服务器更新、存储清理、重启", "服务器"),
     NETWORK("网络", "服务器网络配置与连通性测试", "服务器"),
     LOGS("日志", "服务器运行日志", "服务器"),
@@ -256,6 +258,8 @@ private fun sectionIcon(section: SettingsSection) = when (section) {
     SettingsSection.DEVICES -> Icons.Rounded.Devices
     SettingsSection.MEMBERS -> Icons.Rounded.Badge
     SettingsSection.PLAYBACK -> Icons.Rounded.PlayCircle
+    // 模型接入用的是 iOS 的 sparkles（`.llm` 分区图标）——不是网页分区那个「外链」图标
+    SettingsSection.LLM -> Icons.Rounded.AutoAwesome
     SettingsSection.MAINTENANCE -> Icons.Rounded.Storage
     SettingsSection.NETWORK -> Icons.Rounded.Language
     SettingsSection.LOGS -> Icons.Rounded.Tune
