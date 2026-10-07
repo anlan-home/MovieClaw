@@ -171,7 +171,7 @@ val cliProperties = project.gradle.startParameter.projectProperties
 val nativeLibsUrl: String = cliProperties["nativeLibsUrl"]
     ?: localProperty("nativeLibsUrl")
     ?: (findProperty("nativeLibsUrl") as String?)
-    ?: "https://github.com/movieclaw/MovieClaw/releases/download/android-native-libs/movieclaw-android-native-arm64-v8a.zip"
+    ?: "https://github.com/anlan-home/movieclaw-android-libs/releases/download/android-native-libs/movieclaw-android-native-arm64-v8a.zip"
 val nativeLibsSha256: String = cliProperties["nativeLibsSha256"]
     ?: localProperty("nativeLibsSha256")
     ?: (findProperty("nativeLibsSha256") as String?)

@@ -21,7 +21,7 @@ echo "sdk.dir=<你的 Android SDK 路径>" > local.properties   # 或设 ANDROID
 ### 预编译依赖(FFmpeg / mpv / libass)
 
 `app/src/main/jniLibs/arm64-v8a/` 下的 10 个 `.so` 是第三方二进制(入库前约 116MB、
-strip 进 APK 后约 33MB),**不入库**,作为 [Release 附件](https://github.com/movieclaw/MovieClaw/releases/tag/android-native-libs) 提供:
+strip 进 APK 后约 33MB),**不入库**,作为 [Release 附件](https://github.com/anlan-home/movieclaw-android-libs/releases/tag/android-native-libs) 提供:
 
 | 文件 | 作用 |
 | --- | --- |
