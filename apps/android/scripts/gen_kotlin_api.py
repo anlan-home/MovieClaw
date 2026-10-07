@@ -131,7 +131,11 @@ class Gen:
             return
         self.emitted.add(klass)
         schema = self.schemas.get(name)
-        if not isinstance(schema, dict) or schema.get("type") != "object" or "properties" not in schema:
+        if (
+            not isinstance(schema, dict)
+            or schema.get("type") != "object"
+            or "properties" not in schema
+        ):
             return
         required = set(schema.get("required", []))
         body = []
@@ -141,13 +145,19 @@ class Gen:
                 ref = prop_schema["$ref"].split("/")[-1]
                 if ref in self.schemas:
                     self.emit_schema(ref, lines)
-            if kotlin_type.startswith("List<") and kotlin_type[5:-1] in self.schemas and kotlin_type[5:-1] not in ("JsonElement",):
+            if (
+                kotlin_type.startswith("List<")
+                and kotlin_type[5:-1] in self.schemas
+                and kotlin_type[5:-1] not in ("JsonElement",)
+            ):
                 self.emit_schema(kotlin_type[5:-1], lines)
             prop = safe_prop(raw_prop)
             nullable = nullable or raw_prop not in required
             default = self.default_value(prop_schema, kotlin_type, nullable)
             serial = f'@SerialName("{raw_prop}") ' if raw_prop != prop else ""
-            body.append(f"    {serial}val {prop}: {kotlin_type}{'?' if nullable else ''} = {default},")
+            body.append(
+                f"    {serial}val {prop}: {kotlin_type}{'?' if nullable else ''} = {default},"
+            )
         lines.append("@Serializable")
         lines.append(f"data class {klass}(")
         lines.extend(body)
@@ -189,7 +199,10 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     target = out / "Models.kt"
     target.write_text(code, encoding="utf-8")
-    print(f"已生成 {target}({len(code.splitlines())} 行,{len(spec.get('components', {}).get('schemas', {}))} 个 schema)")
+    print(
+        f"已生成 {target}({len(code.splitlines())} 行,"
+        f"{len(spec.get('components', {}).get('schemas', {}))} 个 schema)"
+    )
     return 0
 
 
