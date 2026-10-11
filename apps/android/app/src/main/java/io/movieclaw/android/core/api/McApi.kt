@@ -921,6 +921,10 @@ interface McApi {
     @POST("playback/activity/sessions/{deviceId}/end")
     suspend fun endPlaybackSession(@Path("deviceId") deviceId: String): McEnvelope<JsonElement>
 
+    /** 注销一台播放设备（凭证立即失效，正在播放与下载一并停止；已看/收藏按账号保存） */
+    @DELETE("playback/devices/{deviceId}")
+    suspend fun revokePlaybackDevice(@Path("deviceId") deviceId: String): McEnvelope<JsonElement>
+
     /* ---------------- 发现页与标题详情(M2c) ---------------- */
 
     /**

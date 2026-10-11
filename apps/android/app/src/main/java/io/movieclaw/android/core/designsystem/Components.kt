@@ -10,6 +10,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -878,4 +884,37 @@ fun LibraryItemCard(
             Text(it.toString(), style = McType.caption, color = TextMuted)
         }
     }
+}
+
+/**
+ * 菜单弹出动画：从触发按钮的原点（默认右上）弹簧缩放长出 + 淡入。
+ * 用法：把菜单面板包进 MenuAppear { ... }——面板本身照旧定位，动画只管「出现」。
+ * 与活动页正在播放卡长按菜单（Popup 原点弹出）同一套弹簧参数，观感一致。
+ */
+@Composable
+fun MenuAppear(
+    modifier: Modifier = Modifier,
+    originX: Float = 0.85f,
+    originY: Float = 0.1f,
+    content: @Composable () -> Unit,
+) {
+    val appear = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(Unit) {
+        appear.animateTo(
+            1f,
+            androidx.compose.animation.core.spring(
+                dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+                stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow,
+            ),
+        )
+    }
+    androidx.compose.foundation.layout.Box(
+        modifier.graphicsLayer {
+            val t = 0.82f + 0.18f * appear.value
+            scaleX = t
+            scaleY = t
+            alpha = appear.value.coerceIn(0f, 1f)
+            transformOrigin = androidx.compose.ui.graphics.TransformOrigin(originX.coerceIn(0f, 1f), originY.coerceIn(0f, 1f))
+        },
+    ) { content() }
 }

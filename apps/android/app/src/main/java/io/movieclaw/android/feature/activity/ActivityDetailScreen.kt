@@ -131,7 +131,7 @@ private fun LazyListScope.activeView(activity: TaskActivity, vm: ActivityViewMod
     }
     item { SectionLabel("现在 · ${activity.activeTotal}") }
     items(activity.activeGroups, key = { "act-grp-${it.key}" }) { group ->
-        ActiveDownloadRow(group, activity.ingestJobs)
+        ActiveDownloadRow(group, activity.ingestJobs) { }
     }
     items(activity.activeJobs, key = { "act-job-${it.id}" }) { job ->
         JobCard(

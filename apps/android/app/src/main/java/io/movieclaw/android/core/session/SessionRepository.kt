@@ -48,6 +48,8 @@ data class SessionUi(
     val session: SessionView? = null,
     val cached: Boolean = false,
     val presetUsername: String? = null,
+    /** 重登预填的服务器地址（对齐 iOS Prefill.server；随 presetUsername 一起给） */
+    val presetOrigin: String? = null,
 )
 
 @Serializable
@@ -108,7 +110,11 @@ class SessionRepository @Inject constructor(
             }
             val token = if (server != null && account != null) vault.token(server.origin, account.username) else null
             if (server == null || account == null || token == null) {
-                _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN, presetUsername = account?.username)
+                _ui.value = SessionUi(
+                    phase = SessionPhase.NEEDS_LOGIN,
+                    presetUsername = account?.username,
+                    presetOrigin = server?.origin,
+                )
                 return@withLock null
             }
             server.apiBase?.let { apiFactory.registerApiBase(server.origin, it) }
@@ -145,7 +151,11 @@ class SessionRepository @Inject constructor(
                     if (!vault.isCurrent(expected)) return@withLock
                     markExpired(origin, expected.username)
                     vault.deactivateActive(expected)
-                    _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN, presetUsername = expected.username)
+                    _ui.value = SessionUi(
+                        phase = SessionPhase.NEEDS_LOGIN,
+                        presetUsername = expected.username,
+                        presetOrigin = origin,
+                    )
                 }
             }
         }
@@ -251,6 +261,7 @@ class SessionRepository @Inject constructor(
                 _ui.value = SessionUi(
                     phase = SessionPhase.NEEDS_LOGIN,
                     presetUsername = username,
+                    presetOrigin = origin,
                 )
                 return@withLock false
             }

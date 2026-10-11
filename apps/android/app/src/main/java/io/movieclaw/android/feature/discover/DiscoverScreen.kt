@@ -689,15 +689,18 @@ fun DiscoverScreen(
         )
     }
     if (showFilterMenu) {
-        DiscoveryFilterMenu(
-            filter = state.filters,
-            // 选一项即生效并收起（同 iOS）；条件被清空后正文本就回到首页板块
-            onApply = { vm.applyFilters(it); showFilterMenu = false },
+        io.movieclaw.android.core.designsystem.MenuAppear(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .statusBarsPadding()
                 .padding(end = McMetrics.topBarInsetRoot, top = McMetrics.topBarHeight),
-        )
+        ) {
+            DiscoveryFilterMenu(
+                filter = state.filters,
+                // 选一项即生效并收起（同 iOS）；条件被清空后正文本就回到首页板块
+                onApply = { vm.applyFilters(it); showFilterMenu = false },
+            )
+        }
     }
     // 结果页条件胶囊点开的那一维：浮层挂在顶栏右下（与「全部」菜单同一处）。
     // iOS 是把菜单锚在胶囊本身上；安卓这边胶囊在滚动容器里，锚点跟着滚会跑偏，

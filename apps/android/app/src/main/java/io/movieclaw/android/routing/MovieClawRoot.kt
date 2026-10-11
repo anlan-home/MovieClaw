@@ -80,7 +80,10 @@ fun MovieClawRoot(vm: RootViewModel = hiltViewModel()) {
                 )
                 state.phase == SessionPhase.BOOTING -> Box(Modifier.fillMaxSize().background(Bg))
                 // 未登录只有登录页：批准设备登录是登录后的事（设置 → 设备管理），iOS 同为登录后入口
-                state.phase == SessionPhase.NEEDS_LOGIN -> LoginScreen(presetUsername = state.presetUsername)
+                state.phase == SessionPhase.NEEDS_LOGIN -> LoginScreen(
+                    presetUsername = state.presetUsername,
+                    presetServer = state.presetOrigin,
+                )
                 else -> androidx.compose.runtime.key(state.origin, state.session?.username) { AppNav() }
             }
             // 顶部 Toast 常驻在所有内容之上(iOS Feedback 宿主)

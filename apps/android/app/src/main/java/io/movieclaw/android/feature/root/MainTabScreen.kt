@@ -233,6 +233,7 @@ fun MainTabScreen(
             MainTab.ACTIVITY -> ActivityScreen(
                 onOpenAgentSession = onOpenAgentSession,
                 onOpenActivityDetail = onOpenActivityDetail,
+                onOpenItem = onOpenItem,
             )
             MainTab.MORE -> MoreScreen(
                 onOpenProfile = onOpenProfile,

@@ -372,6 +372,16 @@ class ActivityViewModel @Inject constructor(
         }
     }
 
+    /** 注销一台播放设备（长按菜单；凭据立即失效，该设备下次要重新登录） */
+    fun revokeDevice(session: ActivePlaybackSession) {
+        viewModelScope.launch {
+            val origin = origin ?: return@launch
+            runCatching { apiFactory.forOrigin(origin).revokePlaybackDevice(session.deviceId).dataOrThrow() }
+                .onSuccess { _ui.update { it.copy(notice = McNotice("已注销 ${session.deviceName}，该设备需重新登录", FeedbackTone.Success)) } }
+                .onFailure { e -> _ui.update { it.copy(notice = McNotice(friendlyMessage(e), FeedbackTone.Error)) } }
+        }
+    }
+
     override fun onCleared() {
         pollJob?.cancel()
         super.onCleared()

@@ -1012,9 +1012,13 @@ fun LibraryScreen(
         // ⋯ 菜单：自定义首页 / 全部合集 / 管理媒体库（iOS library-more 三项）
         if (moreOpen) {
             Box(Modifier.fillMaxSize().clickable { moreOpen = false })
+            io.movieclaw.android.core.designsystem.MenuAppear(
+                modifier = Modifier.align(Alignment.TopEnd),
+                originX = 0.85f,
+                originY = 0.1f,
+            ) {
             Column(
                 Modifier
-                    .align(Alignment.TopEnd)
                     .statusBarsPadding()
                     .padding(end = McMetrics.pagePadding, top = 44.dp)
                     .width(190.dp)
@@ -1034,6 +1038,7 @@ fun LibraryScreen(
                 if (io.movieclaw.android.core.session.LocalPermissions.current.canManageLibraries) {
                     MenuItem("管理媒体库") { moreOpen = false; onOpenManage() }
                 }
+            }
             }
         }
     }

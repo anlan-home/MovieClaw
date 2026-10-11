@@ -374,7 +374,10 @@ fun SearchScreen(
                     }
                 }
 
-                if (state.mode == SearchMode.TITLES) {
+                // 影视分区：没提交过搜索就不渲染结果区——`keyword` 只在 submit() 里写入，
+                // 初始为空时此前会画一屏「豆瓣/TMDB 共 0 条结果 · 没有结果」（真机审计发现）
+                val titlesSearched = state.searching || state.keyword.isNotBlank()
+                if (state.mode == SearchMode.TITLES && titlesSearched) {
                     // iOS MediaSearchResultsView：豆瓣 / TMDB 两栏并排，各自带来源标签与条数
                     val douban = state.titles.filter { it.provider.equals("douban", true) }
                     val tmdb = state.titles.filterNot { it.provider.equals("douban", true) }

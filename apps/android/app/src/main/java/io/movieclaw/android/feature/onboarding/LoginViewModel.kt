@@ -40,6 +40,8 @@ class LoginViewModel @Inject constructor(
     val ui = _ui.asStateFlow()
 
     fun presetUsername(value: String) = _ui.update { it.copy(username = value) }
+    /** 地址只在空时预填，不覆盖用户手输（iOS `WelcomeSignInPanel.applyPrefill` 同规则） */
+    fun presetServer(value: String) = _ui.update { if (it.server.isBlank()) it.copy(server = value) else it }
     fun onServer(v: String) = _ui.update { it.copy(server = v, error = null) }
     fun onUsername(v: String) = _ui.update { it.copy(username = v, error = null) }
     fun onPassword(v: String) = _ui.update { it.copy(password = v, error = null) }

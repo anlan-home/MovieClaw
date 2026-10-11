@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import io.movieclaw.android.core.designsystem.Info
 import io.movieclaw.android.core.designsystem.McMetrics
 import io.movieclaw.android.core.designsystem.McType
+import io.movieclaw.android.core.designsystem.MenuAppear
 import io.movieclaw.android.core.designsystem.MenuSurface
 import io.movieclaw.android.core.designsystem.TextFaint
 import io.movieclaw.android.core.designsystem.TextMuted
@@ -170,6 +171,7 @@ fun DiscoveryFilterMenu(
     modifier: Modifier = Modifier,
 ) {
     var openDim by remember { mutableStateOf<Dim?>(null) }
+    io.movieclaw.android.core.designsystem.MenuAppear(originX = 0.85f, originY = 0.1f) {
     MenuPanel(width = 272.dp, maxHeight = 416.dp, modifier = modifier) {
         val dim = openDim
         if (dim == null) {
@@ -190,6 +192,7 @@ fun DiscoveryFilterMenu(
                 onBack = { openDim = null },
             )
         }
+    }
     }
 }
 

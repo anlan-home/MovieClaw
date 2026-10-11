@@ -401,11 +401,19 @@ fun AppNav() {
             AccountSwitcherScreen(
                 onBack = { navController.popBackStack() },
                 onAddAccount = { navController.navigate("addAccount") },
+                // 点已过期的账号 → 打开预填好地址与账号的登录卡（iOS fullScreenCover 同款，
+                // 当前会话不动）；地址含 :// 与端口，导航参数要编码
+                onReauth = { origin, username ->
+                    val enc = java.net.URLEncoder.encode(origin, "UTF-8")
+                    val encU = java.net.URLEncoder.encode(username, "UTF-8")
+                    navController.navigate("addAccount?server=$enc&username=$encU")
+                },
             )
         }
-        composable("addAccount") {
+        composable("addAccount?server={server}&username={username}") { entry ->
             LoginScreen(
-                presetUsername = null,
+                presetUsername = entry.arguments?.getString("username"),
+                presetServer = entry.arguments?.getString("server"),
                 onDone = { navController.popBackStack() },
             )
         }

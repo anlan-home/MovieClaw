@@ -59,7 +59,18 @@ data class AgentAttachment(
 data class ToolCallInfo(
     val id: String = "",
     val name: String = "",
-    val arguments: String? = null,
+    /**
+     * 工具调用参数：服务端是**已解析的对象**（`movieclaw_llm.models.ToolCall.arguments: dict`），
+     * iOS 侧对应 `arguments: AgentJSONObject?`。声明成 JsonElement 而不是 String——
+     * 以前声明 String 时，带工具调用的历史会话一加载就整条失败
+     * （kotlinx：Expected beginning of the string, but got {）。
+     * JsonElement 对对象/数组/字符串都收，比 iOS 更宽容（老数据里若有字符串化参数也不炸）。
+     */
+    val arguments: kotlinx.serialization.json.JsonElement? = null,
+    /** 供应商原始 JSON 串（服务端 `raw_arguments`；解析失败时保真展示用） */
+    val rawArguments: String? = null,
+    /** 参数 JSON 解析失败的原因（服务端 `parse_error`） */
+    val parseError: String? = null,
 )
 
 @Serializable

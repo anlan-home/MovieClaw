@@ -276,6 +276,8 @@ class PlayerViewModel @Inject constructor(
                     endMs = endMs,
                 ).bytes()
             }.onFailure {
+                // 退出播放页 / 切集时协程随组合取消属正常路径，不刷警告
+                if (it is kotlinx.coroutines.CancellationException) return@onFailure
             // 之前这里静默吞异常，导致"取不到字幕"完全没线索（实机踩过）
                 android.util.Log.w("McAss", "取字幕失败 file=$fileId track=$track: ${it::class.java.simpleName}: ${it.message}")
             }.getOrNull()

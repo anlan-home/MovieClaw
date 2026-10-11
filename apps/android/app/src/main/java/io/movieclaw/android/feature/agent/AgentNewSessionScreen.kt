@@ -102,7 +102,7 @@ fun AgentNewSessionScreen(
         }
         Column(Modifier.padding(16.dp)) {
             GlassCard(Modifier.fillMaxWidth()) {
-                Text("你可以让我做什么", fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                Text("你可以让我做什么", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(8.dp))
                 listOf(
                     "「帮我订阅《幕府将军》,只要 4K」",
@@ -110,7 +110,7 @@ fun AgentNewSessionScreen(
                     "「这部剧缺了第 4 集,帮我找找资源」",
                     "「最近空间不够了,清理一下重复文件」",
                 ).forEach { example ->
-                    Text(example, fontSize = 11.5.sp, color = TextMuted, lineHeight = 19.sp)
+                    Text(example, fontSize = 14.sp, color = TextMuted, lineHeight = 21.sp)
                 }
             }
         }

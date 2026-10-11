@@ -178,7 +178,9 @@ class SearchViewModel @Inject constructor(
         viewModelScope.launch {
             val origin = origin ?: return@launch
             runCatching { apiFactory.forOrigin(origin).searchHistory().dataOrThrow() }
-                .onSuccess { list -> _ui.update { it.copy(history = list) } }
+                // 同一关键词可能有多条历史行（不同分区/分类各存一条），底部胶囊按关键词去重、
+                // 保留服务端排序里的第一条（最近一次）——真机上「婢女」曾并排出现两枚
+                .onSuccess { list -> _ui.update { it.copy(history = list.distinctBy { it.keyword }) } }
         }
     }
 
