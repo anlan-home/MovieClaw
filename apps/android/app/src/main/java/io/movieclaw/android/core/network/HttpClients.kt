@@ -16,9 +16,23 @@ import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.ConnectionPool
 
+/**
+ * 客户端版本信息：从构建产物读（`version.properties` → Gradle versionName/versionCode），
+ * 对齐 TV 版（`BuildConfig.VERSION_NAME`）与 iOS（`CFBundleShortVersionString`）。
+ *
+ * 以前这里是写死的 "0.1.0"/1，发行版走到 0.2.0/30000003 它也不动——页脚、UA、
+ * 设备管理里的版本、播放上报全被冻在 0.1.0，认不出用户装的是哪一次构建。
+ */
 object BuildInfo {
-    const val APP_VERSION = "0.1.0"
-    const val BUILD_NUMBER = 1
+    /** 营销版本（上报用的 clientVersion；iOS 同为 CFBundleShortVersionString，不带构建号） */
+    val APP_VERSION: String = io.movieclaw.android.BuildConfig.VERSION_NAME
+
+    /** 构建号（versionCode） */
+    val BUILD_NUMBER: Int = io.movieclaw.android.BuildConfig.VERSION_CODE
+
+    /** 显示串「0.2.0（30000003）」——iOS 关于页 versionText 同口径 */
+    val DISPLAY_VERSION: String = "$APP_VERSION（$BUILD_NUMBER）"
+
     val USER_AGENT: String =
         "MovieClaw-Android/$APP_VERSION (${Build.MODEL}; Android ${Build.VERSION.RELEASE}; build $BUILD_NUMBER)"
 }

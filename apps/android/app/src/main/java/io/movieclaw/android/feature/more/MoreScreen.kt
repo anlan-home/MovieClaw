@@ -431,7 +431,8 @@ fun MoreScreen(
             }
             item(key = "tail") {
                 Text(
-                    "MovieClaw Android · ${BuildInfo.APP_VERSION}",
+                    // 「版本（构建号）」：反馈问题时据此认出装的是哪一次构建（iOS 关于页同口径）
+                    "MovieClaw Android · ${BuildInfo.DISPLAY_VERSION}",
                     style = McType.micro, color = TextFaint,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 22.dp),
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,

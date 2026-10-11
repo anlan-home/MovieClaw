@@ -79,7 +79,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildFeatures { compose = true }
+    // buildConfig：生成 BuildConfig.VERSION_NAME/VERSION_CODE 供 App 自报版本（TV 版同款）；
+    // 以前没开，导致客户端版本是手写常量、发行后永远不动
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     testOptions.unitTests.isIncludeAndroidResources = true
     testOptions.unitTests.all {
         it.maxHeapSize = "2g"
