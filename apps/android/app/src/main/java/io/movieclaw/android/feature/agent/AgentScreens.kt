@@ -1,6 +1,7 @@
 package io.movieclaw.android.feature.agent
 
 import io.movieclaw.android.core.designsystem.LocalFeedback
+import io.movieclaw.android.core.playback.PlayTarget
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -172,6 +173,12 @@ private fun SessionRow(session: SessionSummary, onOpen: () -> Unit, onDelete: ()
 @Composable
 fun AgentConversationScreen(
     onBack: () -> Unit,
+    /** 生成式 UI 媒体卡片的跳转（默认空实现，预览/测试环境不受影响） */
+    onOpenTitle: (String) -> Unit = {},
+    onOpenLibrary: (Long) -> Unit = {},
+    onOpenItem: (Long, Long) -> Unit = { _, _ -> },
+    onOpenSubscription: (Long) -> Unit = {},
+    onPlay: (PlayTarget) -> Unit = {},
     vm: AgentConversationViewModel = hiltViewModel(),
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
@@ -235,7 +242,21 @@ fun AgentConversationScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
-                    items(state.bubbles, key = { it.id }) { bubble -> BubbleRow(bubble) }
+                    items(state.bubbles, key = { it.id }) { bubble ->
+                        BubbleRow(
+                            bubble = bubble,
+                            origin = state.origin,
+                            onOpenCard = { open ->
+                                when (open) {
+                                    is AgentMediaCardOpen.Title -> onOpenTitle(open.titleRef)
+                                    is AgentMediaCardOpen.Library -> onOpenLibrary(open.libraryId)
+                                    is AgentMediaCardOpen.Item -> onOpenItem(open.libraryId, open.mediaItemId)
+                                    is AgentMediaCardOpen.Subscription -> onOpenSubscription(open.subscriptionId)
+                                }
+                            },
+                            onPlay = onPlay,
+                        )
+                    }
                     if (state.running && state.bubbles.isEmpty()) {
                         item {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -329,7 +350,12 @@ fun AgentConversationScreen(
 }
 
 @Composable
-private fun BubbleRow(bubble: AgentConversationViewModel.Bubble) {
+private fun BubbleRow(
+    bubble: AgentConversationViewModel.Bubble,
+    origin: String?,
+    onOpenCard: (AgentMediaCardOpen) -> Unit,
+    onPlay: (PlayTarget) -> Unit,
+) {
     when (bubble.role) {
         "user" -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             MarkdownText(
@@ -353,7 +379,10 @@ private fun BubbleRow(bubble: AgentConversationViewModel.Bubble) {
                     .padding(horizontal = 10.dp, vertical = 4.dp),
             )
         }
-        "tool" -> Column(
+        "tool" -> if (bubble.mediaCards != null) {
+            // 生成式 UI：工具行被卡片组替代（iOS 同口径，卡片就是这次调用的呈现）
+            AgentMediaCardsRow(bubble.mediaCards, origin = origin, onOpen = onOpenCard, onPlay = onPlay)
+        } else Column(
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
@@ -402,9 +431,13 @@ private fun BubbleRow(bubble: AgentConversationViewModel.Bubble) {
             }
             if (bubble.text.isEmpty() && bubble.streaming) {
                 Text("…", fontSize = 14.sp, lineHeight = 21.sp, color = Color.White.copy(alpha = 0.92f))
-            } else {
-                // AI 回复按 Markdown 渲染(标题/列表/代码块/表格/引用)
+            } else if (bubble.text.isNotBlank() || bubble.mediaCards == null) {
+                // AI 回复按 Markdown 渲染(标题/列表/代码块/表格/引用)；只有卡片没有正文时不画空块
                 MarkdownText(markdown = bubble.text, baseSize = 14.sp)
+            }
+            bubble.mediaCards?.let { group ->
+                if (bubble.text.isNotBlank()) Spacer(Modifier.height(8.dp))
+                AgentMediaCardsRow(group, origin = origin, onOpen = onOpenCard, onPlay = onPlay)
             }
         }
     }

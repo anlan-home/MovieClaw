@@ -282,6 +282,14 @@ interface McApi {
     @GET("libraries")
     suspend fun libraries(): McEnvelope<List<LibraryView>>
 
+    /** 单个媒体库详情（Agent 媒体库卡与 iOS `libraryGet` 同口子） */
+    @GET("libraries/{libraryId}")
+    suspend fun library(@Path("libraryId") libraryId: Long): McEnvelope<LibraryView>
+
+    /** 播放页条目信息（Agent 库内条目卡与 iOS `playbackItemInfo` 同口子；库归属服务端解析） */
+    @GET("playback/items/{mediaItemId}")
+    suspend fun playbackItem(@Path("mediaItemId") mediaItemId: Long): McEnvelope<io.movieclaw.android.core.model.PlaybackItemView>
+
     /* ---------------- 媒体库管理（管理页一库一行的 ⋯ 菜单） ---------------- */
 
     /** 扫描该库的根路径（后台执行）；已在扫会 409，UI 按 `scanning` 换成「停止扫描」 */

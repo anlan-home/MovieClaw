@@ -171,7 +171,18 @@ fun AppNav() {
         }
         composable("agentConversation/{sessionId}") {
             if (!adminOnly(navController)) return@composable
-            AgentConversationScreen(onBack = { navController.popBackStack() })
+            AgentConversationScreen(
+                onBack = { navController.popBackStack() },
+                // 生成式 UI 媒体卡片的跳转（与其余入口同款路由：影片详情/媒体库/条目/订阅/播放器）
+                onOpenTitle = { ref -> navController.navigate("title?ref=${Uri.encode(ref)}") },
+                onOpenLibrary = { id -> navController.navigate("library/$id") },
+                onOpenItem = { libraryId, itemId -> navController.navigate("item/$libraryId/$itemId") },
+                onOpenSubscription = { id -> navController.navigate("subscription/$id") },
+                onPlay = { target ->
+                    navVm.open(target)
+                    navController.navigate("player")
+                },
+            )
         }
         composable("title?ref={ref}") { entry ->
             TitleDetailScreen(

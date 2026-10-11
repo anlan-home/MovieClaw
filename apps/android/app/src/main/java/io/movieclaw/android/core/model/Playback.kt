@@ -298,3 +298,17 @@ data class PlaybackMarksRequest(
     val favorite: Boolean? = null,
     val deviceId: String? = null,
 )
+
+/** GET /playback/items/{media_item_id}（服务端 `PlaybackItemView`：播放页/条目卡要的条目信息） */
+@Serializable
+data class PlaybackItemView(
+    val mediaItemId: Long = 0,
+    /** 库归属由服务端按成员可见性解析（播放路由只带 media_item_id） */
+    val libraryId: Long = 0,
+    /** movie / tv */
+    val kind: String = "movie",
+    val title: String = "",
+    val year: Int? = null,
+    /** 海报（本地刮削资产优先、TMDB 兜底） */
+    val posterUrl: String? = null,
+)

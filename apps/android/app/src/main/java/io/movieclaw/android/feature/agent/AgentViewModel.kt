@@ -98,6 +98,8 @@ class AgentConversationViewModel @Inject constructor(
         val toolError: Boolean = false,
         val tokens: Pair<Int, Int>? = null,
         val streaming: Boolean = false,
+        /** show_media_cards_v1 的卡片组（角色 tool / assistant 的非空时按生成式 UI 画卡片） */
+        val mediaCards: AgentMediaCardGroup? = null,
     )
 
     data class UiState(
@@ -113,12 +115,17 @@ class AgentConversationViewModel @Inject constructor(
         val uploading: Boolean = false,
         val provider: String? = null,
         val model: String? = null,
+        /** 当前服务器 origin（媒体卡片的图片要按它解析） */
+        val origin: String? = null,
     )
 
     private val _ui = MutableStateFlow(UiState())
     val ui = _ui.asStateFlow()
 
     private var streamJob: Job? = null
+
+    /** 无 id 的工具事件（理论路径）用的单调序号：避免同一毫秒撞 key */
+    private var toolSeq = 0
 
     init {
         loadTranscript()
@@ -136,14 +143,55 @@ class AgentConversationViewModel @Inject constructor(
                         state.copy(
                             loading = false,
                             error = null,
+                            origin = origin,
                             title = transcript.session.title?.takeIf { it.isNotEmpty() } ?: "AI 助手",
                             running = transcript.session.running,
                             bubbles = transcript.entries.mapNotNull { it.toBubble() },
                         )
                     }
+                    // 轨迹里的媒体卡片同样按编号现取数据（与 iOS 回放路径同口径）
+                    _ui.value.bubbles.forEach { bubble ->
+                        bubble.mediaCards?.let { resolveMediaCards(bubble.id, it) }
+                    }
                     if (transcript.session.running) followStream()
                 }
                 .onFailure { e -> _ui.update { it.copy(loading = false, error = friendlyMessage(e)) } }
+        }
+    }
+
+    /**
+     * 按编号现取媒体卡片数据（与 iOS 各卡 `.task` 同口径）：逐张解析、逐张回填，
+     * 单张失败画「未找到」而不是整组消失。「已订阅」斜标要的集合只在组里有影片卡时取一次。
+     */
+    private fun resolveMediaCards(bubbleId: String, group: AgentMediaCardGroup) {
+        viewModelScope.launch {
+            val origin = sessionRepository.ui.value.origin ?: return@launch
+            val api = apiFactory.forOrigin(origin)
+            val subscribedRefs = if (group.cards.any { it.spec.kind == AgentMediaCardKind.TITLE }) {
+                runCatching {
+                    api.subscriptions().dataOrThrow()
+                        .mapNotNull { sub -> sub.media.tmdbId?.let { "tmdb:${sub.media.kind}:$it" } }
+                        .toSet()
+                }.getOrDefault(emptySet())
+            } else {
+                emptySet()
+            }
+            group.cards.forEach { card ->
+                val view = runCatching { AgentMediaCards.load(api, card.spec, subscribedRefs) }
+                    .getOrElse { AgentMediaCards.failed(card.spec) }
+                _ui.update { state ->
+                    state.copy(
+                        bubbles = state.bubbles.map { bubble ->
+                            if (bubble.id != bubbleId) bubble
+                            else bubble.copy(
+                                mediaCards = bubble.mediaCards?.let { g ->
+                                    g.copy(cards = g.cards.map { if (it.spec.key == card.spec.key) view else it })
+                                },
+                            )
+                        },
+                    )
+                }
+            }
         }
     }
 
@@ -220,22 +268,51 @@ class AgentConversationViewModel @Inject constructor(
                         }
                         "thinking_delta" -> appendDelta("assistant", event.delta, thinking = true)
                         "text_delta" -> appendDelta("assistant", event.delta, thinking = false)
-                        "tool_call_start", "tool_call" -> _ui.update { state ->
-                            state.copy(
-                                bubbles = state.bubbles + Bubble(
-                                    id = "tool-${event.toolCall?.id ?: System.currentTimeMillis()}",
-                                    role = "tool",
-                                    text = "调用工具:${event.toolCall?.name ?: ""}",
-                                    toolName = event.toolCall?.name,
-                                    streaming = true,
-                                ),
-                            )
+                        "tool_call_start", "tool_call" -> {
+                            // 同一次调用会先后发 tool_call_start（仅 id/name）与 tool_call（参数定稿，id 相同）：
+                            // 按 id upsert，两条事件只留一个气泡——此前各追加一个，id 都是 tool-<call_id>，
+                            // LazyColumn 重复 key 直接闪退（真机 13:03 三连崩就是这个）
+                            val callId = event.toolCall?.id?.takeIf { it.isNotBlank() }
+                            val bubbleId = if (callId != null) "tool-$callId" else "tool-noid-${++toolSeq}"
+                            val name = event.toolCall?.name?.takeIf { it.isNotBlank() }
+                            // show_media_cards_v1：参数随 tool_call 定稿事件到达，解析成卡片组挂到气泡上
+                            val cards = AgentMediaCards.parse(name, event.toolCall?.arguments)
+                            val hadCards = _ui.value.bubbles.firstOrNull { it.id == bubbleId }?.mediaCards != null
+                            _ui.update { state ->
+                                val index = state.bubbles.indexOfFirst { it.id == bubbleId }
+                                if (index >= 0) {
+                                    val old = state.bubbles[index]
+                                    state.copy(
+                                        bubbles = state.bubbles.toMutableList().also {
+                                            it[index] = old.copy(
+                                                text = "调用工具:${name ?: old.toolName.orEmpty()}",
+                                                toolName = name ?: old.toolName,
+                                                mediaCards = cards ?: old.mediaCards,
+                                            )
+                                        },
+                                    )
+                                } else {
+                                    state.copy(
+                                        bubbles = state.bubbles + Bubble(
+                                            id = bubbleId,
+                                            role = "tool",
+                                            text = "调用工具:${name ?: ""}",
+                                            toolName = name,
+                                            streaming = true,
+                                            mediaCards = cards,
+                                        ),
+                                    )
+                                }
+                            }
+                            if (cards != null && !hadCards) resolveMediaCards(bubbleId, cards)
                         }
                         "tool_result" -> _ui.update { state ->
                             val result = event.toolResult
+                            // 有 toolCallId 就精确收尾那一条（并行调用互不干扰）；缺失时退回「收尾在流式的工具条」
+                            val targetId = result?.toolCallId?.takeIf { it.isNotBlank() }?.let { "tool-$it" }
                             state.copy(
                                 bubbles = state.bubbles.map { bubble ->
-                                    if (bubble.role == "tool" && bubble.streaming) {
+                                    if (bubble.role == "tool" && bubble.streaming && (targetId == null || bubble.id == targetId)) {
                                         bubble.copy(
                                             text = "工具 ${result?.name ?: bubble.toolName} ${if (result?.isError == true) "失败" else "完成"}",
                                             toolOutput = result?.output?.take(2000),
@@ -359,6 +436,9 @@ private fun TranscriptEntry.toBubble(): AgentConversationViewModel.Bubble? {
     val text = msg.extractText()
     val toolCalls = msg.toolCalls.orEmpty()
     if (msg.role == "tool") {
+        // 生成式 UI 的工具回执不画行：卡片（挂在 assistant 消息上）就是它的呈现——
+        // 与 iOS 同口径，整个工具条目被卡片替代
+        if (AgentMediaCards.isMediaCardsTool(msg.name)) return null
         return AgentConversationViewModel.Bubble(
             id = messageId ?: System.currentTimeMillis().toString(),
             role = "tool",
@@ -367,11 +447,14 @@ private fun TranscriptEntry.toBubble(): AgentConversationViewModel.Bubble? {
         )
     }
     if (text.isEmpty() && toolCalls.isEmpty()) return null
+    // show_media_cards_v1：工具参数 → 卡片组（参数缺失/不合法返回 null，退回普通「调用 X」行）
+    val cards = toolCalls.firstNotNullOfOrNull { AgentMediaCards.parse(it.name, it.arguments) }
     return AgentConversationViewModel.Bubble(
         id = messageId ?: System.currentTimeMillis().toString(),
         role = msg.role,
-        text = text.ifEmpty { toolCalls.joinToString("、") { "调用 ${it.name}" } },
+        text = text.ifEmpty { if (cards != null) "" else toolCalls.joinToString("、") { "调用 ${it.name}" } },
         toolName = toolCalls.firstOrNull()?.name,
+        mediaCards = cards,
     )
 }
 
