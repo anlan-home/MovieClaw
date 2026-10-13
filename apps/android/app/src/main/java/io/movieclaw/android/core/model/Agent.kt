@@ -154,4 +154,33 @@ data class SessionTranscript(
 data class SessionRename(val title: String)
 
 @Serializable
-data class SessionRetry(val messageId: String? = null)
+data class SessionRetry(
+    /** 要重新提问的 user message 编号（服务端会删掉它及其之后的轨迹） */
+    val messageId: String? = null,
+    /** 替换后的正文；留空 = 原文重试（`POST /sessions/{id}/retry`） */
+    val content: String? = null,
+)
+
+/** 对话框模型选择器的一个选项（`GET /llm/models`，口径同 iOS `API.LlmModelOptionView`） */
+@Serializable
+data class LlmModelOption(
+    /** 提交给 session.start 的模型引用：裸模型 id，或同 id 多实例时的「实例名/模型id」 */
+    val ref: String = "",
+    /** 展示文案：裸模型 id，冲突时为「模型id（实例名）」 */
+    val label: String = "",
+    val modelId: String? = null,
+    val providerId: Int? = null,
+    val providerName: String? = null,
+    /** 是否为智能体默认模型（AI 设定）；清单里恰有一个 */
+    val isDefault: Boolean = false,
+    /** 该模型的思考档位菜单；空 = 隐藏档位选择 */
+    val thinkingLevels: List<String> = emptyList(),
+)
+
+/** 一个可显式调用的 Agent 技能（`GET /skills`）；气泡里的 `/skill:名字` chip 用它做门禁 */
+@Serializable
+data class SkillView(
+    val name: String = "",
+    val description: String? = null,
+    val scope: String? = null,
+)

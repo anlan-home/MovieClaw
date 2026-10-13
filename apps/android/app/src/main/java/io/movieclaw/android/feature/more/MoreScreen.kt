@@ -89,6 +89,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -103,11 +104,17 @@ class MoreViewModel @Inject constructor(
     val ui = repository.ui
     val servers = repository.servers
 
-    val liquidTabBar = tabBarPrefs.liquid.stateIn(
-        viewModelScope,
-        kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),
-        false,
-    )
+    // 初始值给 null（"还不知道"）：DataStore 是异步读的，先给 false 会让「玻璃底栏」那颗
+    // Switch 以"关"组合、拿到真实值（通常是开）后再自己播一遍开启动画——切到「我的」时
+    // 那一下明显的开关动画（实机反馈）。null 期间不挂 Switch，行高不变所以不会跳。
+    val liquidTabBar: kotlinx.coroutines.flow.StateFlow<Boolean?> =
+        tabBarPrefs.liquid
+            .map { it as Boolean? }
+            .stateIn(
+                viewModelScope,
+                kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),
+                null,
+            )
 
     fun setLiquidTabBar(on: Boolean) {
         viewModelScope.launch { tabBarPrefs.setLiquid(on) }

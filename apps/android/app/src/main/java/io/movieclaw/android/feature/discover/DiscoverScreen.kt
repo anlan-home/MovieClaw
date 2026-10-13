@@ -6,6 +6,8 @@ import io.movieclaw.android.core.designsystem.PosterRowSkeleton
 import io.movieclaw.android.core.designsystem.PosterRibbon
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.tabGlassSource
+import io.movieclaw.android.core.designsystem.glassSurface
+import io.movieclaw.android.core.designsystem.glassSurfaceLens
 import io.movieclaw.android.core.designsystem.McRow
 import io.movieclaw.android.core.designsystem.McMetrics
 import androidx.compose.ui.text.TextStyle
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -445,7 +448,10 @@ fun DiscoverScreen(
                 // 筛选态下正文是懒加载网格：外层不能再套垂直滚动（无限高约束会崩），
                 // 网格自己滚；常规态仍是整页一个滚动容器（实测形态）
                 .then(if (filtering) Modifier else Modifier.verticalScroll(scroll))
-                // 液态底栏的背景模糊源（Local 为 null 时原样返回，零代价）
+                // 液态底栏的背景模糊源 / 气泡取样源（Local 为 null 时原样返回，零代价）。
+                // 已知限制：这里挂在 scroll **之内**，录下来的是「未滚动」的页面内容，
+                // 而取样按屏上位置算 —— 滚动后（迷你圆钮出现时）会落到该层的空白区，
+                // 气泡/圆钮看着偏暗。试过提到 scroll 之外，整页会被糊（回归），先保持原样
                 .tabGlassSource()
                 .padding(bottom = McTabBarContentPadding),
         ) {
@@ -638,10 +644,13 @@ fun DiscoverScreen(
                 style = McType.subSemibold,
                 color = Color.White.copy(alpha = 0.92f),
                 modifier = Modifier
-                    .height(36.dp)
+                    // 高度与右侧放大镜同档（44dp，网页触屏口径）：36 时两颗不等高，实机一眼看出
+                    .height(44.dp)
                     .clip(RoundedCornerShape(999.dp))
                     .background(GlassCapsule)
                     .border(1.dp, LineSoft, RoundedCornerShape(999.dp))
+                    // 与放大镜、媒体库那排同一套材质（统一分发：Haze 真背景模糊 + 高光边）
+                    .glassSurface()
                     .clickable {
                         showSourceMenu = false
                         chipDim = null
@@ -654,7 +663,11 @@ fun DiscoverScreen(
         }
         // 入口口径是「任一搜索分区可用」（影视 / 资源 / 媒体库，见 SearchAccess.canOpenSearch）
         if (io.movieclaw.android.core.session.LocalSearchAccess.current.canOpenSearch) {
-            McNavButton(Icons.Rounded.Search, contentDescription = "搜索", onClick = onOpenSearch)
+            McNavButton(
+                Icons.Rounded.Search,
+                contentDescription = "搜索",
+                onClick = onOpenSearch,
+            )
         }
     }
 
@@ -677,18 +690,26 @@ fun DiscoverScreen(
     }
 
     if (showSourceMenu) {
-        SourceMenu(
-            mediaType = state.mediaType,
-            source = state.source,
-            onPickMediaType = { vm.switchMediaType(it); showSourceMenu = false },
-            onPickSource = { vm.switchSource(it); showSourceMenu = false },
+        // 与「全部」菜单同一套弹出（iOS 两处菜单都是同一个出现动画）：这里是**左上锚点**，
+        // 所以原点取左下对称值 0.15；之前漏了这层，TMDB 面板是硬闪出来的（用户反馈）
+        io.movieclaw.android.core.designsystem.MenuAppear(
+            originX = 0.15f,
+            originY = 0.1f,
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .statusBarsPadding()
                 .padding(start = McMetrics.topBarInsetRoot, top = McMetrics.topBarHeight),
-        )
+        ) {
+            SourceMenu(
+                mediaType = state.mediaType,
+                source = state.source,
+                onPickMediaType = { vm.switchMediaType(it); showSourceMenu = false },
+                onPickSource = { vm.switchSource(it); showSourceMenu = false },
+            )
+        }
     }
     if (showFilterMenu) {
+        // 与另两处菜单同一套弹出（菜单内部不再自带一层，避免 0.82² 的叠放）
         io.movieclaw.android.core.designsystem.MenuAppear(
             modifier = Modifier
                 .align(Alignment.TopEnd)
@@ -706,15 +727,21 @@ fun DiscoverScreen(
     // iOS 是把菜单锚在胶囊本身上；安卓这边胶囊在滚动容器里，锚点跟着滚会跑偏，
     // 统一挂在固定的右上角——同一个取值菜单、同一份文案，只是位置固定可预期。
     chipDim?.let { dim ->
-        DiscoveryFilterDimPanel(
-            dimKey = dim,
-            filters = state.filters,
-            onApply = { vm.applyFilters(it); chipDim = null },
+        // 与另两处菜单同一套弹出（原来这层也漏了，硬闪出来）
+        io.movieclaw.android.core.designsystem.MenuAppear(
+            originX = 0.85f,
+            originY = 0.1f,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .statusBarsPadding()
                 .padding(end = McMetrics.topBarInsetRoot, top = topBarTotal),
-        )
+        ) {
+            DiscoveryFilterDimPanel(
+                dimKey = dim,
+                filters = state.filters,
+                onApply = { vm.applyFilters(it); chipDim = null },
+            )
+        }
     }
     }
     }

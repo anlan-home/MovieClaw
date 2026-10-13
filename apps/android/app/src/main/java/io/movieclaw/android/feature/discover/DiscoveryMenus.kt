@@ -171,7 +171,8 @@ fun DiscoveryFilterMenu(
     modifier: Modifier = Modifier,
 ) {
     var openDim by remember { mutableStateOf<Dim?>(null) }
-    io.movieclaw.android.core.designsystem.MenuAppear(originX = 0.85f, originY = 0.1f) {
+    // 出现动画由**调用点**包（DiscoverScreen 的 MenuAppear，带对齐）：菜单本身不管动画，
+    // 两层包裹会把起始缩放叠成 0.82²=0.67，而且 align 得挂在同一层才不掉
     MenuPanel(width = 272.dp, maxHeight = 416.dp, modifier = modifier) {
         val dim = openDim
         if (dim == null) {
@@ -192,7 +193,6 @@ fun DiscoveryFilterMenu(
                 onBack = { openDim = null },
             )
         }
-    }
     }
 }
 

@@ -15,6 +15,7 @@ import androidx.compose.material.icons.rounded.Subscriptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -189,12 +190,16 @@ fun MainTabScreen(
 
     // 液态底栏的模糊源：开关打开才提供（Local 为 null 时内容层的标记原样返回，零代价）
     val hazeState = dev.chrisbanes.haze.rememberHazeState()
+    // 气泡折射取样源：与模糊同一节点（`tabGlassSource` 里同时记录），开关打开才提供
+    val tabGlassHolder = remember { io.movieclaw.android.core.designsystem.TabGlassLayerHolder() }
 
     Box(Modifier.fillMaxSize().background(Bg)) {
         KeepAliveTabs(tabs, tabs[selected]) { tab, active ->
                     androidx.compose.runtime.CompositionLocalProvider(
                         // 模糊源只挂前台页签：后台页签也挂的话，同一个 HazeState 会收到几块不在屏上的内容
                         io.movieclaw.android.core.designsystem.LocalTabHazeState provides if (liquidTabBar && active) hazeState else null,
+                        // 取样源同理：只挂前台页签，气泡折射的永远是当前这一页
+                        io.movieclaw.android.core.designsystem.LocalTabGlassLayer provides if (liquidTabBar && active) tabGlassHolder else null,
                     ) {
             when (tab) {
             MainTab.DISCOVER -> DiscoverScreen(
@@ -260,6 +265,7 @@ fun MainTabScreen(
                 origin = ui.origin,
                 dots = dots,
                 hazeState = hazeState,
+                glassSource = tabGlassHolder,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()

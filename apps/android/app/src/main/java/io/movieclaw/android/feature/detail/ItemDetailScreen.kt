@@ -96,6 +96,8 @@ import io.movieclaw.android.core.designsystem.McNavButton
 import io.movieclaw.android.core.designsystem.RemoteImage
 import io.movieclaw.android.core.designsystem.Accent
 import io.movieclaw.android.core.designsystem.Bg
+import io.movieclaw.android.core.designsystem.LocalTabHazeState
+import dev.chrisbanes.haze.hazeSource
 import io.movieclaw.android.core.designsystem.Danger
 import io.movieclaw.android.core.designsystem.ErrorPane
 import io.movieclaw.android.core.designsystem.GlassCard
@@ -870,15 +872,34 @@ fun ItemDetailScreen(
             CircularProgressIndicator(color = TextMuted)
         }
         is Loadable.Failed -> ErrorPane(message = s.message, onRetry = vm::load)
-        is Loadable.Ready -> Column(
+        is Loadable.Ready -> {
+        // 沉浸式：页面底色 = 剧照的主色（iOS HeroEdgeColor / 网页 .detail-ambient；
+        // 与首页英雄同源 → 同一个取色缓存键，从封面点进来零等待）。取色是异步的，
+        // 底色淡入而不是从黑跳变（iOS heroEdgeBackground 也是 0.5s 渐显）
+        val rawTint = io.movieclaw.android.core.discovery.rememberAmbientColor(
+            s.value.item.backdropUrl ?: s.value.item.posterUrl,
+            origin,
+            // 详情页口径：**底边色带**（iOS HeroEdgeColor：饱和 ×1.1、亮度 ≤0.34）——
+            // 比「整图主色」更暗更像页面底色（AmbientColorLoader 里详情页就是这么分的）
+            bottomBand = true,
+            // 无 fanart 的条目服务端对 kind=fanart 返回 404 → 退到海报再取
+            fallbackUrl = s.value.item.posterUrl,
+        )
+        val detailTint by androidx.compose.animation.animateColorAsState(
+            targetValue = rawTint ?: Bg,
+            animationSpec = androidx.compose.animation.core.tween(420),
+            label = "detail-tint",
+        )
+        Column(
             Modifier
                 .fillMaxSize()
-                .background(Bg)
+                .background(detailTint)
                 .verticalScroll(rememberScrollState()),
         ) {
             Hero(
                 detail = s.value.item,
                 origin = origin,
+                tint = detailTint,
                 onBack = onBack,
                 onPlay = onPlay,
                 libraryId = libraryId,
@@ -982,6 +1003,7 @@ fun ItemDetailScreen(
                 Spacer(Modifier.height(32.dp))
             }
         }
+        }
     }
 
     // 文件区动作的宿主：删除底部单（iOS `DeleteFileSheet`）与立即清理确认弹窗。
@@ -1037,6 +1059,8 @@ fun ItemDetailScreen(
 private fun Hero(
     detail: LibraryItemDetailView,
     origin: String?,
+    /** 页面底色（剧照取色）：hero 底边淡成这个色，图与页面之间没有硬边 */
+    tint: Color = Bg,
     onBack: () -> Unit,
     onPlay: (PlayTarget) -> Unit,
     libraryId: Long,
@@ -1114,13 +1138,17 @@ private fun Hero(
     }
     val remainingMs = resume?.durationMs?.takeIf { it > 0 }?.minus(resumeMs)?.takeIf { it > 0 }
 
+    // hero 内部一份玻璃取样源（剧照 = 模糊源）：返回圆钮压在剧照上，
+    // 走的就是顶栏那套玻璃（iOS 详情页的返回也是 .glass）
+    val heroHaze = dev.chrisbanes.haze.rememberHazeState()
     Column {
+        androidx.compose.runtime.CompositionLocalProvider(LocalTabHazeState provides heroHaze) {
         Box(Modifier.fillMaxWidth().height(heroHeight())) {
             RemoteImage(
                 url = detail.backdropUrl ?: detail.posterUrl,
                 origin = origin,
                 contentDescription = detail.title,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize().hazeSource(heroHaze),
             )
             Box(
                 Modifier
@@ -1131,7 +1159,7 @@ private fun Hero(
                             0.22f to Color.Transparent,
                             0.52f to Color.Black.copy(alpha = 0.28f),
                             0.84f to Color.Black.copy(alpha = 0.8f),
-                            1f to Bg,
+                            1f to tint,
                         )
                     ),
             )
@@ -1147,6 +1175,7 @@ private fun Hero(
                 // 重新刮削 / 换海报 / 转移 / 删除 / 清除观看记录）。
                 // 那个菜单还没接，先不挂两颗点不动的键——假控件。
             }
+        }
         }
 
         Column(Modifier.padding(horizontal = McMetrics.pagePadding).offset(y = (-124).dp)) {
@@ -1357,9 +1386,12 @@ private fun Hero(
 }
 
 @Composable
-private fun heroHeight(): androidx.compose.ui.unit.Dp =
-    (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp * 0.52f)
-        .coerceAtMost(420f).dp
+private fun heroHeight(): androidx.compose.ui.unit.Dp {
+    // iOS ImmersiveHero：min(屏宽 × 1.15, 屏高 × 0.62)。旧口径「屏高 52%、封顶 420」
+    // 比 iOS 矮一截（393dp 宽的手机上 iOS 是 452，旧口径 420）
+    val c = androidx.compose.ui.platform.LocalConfiguration.current
+    return minOf(c.screenWidthDp * 1.15f, c.screenHeightDp * 0.62f).dp
+}
 
 private fun metaLine(detail: LibraryItemDetailView): String {
     val file = detail.files.firstOrNull()

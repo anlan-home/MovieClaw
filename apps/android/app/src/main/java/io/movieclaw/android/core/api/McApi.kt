@@ -1080,6 +1080,14 @@ interface McApi {
     @POST("sessions/{sessionId}/stop")
     suspend fun stopAgentSession(@Path("sessionId") sessionId: String): McEnvelope<JsonElement>
 
+    /** 对话框可选的全部模型（跨实例，`GET /llm/models`）；composer 的模型 chip 用它 */
+    @GET("llm/models")
+    suspend fun llmModels(): McEnvelope<List<io.movieclaw.android.core.model.LlmModelOption>>
+
+    /** Agent 技能清单（composer 的数据源；气泡里的 `/skill:名字` chip 也按它做门禁） */
+    @GET("skills")
+    suspend fun skillsList(): McEnvelope<List<io.movieclaw.android.core.model.SkillView>>
+
     @POST("sessions/{sessionId}/retry")
     suspend fun retryAgentSession(
         @Path("sessionId") sessionId: String,

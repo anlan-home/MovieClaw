@@ -46,6 +46,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.chrisbanes.haze.hazeSource
 import androidx.compose.ui.unit.sp
 
 /** Hero 轮播的一屏数据 */
@@ -212,6 +213,10 @@ private fun HeroSlidePane(
     onAction: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // hero 内部自己一份玻璃取样源：动作胶囊画在 hero 里（页面内容层的**内部**），
+    // 用外层那张层会读到正在录制的纹理；这里的源就是本页 hero 的剧照本身
+    val heroHaze = dev.chrisbanes.haze.rememberHazeState()
+    androidx.compose.runtime.CompositionLocalProvider(LocalTabHazeState provides heroHaze) {
     Box(
         modifier
             .graphicsLayer { this.alpha = alpha }
@@ -233,7 +238,9 @@ private fun HeroSlidePane(
                         scaleX = zoom
                         scaleY = zoom
                         translationY = parallaxPx
-                    },
+                    }
+                    // 剧照 = 本页玻璃件的模糊源（动作胶囊就压在它上面）
+                    .hazeSource(heroHaze),
             ) {
                 HeroBackdrop(imageUrl = slide.backdropUrl, origin = slide.origin, contentDescription = slide.title)
                 // 压暗渐变：transparent 36% → 黑 50%（与图同罩、一起溶解）
@@ -317,6 +324,7 @@ private fun HeroSlidePane(
             }
         }
     }
+    }
 }
 
 /** 实测：120×34、圆角 999；未订阅是银白实底深色字，已订阅是深色半透明底白字 */
@@ -331,6 +339,9 @@ private fun HeroActionPill(label: String, subscribed: Boolean, onClick: () -> Un
                     Modifier
                         .background(GlassCapsule)
                         .border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(999.dp))
+                        // 已订阅态 = 玻璃（压在剧照上，iOS 的次级动作键口径）；未订阅态是主按钮，
+                        // 保持银白实底（iOS .glassProminent 的对应物）
+                        .glassSurface()
                 } else {
                     Modifier.background(Brush.linearGradient(listOf(Color(0xFFF6F8FC), Color(0xFFCCD6E6))))
                 }

@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.movieclaw.android.core.designsystem.McMetrics
+import io.movieclaw.android.core.designsystem.glassSurface
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.MenuSurface
 import io.movieclaw.android.core.designsystem.PosterCard
@@ -121,11 +122,22 @@ fun DiscoverFilterChipsRow(
                 color = if (on) TextPrimary else TextMuted,
                 modifier = Modifier
                     .clip(RoundedCornerShape(999.dp))
-                    .background(if (on) Color.White.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.05f))
-                    .border(
-                        1.dp,
-                        if (on) Color.Transparent else Color.White.copy(alpha = 0.1f),
-                        RoundedCornerShape(999.dp),
+                    // iOS DiscoverChips：未选中 = `.glass`，生效中 = `.glassProminent`（亮填充）
+                    .then(
+                        if (on) {
+                            Modifier.background(Color.White.copy(alpha = 0.16f))
+                        } else {
+                            Modifier
+                                .background(Color.White.copy(alpha = 0.05f))
+                                .glassSurface()
+                        },
+                    )
+                    .then(
+                        if (on) {
+                            Modifier.border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(999.dp))
+                        } else {
+                            Modifier
+                        },
                     )
                     .clickable { onOpenDim(key) }
                     .padding(horizontal = 12.dp, vertical = 6.dp),

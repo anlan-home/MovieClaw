@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -73,6 +74,7 @@ import kotlinx.coroutines.coroutineScope
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.movieclaw.android.core.designsystem.Bg
+import io.movieclaw.android.core.designsystem.glassSurface
 import io.movieclaw.android.core.designsystem.ContinueWatchingCard
 import io.movieclaw.android.core.designsystem.ErrorPane
 import io.movieclaw.android.core.designsystem.Loadable
@@ -965,10 +967,14 @@ fun LibraryScreen(
             Spacer(Modifier.weight(1f))
             Row(
                 Modifier
-                    .height(36.dp)
+                    // 与右侧放大镜同高（44dp）；每钮位仍是 44 宽
+                    .height(44.dp)
+                    // 与「媒体库」大标题的视觉中心对齐（补偿口径见 McMetrics.topBarActionsOffset）
+                    .offset(y = io.movieclaw.android.core.designsystem.McMetrics.topBarActionsOffset)
                     .clip(RoundedCornerShape(999.dp))
                     .background(GlassCapsule)
-                    .border(1.dp, LineSoft, RoundedCornerShape(999.dp)),
+                    .border(1.dp, LineSoft, RoundedCornerShape(999.dp))
+                    .glassSurface(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
@@ -1004,8 +1010,15 @@ fun LibraryScreen(
             }
             // 搜索（入口口径是「任一搜索分区可用」：影视 / 资源 / 媒体库）；固定间隔成第二组
             if (io.movieclaw.android.core.session.LocalSearchAccess.current.canOpenSearch) {
-                Spacer(Modifier.width(10.dp))
-                McNavButton(Icons.Rounded.Search, contentDescription = "搜索", onClick = onOpenSearch)
+                // 间距与胶囊内两个钮位一致（44dp 图标中心距）：原来 10dp 时是 54dp，看着比
+                // 「▶ ⋯」之间远一截
+                Spacer(Modifier.width(2.dp))
+                McNavButton(
+                    Icons.Rounded.Search,
+                    contentDescription = "搜索",
+                    onClick = onOpenSearch,
+                    modifier = Modifier.offset(y = io.movieclaw.android.core.designsystem.McMetrics.topBarActionsOffset),
+                )
             }
         }
 

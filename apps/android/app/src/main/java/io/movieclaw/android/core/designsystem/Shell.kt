@@ -82,10 +82,12 @@ fun McNavButton(
             .clip(CircleShape)
             .background(GlassCapsule)
             .border(1.dp, LineSoft, CircleShape)
+            .glassSurface()
+            // 液态玻璃（有取样源时覆盖上面的填充与边线；二级页无源则原样）
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(18.dp))
+        Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(20.dp))
         if (badgeDot != null) {
             Box(
                 Modifier
