@@ -151,9 +151,15 @@ class AgentConversationViewModel @Inject constructor(
         _ui.update { it.copy(input = content, editTarget = messageId) }
     }
 
-    fun setModel(ref: String?) = _ui.update { it.copy(modelRef = ref, thinkingLevel = null) }
+    fun setModel(ref: String?) {
+        _ui.update { it.copy(modelRef = ref, thinkingLevel = null) }
+        AgentComposerPrefs.save(context, AgentComposerPrefs.Choice(ref, null))
+    }
 
-    fun setThinkingLevel(level: String?) = _ui.update { it.copy(thinkingLevel = level) }
+    fun setThinkingLevel(level: String?) {
+        _ui.update { it.copy(thinkingLevel = level) }
+        AgentComposerPrefs.save(context, AgentComposerPrefs.Choice(_ui.value.modelRef, level))
+    }
 
     /** 取一次模型清单（对话框的模型 chip）；顺带把会话上一条的模型/档位继承过来（iOS 同口径） */
     private fun loadModels() {
@@ -161,7 +167,10 @@ class AgentConversationViewModel @Inject constructor(
             val origin = sessionRepository.ui.value.origin ?: return@launch
             runCatching { apiFactory.forOrigin(origin).llmModels().dataOrThrow() }
                 .onSuccess { list ->
-                    _ui.update { it.copy(models = list) }
+                    // 与 iOS 同口径：模型清单到手后校验上次的选择（无效就丢掉并落盘）
+                    val choice = AgentComposerPrefs.reconcile(AgentComposerPrefs.load(context), list)
+                    AgentComposerPrefs.save(context, choice)
+                    _ui.update { it.copy(models = list, modelRef = choice.model, thinkingLevel = choice.thinking) }
                 }
         }
     }
@@ -177,6 +186,17 @@ class AgentConversationViewModel @Inject constructor(
         }
     }
     fun onInput(value: String) = _ui.update { it.copy(input = value) }
+
+    private var transcriptRetries = 0
+
+    private fun retryTranscriptIfEmpty() {
+        if (transcriptRetries >= 4 || _ui.value.bubbles.isNotEmpty()) return
+        transcriptRetries++
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(1000)
+            loadTranscript()
+        }
+    }
 
     fun loadTranscript() {
         viewModelScope.launch {
@@ -200,6 +220,11 @@ class AgentConversationViewModel @Inject constructor(
                         bubble.mediaCards?.let { resolveMediaCards(bubble.id, it) }
                     }
                     if (transcript.session.running) followStream()
+                    // 会话标题/条数/时间在对话里会变：通知列表立即重拉
+                    sessionRepository.notifyAgentSessionsChanged()
+                    // 刚建好的会话：服务端可能还没把首条消息写进轨迹（此时 running 也已翻回 false，
+                    // 挂不上流），页面就会空着等——空轨迹时隔一秒再拉，最多 4 次
+                    retryTranscriptIfEmpty()
                 }
                 .onFailure { e -> _ui.update { it.copy(loading = false, error = friendlyMessage(e)) } }
         }

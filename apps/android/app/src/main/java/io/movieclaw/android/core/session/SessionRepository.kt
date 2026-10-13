@@ -85,6 +85,18 @@ class SessionRepository @Inject constructor(
     @GeneralChannel private val rawClient: OkHttpClient,
     private val cacheCleaner: SessionCacheCleaner,
 ) {
+
+    /**
+     * 「Agent 会话列表变了」信号：新建会话成功、对话页拉到新轨迹时 +1。
+     * 「我的」页的最近会话订阅它立即重拉——替代之前的 5 秒轮询（实机反馈"新建完要等一会"）。
+     * iOS 那边是靠一个共享 store（AgentConversationStore）天然做到这一点，这里用信号达成同样效果。
+     */
+    private val _agentSessionsVersion = kotlinx.coroutines.flow.MutableStateFlow(0)
+    val agentSessionsVersion: kotlinx.coroutines.flow.StateFlow<Int> = _agentSessionsVersion
+
+    fun notifyAgentSessionsChanged() {
+        _agentSessionsVersion.value = _agentSessionsVersion.value + 1
+    }
     private val scope = AppScopes.io("SessionRepository")
     private val sessionMutex = Mutex()
 

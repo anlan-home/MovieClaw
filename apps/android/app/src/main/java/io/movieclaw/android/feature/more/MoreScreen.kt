@@ -185,6 +185,9 @@ class MoreViewModel @Inject constructor(
         }
     }
 
+    /** Agent 会话变化信号（SessionRepository）：供页面订阅，替代轮询 */
+    val agentSessionsVersion get() = repository.agentSessionsVersion
+
     fun loadSessions() {
         if (!isAdmin) { _sessions.value = Sessions(loading = false); return }
         viewModelScope.launch {
@@ -294,6 +297,19 @@ fun MoreScreen(
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     // 底栏形态试用开关（开 = 液态玻璃新版，关 = 当前形态）
     val liquidTabBar by vm.liquidTabBar.collectAsStateWithLifecycle()
+
+
+    // 会话列表会在别处变化（新建会话、在对话里跑完一轮）：切回本页刷一次，
+    // 另外订阅 SessionRepository 的变化信号立即重拉——不再轮询（iOS 是靠共享 store 天然做到，
+    // 这里用信号达成同样效果：新建完回到本页就是最新的，零等待）
+    val moreTabActive = io.movieclaw.android.core.designsystem.LocalTabActive.current
+    LaunchedEffect(moreTabActive) {
+        if (!moreTabActive) return@LaunchedEffect
+        vm.loadSessions()
+    }
+    LaunchedEffect(Unit) {
+        vm.agentSessionsVersion.collect { vm.loadSessions() }
+    }
     val permissions = LocalPermissions.current
     val feedback = LocalFeedback.current
 

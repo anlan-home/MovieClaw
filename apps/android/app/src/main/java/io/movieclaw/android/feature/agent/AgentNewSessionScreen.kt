@@ -1,5 +1,23 @@
 package io.movieclaw.android.feature.agent
 
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.asRequestBody
+import io.movieclaw.android.core.designsystem.AccentSoft
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.draw.clip
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -53,6 +71,7 @@ import kotlinx.coroutines.launch
 
 @HiltViewModel
 class AgentNewSessionViewModel @Inject constructor(
+    @dagger.hilt.android.qualifiers.ApplicationContext private val context: android.content.Context,
     private val apiFactory: ApiFactory,
     private val sessionRepository: SessionRepository,
 ) : ViewModel() {
@@ -61,24 +80,110 @@ class AgentNewSessionViewModel @Inject constructor(
         val input: String = "",
         val creating: Boolean = false,
         val error: String? = null,
+        /** 可选模型（`GET /llm/models`）；与对话页同一套选择器 */
+        val models: List<io.movieclaw.android.core.model.LlmModelOption> = emptyList(),
+        /** null = 智能体默认 */
+        val modelRef: String? = null,
+        /** null = 由模型自行决定 */
+        val thinkingLevel: String? = null,
+        /** 已上传的图片附件（首条消息一起发出去） */
+        val attachments: List<io.movieclaw.android.core.model.AgentAttachment> = emptyList(),
+        val uploading: Boolean = false,
+        val notice: io.movieclaw.android.core.designsystem.McNotice? = null,
     )
 
     private val _ui = MutableStateFlow(UiState())
     val ui = _ui.asStateFlow()
 
+    init {
+        // 与对话页同一份模型清单（同一个端点；失败不影响建会话）
+        viewModelScope.launch {
+            val origin = sessionRepository.ui.value.origin ?: return@launch
+            runCatching { apiFactory.forOrigin(origin).llmModels().dataOrThrow() }
+                .onSuccess { list ->
+                    val choice = AgentComposerPrefs.reconcile(AgentComposerPrefs.load(context), list)
+                    AgentComposerPrefs.save(context, choice)
+                    _ui.update { it.copy(models = list, modelRef = choice.model, thinkingLevel = choice.thinking) }
+                }
+        }
+    }
+
     fun onInput(value: String) = _ui.update { it.copy(input = value) }
+
+    fun setModel(ref: String?) {
+        _ui.update { it.copy(modelRef = ref, thinkingLevel = null) }
+        AgentComposerPrefs.save(context, AgentComposerPrefs.Choice(ref, null))
+    }
+
+    fun setThinkingLevel(level: String?) {
+        _ui.update { it.copy(thinkingLevel = level) }
+        AgentComposerPrefs.save(context, AgentComposerPrefs.Choice(_ui.value.modelRef, level))
+    }
+
+    fun consumeNotice() = _ui.update { it.copy(notice = null) }
+
+    /** 图片附件：读字节 → multipart 上传 → 记录 attachment_id（与对话页同一份实现） */
+    fun attachImage(uri: android.net.Uri) {
+        _ui.update { it.copy(uploading = true) }
+        viewModelScope.launch {
+            val origin = sessionRepository.ui.value.origin ?: return@launch
+            val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+            }
+            if (bytes == null) {
+                _ui.update {
+                    it.copy(
+                        uploading = false,
+                        notice = io.movieclaw.android.core.designsystem.McNotice("无法读取所选图片", io.movieclaw.android.core.designsystem.FeedbackTone.Success),
+                    )
+                }
+                return@launch
+            }
+            val temp = java.io.File(context.cacheDir, "agent_upload_${System.currentTimeMillis()}.jpg")
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { temp.writeBytes(bytes) } }
+            runCatching {
+                val part = okhttp3.MultipartBody.Part.createFormData(
+                    "file", temp.name, temp.asRequestBody("image/jpeg".toMediaType()),
+                )
+                apiFactory.forOrigin(origin).uploadAgentAttachment(part).dataOrThrow()
+            }
+                .onSuccess { attachment -> _ui.update { it.copy(uploading = false, attachments = it.attachments + attachment) } }
+                .onFailure { e ->
+                    _ui.update {
+                        it.copy(
+                            uploading = false,
+                            notice = io.movieclaw.android.core.designsystem.McNotice(friendlyMessage(e), io.movieclaw.android.core.designsystem.FeedbackTone.Error),
+                        )
+                    }
+                }
+        }
+    }
+
+    fun removeAttachment(id: String) = _ui.update { state ->
+        state.copy(attachments = state.attachments.filterNot { it.attachmentId == id })
+    }
 
     fun create(onCreated: (String) -> Unit) {
         val text = _ui.value.input.trim()
-        if (text.isEmpty() || _ui.value.creating) return
+        if ((text.isEmpty() && _ui.value.attachments.isEmpty()) || _ui.value.creating) return
         _ui.update { it.copy(creating = true, error = null) }
         viewModelScope.launch {
             val origin = sessionRepository.ui.value.origin ?: return@launch
             runCatching {
-                apiFactory.forOrigin(origin).startAgentSession(AgentSessionStart(content = text)).dataOrThrow()
+                // 首条消息就带上模型 / 思维链选择（与对话页发送同口径）
+                apiFactory.forOrigin(origin).startAgentSession(
+                    AgentSessionStart(
+                        content = text,
+                        attachments = _ui.value.attachments.map { it.attachmentId },
+                        model = _ui.value.modelRef ?: "",
+                        thinkingLevel = _ui.value.thinkingLevel,
+                    )
+                ).dataOrThrow()
             }
                 .onSuccess { accepted ->
                     _ui.update { it.copy(creating = false) }
+                    // 会话列表立刻能看到这条（「我的」页订阅这个信号）
+                    sessionRepository.notifyAgentSessionsChanged()
                     onCreated(accepted.sessionId)
                 }
                 .onFailure { e -> _ui.update { it.copy(creating = false, error = friendlyMessage(e)) } }
@@ -115,41 +220,145 @@ fun AgentNewSessionScreen(
             }
         }
         Spacer(Modifier.height(6.dp))
-        TextField(
-            value = state.input,
-            onValueChange = vm::onInput,
-            placeholder = { Text("描述你的需求…", fontSize = 13.5.sp, color = TextFaint) },
-            minLines = 3,
-            maxLines = 8,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { vm.create(onCreated) }),
-            colors = TextFieldDefaults.colors(
-                focusedContainerColor = Color.White.copy(alpha = 0.06f),
-                unfocusedContainerColor = Color.White.copy(alpha = 0.06f),
-                focusedIndicatorColor = Color.Transparent,
-                unfocusedIndicatorColor = Color.Transparent,
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
-                cursorColor = Accent,
-            ),
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-        )
+        // 图片附件（iOS 新会话页用的同一个 AgentComposer，`+` 菜单里就有图片）：
+        // 选择器 + 已选图片条 + 工具行里的图片键，与对话页同一份口径
+        val pickImage = androidx.activity.compose.rememberLauncherForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
+        ) { uri -> uri?.let(vm::attachImage) }
+        if (state.attachments.isNotEmpty() || state.uploading) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            ) {
+                state.attachments.forEach { attachment ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(AccentSoft)
+                            .clickable { vm.removeAttachment(attachment.attachmentId) }
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    ) {
+                        Icon(Icons.Rounded.Image, contentDescription = null, tint = Accent, modifier = Modifier.size(13.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(attachment.name.take(18), fontSize = 11.sp, color = Accent)
+                        Spacer(Modifier.width(5.dp))
+                        Text("×", fontSize = 12.sp, color = Accent)
+                    }
+                }
+                if (state.uploading) {
+                    Text("上传中…", fontSize = 11.sp, color = TextFaint)
+                }
+            }
+        }
+        // 输入区与对话页同一套（iOS `AgentComposer` 结构）：容器里是输入框 + 底部工具行，
+        // 工具行里放模型 chip 与发送键——两页观感一致，首条消息也能先选模型
+        var showModelMenu by remember { mutableStateOf(false) }
+        Column(
+            Modifier
+                .padding(horizontal = 16.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(Color.White.copy(alpha = 0.05f))
+                .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(22.dp)),
+        ) {
+            TextField(
+                value = state.input,
+                onValueChange = vm::onInput,
+                placeholder = { Text("描述你的需求…", fontSize = 15.sp, color = TextFaint) },
+                minLines = 3,
+                maxLines = 8,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { vm.create(onCreated) }),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedContainerColor = Color.Transparent,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    cursorColor = Accent,
+                ),
+                shape = RoundedCornerShape(22.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(
+                    onClick = {
+                        pickImage.launch(
+                            androidx.activity.result.PickVisualMediaRequest(
+                                androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly,
+                            )
+                        )
+                    },
+                    modifier = Modifier.size(44.dp),
+                ) {
+                    Icon(Icons.Rounded.Image, contentDescription = "添加图片", tint = TextMuted, modifier = Modifier.size(20.dp))
+                }
+                if (state.models.isNotEmpty()) {
+                    ModelChip(
+                        label = AgentThinking.resolve(state.models, state.modelRef)?.label ?: "模型",
+                        enabled = !state.creating,
+                        onClick = { showModelMenu = true },
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                IconButton(
+                    onClick = { vm.create(onCreated) },
+                    enabled = !state.creating && state.input.isNotBlank(),
+                    modifier = Modifier.size(44.dp).background(
+                        if (state.creating || state.input.isBlank()) Color.White.copy(alpha = 0.08f) else Accent,
+                        CircleShape,
+                    ),
+                ) {
+                    if (state.creating) {
+                        CircularProgressIndicator(color = TextMuted, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(
+                            Icons.AutoMirrored.Rounded.Send,
+                            contentDescription = "开始对话",
+                            tint = Color(0xFF0A0E12),
+                            modifier = Modifier.size(19.dp),
+                        )
+                    }
+                }
+            }
+        }
         state.error?.let {
             Text(it, fontSize = 12.sp, color = Danger, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
         }
         Spacer(Modifier.height(14.dp))
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.End) {
-            Button(
-                onClick = { vm.create(onCreated) },
-                enabled = !state.creating && state.input.isNotBlank(),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color(0xFF0A0E12)),
+        Spacer(Modifier.height(6.dp))
+        if (showModelMenu) {
+            val menuOffset = with(androidx.compose.ui.platform.LocalDensity.current) {
+                androidx.compose.ui.unit.IntOffset(16.dp.roundToPx(), (-210).dp.roundToPx())
+            }
+            androidx.compose.ui.window.Popup(
+                alignment = Alignment.TopStart,
+                offset = menuOffset,
+                onDismissRequest = { showModelMenu = false },
+                properties = androidx.compose.ui.window.PopupProperties(focusable = true),
             ) {
-                if (state.creating) {
-                    CircularProgressIndicator(color = Color(0xFF0A0E12), modifier = Modifier.height(16.dp), strokeWidth = 2.dp)
-                } else {
-                    Text("开始对话", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                io.movieclaw.android.core.designsystem.MenuAppear(originX = 0.12f, originY = 1f) {
+                    androidx.compose.material3.Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = io.movieclaw.android.core.designsystem.MenuSurface,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, io.movieclaw.android.core.designsystem.LineColor),
+                        shadowElevation = 12.dp,
+                    ) {
+                        ModelMenu(
+                            models = state.models,
+                            modelRef = state.modelRef,
+                            thinkingLevel = state.thinkingLevel,
+                            onPickModel = { ref ->
+                                vm.setModel(ref)
+                                showModelMenu = false
+                            },
+                            onPickThinking = { level -> vm.setThinkingLevel(level) },
+                        )
+                    }
                 }
             }
         }

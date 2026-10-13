@@ -451,7 +451,7 @@ fun AgentConversationScreen(
 
 /** 模型 chip（iOS `toolRow` 里的那颗：标签 13sp 弱色 + 下拉箭头，高 44dp） */
 @Composable
-private fun ModelChip(label: String, enabled: Boolean, onClick: () -> Unit) {
+internal fun ModelChip(label: String, enabled: Boolean, onClick: () -> Unit) {
     Row(
         Modifier
             .height(44.dp)
@@ -468,7 +468,7 @@ private fun ModelChip(label: String, enabled: Boolean, onClick: () -> Unit) {
 
 /** 模型 + 思维链菜单（选项与档位文案都照 iOS `AgentModelMenu` / `AgentThinking`） */
 @Composable
-private fun ModelMenu(
+internal fun ModelMenu(
     models: List<io.movieclaw.android.core.model.LlmModelOption>,
     modelRef: String?,
     thinkingLevel: String?,
