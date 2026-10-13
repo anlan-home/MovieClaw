@@ -168,9 +168,16 @@ class AgentConversationViewModel @Inject constructor(
             runCatching { apiFactory.forOrigin(origin).llmModels().dataOrThrow() }
                 .onSuccess { list ->
                     // 与 iOS 同口径：模型清单到手后校验上次的选择（无效就丢掉并落盘）
-                    val choice = AgentComposerPrefs.reconcile(AgentComposerPrefs.load(context), list)
-                    AgentComposerPrefs.save(context, choice)
-                    _ui.update { it.copy(models = list, modelRef = choice.model, thinkingLevel = choice.thinking) }
+                    // iOS 口径：`modelChoice ?? sessionModel` —— 会话自己有模型就用会话的，
+                    // 只有会话没定义（新会话/空轨迹）才回落到持久化偏好，不能反过来盖掉
+                    val prefs = AgentComposerPrefs.reconcile(AgentComposerPrefs.load(context), list)
+                    _ui.update {
+                        it.copy(
+                            models = list,
+                            modelRef = it.modelRef ?: prefs.model,
+                            thinkingLevel = it.thinkingLevel ?: prefs.thinking,
+                        )
+                    }
                 }
         }
     }
@@ -188,6 +195,7 @@ class AgentConversationViewModel @Inject constructor(
     fun onInput(value: String) = _ui.update { it.copy(input = value) }
 
     private var transcriptRetries = 0
+    private var lastNotifiedBubbleCount = -1
 
     private fun retryTranscriptIfEmpty() {
         if (transcriptRetries >= 4 || _ui.value.bubbles.isNotEmpty()) return
@@ -220,8 +228,18 @@ class AgentConversationViewModel @Inject constructor(
                         bubble.mediaCards?.let { resolveMediaCards(bubble.id, it) }
                     }
                     if (transcript.session.running) followStream()
-                    // 会话标题/条数/时间在对话里会变：通知列表立即重拉
-                    sessionRepository.notifyAgentSessionsChanged()
+                    // 会话自己的模型（轨迹里最后一条 user 消息带的）：与 iOS `sessionModel` 同源
+                    transcript.entries.lastOrNull { it.message?.role == "user" }
+                        ?.model?.takeIf { it.isNotBlank() }
+                        ?.let { model -> _ui.update { it.copy(modelRef = model) } }
+                    // 只在**真有变化**时通知列表（首次成功加载 / 气泡数变了）：
+                    // 原来每次 loadTranscript（含空轨迹重试）都发，会把「我的」页刷屏
+                    val loaded = _ui.value.bubbles
+                    if (transcriptRetries == 0 || loaded.size != lastNotifiedBubbleCount) {
+                        lastNotifiedBubbleCount = loaded.size
+                        sessionRepository.notifyAgentSessionsChanged()
+                    }
+                    if (loaded.isNotEmpty()) transcriptRetries = 0   // 拿到内容就把重试计数归零
                     // 刚建好的会话：服务端可能还没把首条消息写进轨迹（此时 running 也已翻回 false，
                     // 挂不上流），页面就会空着等——空轨迹时隔一秒再拉，最多 4 次
                     retryTranscriptIfEmpty()
@@ -270,6 +288,7 @@ class AgentConversationViewModel @Inject constructor(
         val state = _ui.value
         val text = state.input.trim()
         if (text.isEmpty() && state.attachments.isEmpty()) return
+        transcriptRetries = 0   // 新一轮开始，空轨迹重试次数重新计
         val editId = state.editTarget
         _ui.update { it.copy(input = "", streamingInFlight = true, running = true, error = null, editTarget = null) }
         viewModelScope.launch {
@@ -480,7 +499,7 @@ class AgentConversationViewModel @Inject constructor(
                 }.getOrNull()
             }
             if (bytes == null) {
-                _ui.update { it.copy(uploading = false, notice = McNotice("无法读取所选图片", FeedbackTone.Success)) }
+                _ui.update { it.copy(uploading = false, notice = McNotice("无法读取所选图片", FeedbackTone.Error)) }
                 return@launch
             }
             val temp = File(context.cacheDir, "agent_upload_${System.currentTimeMillis()}.jpg")

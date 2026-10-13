@@ -90,6 +90,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -308,7 +309,11 @@ fun MoreScreen(
         vm.loadSessions()
     }
     LaunchedEffect(Unit) {
-        vm.agentSessionsVersion.collect { vm.loadSessions() }
+        // 防抖：信号可能连着来（一次会话既有加载又有重试），合并成一次拉取
+        vm.agentSessionsVersion.collectLatest {
+            kotlinx.coroutines.delay(300)
+            vm.loadSessions()
+        }
     }
     val permissions = LocalPermissions.current
     val feedback = LocalFeedback.current

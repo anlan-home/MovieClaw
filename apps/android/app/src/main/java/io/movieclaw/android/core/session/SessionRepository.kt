@@ -95,7 +95,7 @@ class SessionRepository @Inject constructor(
     val agentSessionsVersion: kotlinx.coroutines.flow.StateFlow<Int> = _agentSessionsVersion
 
     fun notifyAgentSessionsChanged() {
-        _agentSessionsVersion.value = _agentSessionsVersion.value + 1
+        _agentSessionsVersion.value += 1
     }
     private val scope = AppScopes.io("SessionRepository")
     private val sessionMutex = Mutex()

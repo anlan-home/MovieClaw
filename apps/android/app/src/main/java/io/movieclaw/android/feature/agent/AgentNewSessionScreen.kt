@@ -126,7 +126,11 @@ class AgentNewSessionViewModel @Inject constructor(
     fun attachImage(uri: android.net.Uri) {
         _ui.update { it.copy(uploading = true) }
         viewModelScope.launch {
-            val origin = sessionRepository.ui.value.origin ?: return@launch
+            val origin = sessionRepository.ui.value.origin
+            if (origin == null) {
+                _ui.update { it.copy(uploading = false) }   // 别把"上传中…"挂在界面上
+                return@launch
+            }
             val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
             }
@@ -134,16 +138,25 @@ class AgentNewSessionViewModel @Inject constructor(
                 _ui.update {
                     it.copy(
                         uploading = false,
-                        notice = io.movieclaw.android.core.designsystem.McNotice("无法读取所选图片", io.movieclaw.android.core.designsystem.FeedbackTone.Success),
+                        notice = io.movieclaw.android.core.designsystem.McNotice("无法读取所选图片", io.movieclaw.android.core.designsystem.FeedbackTone.Error),
                     )
                 }
                 return@launch
             }
-            val temp = java.io.File(context.cacheDir, "agent_upload_${System.currentTimeMillis()}.jpg")
+            // 扩展名/MIME 都按真实类型来（原来是写死的 .jpg + image/jpeg，PNG 会被当成 JPEG 传上去）
+            val mime = context.contentResolver.getType(uri) ?: "image/jpeg"
+            val ext = when (mime) {
+                "image/png" -> "png"
+                "image/webp" -> "webp"
+                "image/gif" -> "gif"
+                "image/heic", "image/heif" -> "heic"
+                else -> "jpg"
+            }
+            val temp = java.io.File(context.cacheDir, "agent_upload_${System.currentTimeMillis()}.$ext")
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { temp.writeBytes(bytes) } }
             runCatching {
                 val part = okhttp3.MultipartBody.Part.createFormData(
-                    "file", temp.name, temp.asRequestBody("image/jpeg".toMediaType()),
+                    "file", temp.name, temp.asRequestBody(mime.toMediaType()),
                 )
                 apiFactory.forOrigin(origin).uploadAgentAttachment(part).dataOrThrow()
             }
@@ -156,6 +169,8 @@ class AgentNewSessionViewModel @Inject constructor(
                         )
                     }
                 }
+            // 传完就删临时文件（原来一直堆在 cacheDir 里）
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { temp.delete() } }
         }
     }
 
@@ -164,11 +179,18 @@ class AgentNewSessionViewModel @Inject constructor(
     }
 
     fun create(onCreated: (String) -> Unit) {
-        val text = _ui.value.input.trim()
-        if ((text.isEmpty() && _ui.value.attachments.isEmpty()) || _ui.value.creating) return
+        val state = _ui.value
+        val text = state.input.trim()
+        // 与按钮同一个条件：要有文字或图片、不在创建中、也不在上传中（上传没完就建会话会把图丢掉）
+        if (state.creating || state.uploading) return
+        if (text.isEmpty() && state.attachments.isEmpty()) return
         _ui.update { it.copy(creating = true, error = null) }
         viewModelScope.launch {
-            val origin = sessionRepository.ui.value.origin ?: return@launch
+            val origin = sessionRepository.ui.value.origin
+            if (origin == null) {
+                _ui.update { it.copy(creating = false) }   // 别把按钮卡在"创建中"
+                return@launch
+            }
             runCatching {
                 // 首条消息就带上模型 / 思维链选择（与对话页发送同口径）
                 apiFactory.forOrigin(origin).startAgentSession(
@@ -181,7 +203,8 @@ class AgentNewSessionViewModel @Inject constructor(
                 ).dataOrThrow()
             }
                 .onSuccess { accepted ->
-                    _ui.update { it.copy(creating = false) }
+                    // 建完清空：这个页面可能还在返回栈上，别留下上次的图和文字
+                    _ui.update { it.copy(creating = false, attachments = emptyList(), input = "") }
                     // 会话列表立刻能看到这条（「我的」页订阅这个信号）
                     sessionRepository.notifyAgentSessionsChanged()
                     onCreated(accepted.sessionId)
@@ -305,11 +328,13 @@ fun AgentNewSessionScreen(
                     )
                 }
                 Spacer(Modifier.weight(1f))
+                val canSend = !state.creating && !state.uploading &&
+                    (state.input.isNotBlank() || state.attachments.isNotEmpty())
                 IconButton(
                     onClick = { vm.create(onCreated) },
-                    enabled = !state.creating && state.input.isNotBlank(),
+                    enabled = canSend,
                     modifier = Modifier.size(44.dp).background(
-                        if (state.creating || state.input.isBlank()) Color.White.copy(alpha = 0.08f) else Accent,
+                        if (canSend) Accent else Color.White.copy(alpha = 0.08f),
                         CircleShape,
                     ),
                 ) {
