@@ -221,6 +221,14 @@ data class LibraryItemDetailView(
     val tmdbId: Long? = null,
     val imdbId: String? = null,
     val doubanId: String? = null,
+    /** 该条目正在后台刮削元数据（⋯ 菜单据此点蓝点、禁掉「刷新元数据」） */
+    val scraping: Boolean = false,
+    /** 刮削当前阶段（只透传，文案由服务端给） */
+    val scrapingPhase: String? = null,
+    /** 章节场景图正在后台生成（禁掉「重新生成章节」） */
+    val chaptersPending: Boolean = false,
+    /** 整条目占的目录（删除整条时列这些；老服务端为空，退回文件路径列表） */
+    val entryDirs: List<String> = emptyList(),
 )
 
 @Serializable

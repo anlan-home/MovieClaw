@@ -378,7 +378,7 @@ fun AppNav() {
         // 订阅弹层不再是一个导航目标：它由 `SubscribeSheetHost` 在**当前页面之上**渲染
         // （导航过去会让原页面离开组合，弹层的遮罩就压在一片空黑上——用户报的"整页变黑"）。
         // 「手动选种」带 forSub 进搜索页：那一页搜出的种子都投给这条订阅。
-        composable("subscription/{subscriptionId}") {
+        composable("subscription/{subscriptionId}?upgradeRun={upgradeRun}") {
             val subId = it.arguments?.getString("subscriptionId")?.toLongOrNull()
             SubscriptionDetailScreen(
                 onBack = { navController.popBackStack() },
@@ -389,6 +389,8 @@ fun AppNav() {
                             "&forSub=${subId ?: -1L}&forSubTitle=${Uri.encode(title)}"
                     )
                 },
+                // 详情页「洗版…」进来时带上：进页面直接跑一轮洗版
+                autoUpgradeRun = it.arguments?.getString("upgradeRun") == "true",
             )
         }
         composable("notices") {
@@ -499,6 +501,17 @@ fun AppNav() {
                 onOpenAgentSession = { id -> navController.navigate("agentConversation/$id") },
                 onOpenItem = { lib, id -> navController.navigate("item/$lib/$id") },
                 onOpenTitle = { ref -> navController.navigate("title?ref=${Uri.encode(ref)}") },
+                // ⋯ 菜单「搜索资源」：带片名与类型（movie/tv）进搜索页
+                onSearch = { title, kind -> navController.navigate(searchRouteFor(title, kind)) },
+                // ⋯ 菜单「洗版…」：已有订阅 → 去订阅详情页跑一轮洗版；没有 → 打开订阅弹层
+                onOpenSubscription = { id, upgradeRun ->
+                    navController.navigate("subscription/$id?upgradeRun=$upgradeRun")
+                },
+                onSubscribe = { ref ->
+                    io.movieclaw.android.feature.subscriptions.SubscribeSheetHost.open(ref)
+                },
+                // 转移完成后「去目标库查看」
+                onOpenLibrary = { id -> navController.navigate("library/$id") },
             )
         }
         composable("player") {

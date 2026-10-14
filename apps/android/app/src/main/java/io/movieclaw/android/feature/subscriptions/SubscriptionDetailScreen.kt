@@ -271,6 +271,11 @@ fun SubscriptionDetailScreen(
     onBack: () -> Unit,
     /** 「手动选种」：带订阅标题与类型进搜索页的收窄分类手动选种模式（搜索页把结果投给这条订阅） */
     onOpenSearch: (String, String?) -> Unit = { _, _ -> },
+    /**
+     * 进页面就跑一轮洗版（详情页 ⋯ 菜单的「洗版…」：iOS `.subscription(id:upgradeRun: true)`）。
+     * 订阅加载好之后跑一次，之后用户自己再点菜单里的洗版不受影响。
+     */
+    autoUpgradeRun: Boolean = false,
     vm: SubscriptionDetailViewModel = hiltViewModel(),
 ) {
     val state by vm.ui.collectAsStateWithLifecycle()
@@ -279,6 +284,10 @@ fun SubscriptionDetailScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var cancelOpen by remember { mutableStateOf(false) }
     val sub = state.sub
+
+    LaunchedEffect(autoUpgradeRun, sub?.id) {
+        if (autoUpgradeRun && sub != null) vm.upgradeRun()
+    }
 
     LaunchedEffect(vm) {
         vm.notice.collect { n ->

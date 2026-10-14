@@ -794,6 +794,248 @@ class ItemDetailViewModel @Inject constructor(
             apiFactory.forOrigin(origin).purgeLibraryFile(libraryId, itemId, fileId).dataOrThrow()
         }.map { io.movieclaw.android.core.model.LibraryMarksBus.bump() }
     }
+
+    /* ---------------- 「⋯」菜单的动作（iOS `LibraryItemDetailView.actionsMenu` 的同款动作） ---------------- */
+
+    /**
+     * 库本身（不是条目）。⋯ 菜单要用它的两处：
+     * `capabilities.scraped`（决定刮削类动作摆不摆）与 `extract_chapter_images`（决定「重新生成章节」）。
+     */
+    private val _library = MutableStateFlow<io.movieclaw.android.core.model.LibraryView?>(null)
+    val library = _library.asStateFlow()
+
+    fun loadLibrary() {
+        if (_library.value != null) return
+        viewModelScope.launch {
+            val origin = repository.ui.value.origin ?: return@launch
+            runCatching { apiFactory.forOrigin(origin).library(libraryId).dataOrThrow() }
+                .onSuccess { _library.value = it }
+        }
+    }
+
+    /** 删除整个条目（⋯ 菜单的「删除影片」）：目录连 NFO/海报/字幕一起清掉 */
+    suspend fun deleteItem(): Result<io.movieclaw.android.core.model.ItemDeleteResultView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).deleteLibraryItem(libraryId, itemId).dataOrThrow()
+        }.onSuccess { io.movieclaw.android.core.model.LibraryMarksBus.bump() }
+    }
+
+    /** 刷新元数据（后台作业，202）：受理成功界面自己进「正在刷新」态（服务端 `scraping` 也会置位） */
+    suspend fun refreshMetadata(): Result<io.movieclaw.android.core.model.ItemJobView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).refreshItemMetadata(libraryId, itemId).dataOrThrow() }
+    }
+
+    /** 重新生成章节图（后台作业） */
+    suspend fun regenerateChapters(): Result<io.movieclaw.android.core.model.ItemJobView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).regenerateItemChapters(libraryId, itemId).dataOrThrow() }
+    }
+
+    /** 重新识别预览（打开面板时重走一遍识别链，只读不落库） */
+    suspend fun reidentifyPreview(): Result<io.movieclaw.android.core.model.ReidentifyPreviewView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).reidentifyPreview(libraryId, itemId).dataOrThrow() }
+    }
+
+    /** 把一组文件改挂到某部作品（走识别链的认领接口，会记为人工身份） */
+    suspend fun assignFilesToTitle(
+        fileIds: List<Long>,
+        titleRef: String,
+    ): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).assignFilesToTitle(
+                io.movieclaw.android.core.model.ClaimBatchPayload(fileIds = fileIds, titleRef = titleRef),
+            ).dataOrThrow()
+        }.map { io.movieclaw.android.core.model.LibraryMarksBus.bump() }
+    }
+
+    /** 标为非独立作品（花絮/预告类，不动磁盘） */
+    suspend fun markFilesAsExtras(fileIds: List<Long>): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).markFilesAsExtras(
+                io.movieclaw.android.core.model.DetachPayload(fileIds = fileIds),
+            ).dataOrThrow()
+        }.map { io.movieclaw.android.core.model.LibraryMarksBus.bump() }
+    }
+
+    /** 面板里「自己搜…」用：按片名搜上游条目（不写搜索历史） */
+    suspend fun searchTitlesForReidentify(query: String): Result<List<io.movieclaw.android.core.model.DiscoveredTitle>> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin)
+                .searchTitles(
+                    io.movieclaw.android.core.model.TitleSearchRequest(
+                        query = query,
+                        saveHistory = false,
+                    )
+                )
+                .dataOrThrow()
+                .titles
+        }
+    }
+
+    /** 换图候选 */
+    suspend fun artworkCandidates(): Result<io.movieclaw.android.core.model.ArtworkCandidatesView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).artworkCandidates(libraryId, itemId).dataOrThrow() }
+    }
+
+    /** 选定一张图（`filePath = null` = 恢复自动选图）；选完详情页要重拉（海报/背景换了） */
+    suspend fun selectArtwork(kind: String, filePath: String?): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).selectArtwork(
+                libraryId,
+                itemId,
+                io.movieclaw.android.core.model.ArtworkSelectPayload(kind = kind, filePath = filePath),
+            ).dataOrThrow()
+        }
+    }
+
+    /** 转移预览（只读） */
+    suspend fun transferPreview(targetLibraryId: Long): Result<io.movieclaw.android.core.model.TransferPreviewView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).transferPreview(libraryId, itemId, targetLibraryId).dataOrThrow()
+        }
+    }
+
+    /** 提交转移（后台作业） */
+    suspend fun startTransfer(targetLibraryId: Long): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).transferItem(
+                libraryId,
+                itemId,
+                io.movieclaw.android.core.model.TransferPayload(targetLibraryId),
+            ).dataOrThrow()
+        }
+    }
+
+    /** 转移状态（源库一份） */
+    suspend fun transferStatus(): Result<io.movieclaw.android.core.model.TransferStatusView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).transferStatus(libraryId).dataOrThrow() }
+    }
+
+    /** 清除本条目的观看记录；返回服务端给的结论文案（信封 message） */
+    suspend fun clearHistory(): Result<String> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            val env = apiFactory.forOrigin(origin).clearPlaybackHistory(scope = "item", mediaItemId = itemId)
+            env.dataOrThrow()
+            env.message
+        }.onSuccess { io.movieclaw.android.core.model.LibraryMarksBus.bump() }
+    }
+
+    /** 可加入的合集（名单驱动 + 自己能动的；面板再按这个二次过滤） */
+    suspend fun collectionsForPicker(): Result<List<io.movieclaw.android.core.model.CollectionView>> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).collections(libraryId = libraryId, includeEmpty = true).dataOrThrow()
+        }
+    }
+
+    suspend fun addToCollection(collectionId: Long): Result<io.movieclaw.android.core.model.CollectionView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).collectionAddItems(
+                collectionId,
+                io.movieclaw.android.core.model.CollectionItemsPayload(mediaItemIds = listOf(itemId)),
+            ).dataOrThrow()
+        }
+    }
+
+    /** 新建手动合集并把这一个条目放进去（一次请求，同 iOS） */
+    suspend fun createCollectionAndAdd(name: String): Result<io.movieclaw.android.core.model.CollectionView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).createCollection(
+                io.movieclaw.android.core.model.CollectionPayload(
+                    name = name,
+                    libraryId = libraryId,
+                    itemIds = listOf(itemId),
+                )
+            ).dataOrThrow()
+        }
+    }
+
+    /**
+     * 当前有效分享；null = 还没分享过。
+     * 服务端这里 `data` 可以为 null（信封仍 success），**不能走 dataOrThrow**。
+     */
+    suspend fun existingShare(): Result<io.movieclaw.android.core.model.ShareView?> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            val env = apiFactory.forOrigin(origin).libraryItemShare(libraryId, itemId)
+            if (!env.success) {
+                throw io.movieclaw.android.core.network.ApiException(
+                    code = env.code.ifEmpty { "FAILED" },
+                    message = env.message.ifEmpty { "请求失败" },
+                )
+            }
+            env.data
+        }
+    }
+
+    /** 生成分享链接；第二个值 = 服务端说「已有一条有效分享」（`SHARE_EXISTS`） */
+    suspend fun createShare(
+        days: Int,
+        password: String?,
+    ): Result<Pair<io.movieclaw.android.core.model.ShareView, Boolean>> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            val env = apiFactory.forOrigin(origin).createLibraryItemShare(
+                libraryId,
+                itemId,
+                io.movieclaw.android.core.model.ShareCreateRequest(expiresInDays = days, password = password),
+            )
+            env.dataOrThrow() to (env.code == "SHARE_EXISTS")
+        }
+    }
+
+    suspend fun revokeShare(): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).revokeLibraryItemShare(libraryId, itemId).dataOrThrow() }
+            .map { }
+    }
+
+    /** 「洗版…」按条目类型找现成的订阅（找到就把订阅详情页跑一轮洗版） */
+    suspend fun subscriptionsOfKind(kind: String): Result<List<io.movieclaw.android.core.model.SubscriptionView>> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).subscriptions(kind = kind).dataOrThrow() }
+    }
+
+    /** 「转移到其他库…」的目标库候选（同类型、可见的库；面板再排掉本库） */
+    suspend fun librariesForTransfer(): Result<List<io.movieclaw.android.core.model.LibraryView>> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).libraries().dataOrThrow() }
+    }
 }
 
 @Composable
@@ -814,6 +1056,14 @@ fun ItemDetailScreen(
     onOpenItem: (Long, Long) -> Unit = { _, _ -> },
     /** 系列里缺的那部 → 发现页的 TMDB 详情（title_ref 形如 tmdb:movie:123），在那里订阅 */
     onOpenTitle: (String) -> Unit = {},
+    /** ⋯ 菜单「搜索资源」：带片名与类型进搜索页（iOS `SearchScope.ofMediaKind` 同口径） */
+    onSearch: (String, String?) -> Unit = { _, _ -> },
+    /** ⋯ 菜单「洗版…」已有订阅时：去订阅详情页跑一轮洗版（iOS `.subscription(id:upgradeRun: true)`） */
+    onOpenSubscription: (Long, Boolean) -> Unit = { _, _ -> },
+    /** ⋯ 菜单「洗版…」没有订阅时：打开订阅弹层（title_ref 形如 tmdb:movie:123） */
+    onSubscribe: (String) -> Unit = {},
+    /** 「转移到其他库」完成后「去目标库查看」（iOS `goToTarget`） */
+    onOpenLibrary: (Long) -> Unit = {},
     vm: ItemDetailViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -829,6 +1079,14 @@ fun ItemDetailScreen(
     // 文件区动作：删除走底部确认单（iOS `DeleteFileSheet`），立即清理走确认弹窗
     var trashTarget by remember { mutableStateOf<io.movieclaw.android.core.model.LibraryFileView?>(null) }
     var purgeTarget by remember { mutableStateOf<io.movieclaw.android.core.model.LibraryFileView?>(null) }
+    // ⋯ 菜单（iOS `actionsMenu`）：菜单开关、点下的动作、两个确认框、本地「正在刷新」态
+    var menuOpen by remember { mutableStateOf(false) }
+    var picking by remember { mutableStateOf<ItemActionId?>(null) }
+    var refreshConfirm by remember { mutableStateOf(false) }
+    var clearConfirm by remember { mutableStateOf(false) }
+    /** 点下到服务端 `scraping` 置位之间挡住重复点击（iOS 的本地 `kicking`） */
+    var kicking by remember { mutableStateOf(false) }
+    val library by vm.library.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -932,6 +1190,10 @@ fun ItemDetailScreen(
                     onCancelJob = { vm.cancelSubtitleJob() },
                     onHandOffToAgent = { id -> vm.handOffSubtitleGenToAgent(id) },
                 ),
+                trailingActions = {
+                    // 刮削中：按钮右上角点一颗蓝点（iOS `actionsMenu` 的蓝点同款）
+                    ItemActionsButton(scraping = s.value.item.scraping || kicking) { menuOpen = !menuOpen }
+                },
             ) {
                 // 网页正文顺序：分集区 → 章节 → **演职员** → 文件区
                 if (s.value.item.kind == "tv" && s.value.episodes.isNotEmpty()) {
@@ -1044,6 +1306,181 @@ fun ItemDetailScreen(
             },
         )
     }
+
+    /* ---------------- ⋯ 菜单的动作（iOS `actionsMenu` 的 switch） ---------------- */
+
+    // 库能力（capabilities.scraped / extract_chapter_images）跟着条目一起要
+    LaunchedEffect(readyDetail?.mediaItemId) {
+        if (readyDetail != null) vm.loadLibrary()
+    }
+    // 菜单本体独立成一层（Popup）：11 行比 hero 高，摆在 hero 里会被正文盖住
+    if (menuOpen && readyDetail != null) {
+        ItemActionsMenuPopup(
+            entries = itemMenuEntries(
+                detail = readyDetail,
+                library = library,
+                permissions = permissions,
+                scraping = readyDetail.scraping || kicking,
+            ),
+            onPick = { id ->
+                menuOpen = false
+                picking = id
+            },
+            onDismiss = { menuOpen = false },
+        )
+    }
+    picking?.let { action ->
+        if (readyDetail != null) {
+            when (action) {
+                ItemActionId.SEARCH -> {
+                    picking = null
+                    onSearch(
+                        readyDetail.title,
+                        readyDetail.kind.takeIf { it == "movie" || it == "tv" },
+                    )
+                }
+
+                ItemActionId.ADD_TO_COLLECTION -> AddToCollectionSheet(
+                    title = readyDetail.title,
+                    onDismiss = { picking = null },
+                    loadCollections = { vm.collectionsForPicker() },
+                    addTo = { vm.addToCollection(it) },
+                    createAndAdd = { vm.createCollectionAndAdd(it) },
+                )
+
+                ItemActionId.SHARE -> ItemShareSheet(
+                    title = readyDetail.title,
+                    origin = origin,
+                    onDismiss = { picking = null },
+                    loadShare = { vm.existingShare() },
+                    createShare = { days, password -> vm.createShare(days, password) },
+                    revokeShare = { vm.revokeShare() },
+                )
+
+                ItemActionId.UPGRADE -> {
+                    // 洗版：已有订阅就去它那儿跑一轮（iOS `upgrade`）；没有就以洗版模式开订阅弹层
+                    val subKind = if (readyDetail.kind == "tv") "tv" else "movie"
+                    val tmdb = readyDetail.tmdbId ?: 0L
+                    picking = null
+                    scope.launch {
+                        val existing = vm.subscriptionsOfKind(subKind).getOrDefault(emptyList())
+                            .firstOrNull { it.media.tmdbId?.toLong() == tmdb }
+                        if (existing != null) onOpenSubscription(existing.id, true)
+                        else onSubscribe("tmdb:$subKind:$tmdb")
+                    }
+                }
+
+                ItemActionId.REIDENTIFY -> ReidentifySheet(
+                    onDismiss = { picking = null },
+                    origin = origin,
+                    loadPreview = { vm.reidentifyPreview() },
+                    assign = { fileIds, titleRef -> vm.assignFilesToTitle(fileIds, titleRef) },
+                    markExtras = { fileIds -> vm.markFilesAsExtras(fileIds) },
+                    searchTitles = { query -> vm.searchTitlesForReidentify(query) },
+                )
+
+                ItemActionId.REFRESH_METADATA -> {
+                    picking = null
+                    refreshConfirm = true
+                }
+
+                ItemActionId.REGENERATE_CHAPTERS -> {
+                    picking = null
+                    scope.launch {
+                        vm.regenerateChapters()
+                            .onSuccess {
+                                feedback.show(McNotice("已开始重新生成章节", FeedbackTone.Success))
+                                vm.load()
+                            }
+                            .onFailure { feedback.show(McNotice(friendlyMessage(it), FeedbackTone.Error)) }
+                    }
+                }
+
+                ItemActionId.ARTWORK -> ArtworkPickerSheet(
+                    onDismiss = { picking = null },
+                    origin = origin,
+                    loadCandidates = { vm.artworkCandidates() },
+                    select = { kind, filePath ->
+                        vm.selectArtwork(kind, filePath).onSuccess { vm.load() }
+                    },
+                )
+
+                ItemActionId.TRANSFER -> TransferItemSheet(
+                    title = readyDetail.title,
+                    kind = readyDetail.kind,
+                    sourceLibraryId = libraryId,
+                    // 候选口径同后端 `assert_transferable`：比的是**库**的来源
+                    sourceOrigin = library?.source,
+                    onDismiss = { picking = null },
+                    loadCandidates = { vm.librariesForTransfer() },
+                    loadPreview = { vm.transferPreview(it) },
+                    run = { vm.startTransfer(it) },
+                    pollStatus = { vm.transferStatus() },
+                    onOpenLibrary = { id ->
+                        picking = null
+                        onOpenLibrary(id)
+                    },
+                )
+
+                ItemActionId.DELETE_ITEM -> DeleteItemSheet(
+                    detail = readyDetail,
+                    onDismiss = { picking = null },
+                    run = { vm.deleteItem() },
+                    onDeleted = {
+                        picking = null
+                        // 整条删掉了：离开详情页（iOS `leaveToLibrary` 的等价物）
+                        onBack()
+                    },
+                )
+
+                ItemActionId.CLEAR_HISTORY -> {
+                    picking = null
+                    clearConfirm = true
+                }
+            }
+        }
+    }
+    if (refreshConfirm && readyDetail != null) {
+        RefreshMetadataDialog(
+            detail = readyDetail,
+            onDismiss = { refreshConfirm = false },
+            onConfirm = {
+                refreshConfirm = false
+                scope.launch {
+                    // iOS 的刷新：受理后原地重拉，1.5 秒后再拉一次（刮削结果通常这时才回来）
+                    kicking = true
+                    vm.refreshMetadata()
+                        .onSuccess {
+                            vm.load()
+                            kotlinx.coroutines.delay(1500)
+                            vm.load()
+                        }
+                        .onFailure { feedback.show(McNotice(friendlyMessage(it), FeedbackTone.Error)) }
+                    kicking = false
+                }
+            },
+        )
+    }
+    if (clearConfirm && readyDetail != null) {
+        ClearHistoryDialog(
+            title = readyDetail.title,
+            onDismiss = { clearConfirm = false },
+            onConfirm = {
+                clearConfirm = false
+                scope.launch {
+                    vm.clearHistory()
+                        .onSuccess { message ->
+                            // 结论文案用服务端给的（iOS `feedback.success(message)` 同一句）
+                            if (message.isNotBlank()) {
+                                feedback.show(McNotice(message, FeedbackTone.Success))
+                            }
+                            vm.load()
+                        }
+                        .onFailure { feedback.show(McNotice(friendlyMessage(it), FeedbackTone.Error)) }
+                }
+            },
+        )
+    }
 }
 
 /**
@@ -1077,6 +1514,10 @@ private fun Hero(
     subtitleGen: SubtitleGenUiState,
     isAdmin: Boolean,
     subtitleGenActions: SubtitleGenActions,
+    /** 顶栏右侧的动作（详情页的「⋯」更多操作）：与返回键同一行、同一份玻璃 */
+    trailingActions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
+    /** hero 上的浮层（⋯ 面板挂在这里，跟随 hero 定位，不跟着正文滚） */
+    heroOverlay: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit = {},
     /** 正文其余部分（分集 / 演职员 / 文件）：与简介同用那一块上提 124 的列 */
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -1165,16 +1606,20 @@ private fun Hero(
             )
             Row(
                 Modifier
+                    .fillMaxWidth()
                     .align(Alignment.TopStart)
                     .statusBarsPadding()
                     .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 McNavButton(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", onClick = onBack)
-                // 网页这里只有一颗「更多操作」（搜索资源 / 加入合集 / 分享 / 洗版 /
-                // 重新刮削 / 换海报 / 转移 / 删除 / 清除观看记录）。
-                // 那个菜单还没接，先不挂两颗点不动的键——假控件。
+                // 网页/iOS 这里只有一颗「更多操作」（搜索资源 / 加入合集 / 分享 / 洗版 /
+                // 修正识别 / 刷新元数据 / 重新生成章节 / 更换图片 / 转移 / 删除 / 清除观看记录），
+                // 判定与显隐照 iOS `actionsMenu`——见 ItemActionsMenu.kt
+                Spacer(Modifier.weight(1f))
+                trailingActions()
             }
+            heroOverlay()
         }
         }
 

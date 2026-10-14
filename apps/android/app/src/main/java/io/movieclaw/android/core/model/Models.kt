@@ -111,6 +111,27 @@ data class LibraryView(
     val chapterJob: kotlinx.serialization.json.JsonElement? = null,
     /** 服务端预算好的库存统计（iOS libraryStatsSummary 用的就是它） */
     val stats: LibraryStats = LibraryStats(),
+    /** 是否生成并展示视频章节（详情页「重新生成章节」只在开了它时出现） */
+    val extractChapterImages: Boolean = false,
+    /** 库能力开关（详情页 ⋯ 菜单按 `scraped` 决定要不要出刮削类动作） */
+    val capabilities: LibraryCapabilitiesView = LibraryCapabilitiesView(),
+)
+
+/**
+ * 库能力开关（服务端 `LibraryCapabilitiesView`）。
+ * 详情页只用到 [scraped]：没有外部刮削链的库（如视频库）不摆识别/刷新/换图这类动作。
+ */
+@Serializable
+data class LibraryCapabilitiesView(
+    /** 有外部刮削链（识别 / 刷新元数据 / 选图 / 待识别清单） */
+    val scraped: Boolean = false,
+    val episodic: Boolean = false,
+    val naming: Boolean = false,
+    val subscribable: Boolean = false,
+    val writeNfo: Boolean = false,
+    val defaultAspect: Float = 0.6667f,
+    val jellyfinCollection: String? = null,
+    val playable: Boolean = true,
 )
 
 @Serializable

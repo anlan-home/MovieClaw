@@ -70,3 +70,27 @@ data class CollectionSeriesView(
     /** 拉到上游档案了吗；false = 没配 TMDB / 网络不通 / 本地系列没有上游档案 */
     val available: Boolean = false,
 )
+
+/* ---------------- 写入侧（详情页 ⋯ 菜单的「加入合集…」，iOS `AddToCollectionSheet`） ---------------- */
+
+/** `POST /collections/{id}/items` 的请求体（服务端 `CollectionItemsPayload`）；幂等，已在里面不会报错 */
+@Serializable
+data class CollectionItemsPayload(
+    val mediaItemIds: List<Long> = emptyList(),
+)
+
+/**
+ * `POST /collections` 的请求体（服务端 `CollectionPayload`，字段全部可选）。
+ * 从详情页新建时只用 `{name, libraryId, itemIds}`：建完顺手把这部片放进去。
+ */
+@Serializable
+data class CollectionPayload(
+    val name: String? = null,
+    val libraryId: Long? = null,
+    val rules: kotlinx.serialization.json.JsonElement? = null,
+    val sort: String? = null,
+    val visibility: String? = null,
+    val hidden: Boolean? = null,
+    val itemIds: List<Long>? = null,
+    val snapshot: Boolean? = null,
+)

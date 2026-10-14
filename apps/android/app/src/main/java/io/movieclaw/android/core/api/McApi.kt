@@ -553,6 +553,49 @@ interface McApi {
         @Query("order") order: String? = null,
     ): McEnvelope<List<io.movieclaw.android.core.model.LibraryItemView>>
 
+    /** 把条目加进合集（详情页「加入合集…」）。幂等：已经在里面的会被忽略，不报错 */
+    @POST("collections/{collectionId}/items")
+    suspend fun collectionAddItems(
+        @Path("collectionId") collectionId: Long,
+        @Body body: io.movieclaw.android.core.model.CollectionItemsPayload,
+    ): McEnvelope<io.movieclaw.android.core.model.CollectionView>
+
+    /** 新建合集。「新建并加入」时带上 `itemIds`，一次调用就把这部片放进去 */
+    @POST("collections")
+    suspend fun createCollection(
+        @Body body: io.movieclaw.android.core.model.CollectionPayload,
+    ): McEnvelope<io.movieclaw.android.core.model.CollectionView>
+
+    /* ---------------- 分享（管理侧）：详情页「分享…」（iOS `LibraryShareSheet`） ---------------- */
+
+    /**
+     * 取该条目已有的有效分享。没有时信封 `success = true` 而 `data = null`,
+     * 所以**不能走 `dataOrThrow()`**——调用方读信封，自己把 null 当「还没分享过」。
+     */
+    @GET("libraries/{libraryId}/items/{mediaItemId}/share")
+    suspend fun libraryItemShare(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.ShareView?>
+
+    /**
+     * 生成一条分享链接。已经有一条有效分享时**不会重复生成**，原样返回已有的那条，
+     * 信封业务码为 `SHARE_EXISTS`（调用方据此把文案从「已分享」换成「已有一条」）。
+     */
+    @POST("libraries/{libraryId}/items/{mediaItemId}/share")
+    suspend fun createLibraryItemShare(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+        @Body body: io.movieclaw.android.core.model.ShareCreateRequest,
+    ): McEnvelope<io.movieclaw.android.core.model.ShareView>
+
+    /** 取消分享：链接立即失效，正在播放的访客一分钟内中断；重复取消不报错 */
+    @DELETE("libraries/{libraryId}/items/{mediaItemId}/share")
+    suspend fun revokeLibraryItemShare(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.ShareRevokedView>
+
     @GET("libraries/trashed-files")
     suspend fun trashedFiles(): McEnvelope<JsonElement>
 
@@ -605,6 +648,112 @@ interface McApi {
         @Path("mediaItemId") mediaItemId: Long,
         @Path("fileId") fileId: Long,
     ): McEnvelope<JsonElement>
+
+    /* ---------------- 详情页「⋯」菜单的动作（iOS `LibraryItemDetailView.actionsMenu` 同款） ---------------- */
+
+    /**
+     * 删除**整个条目**（不是单文件）：连同目录、NFO、海报、字幕等刮削产物一起清掉。
+     * 与 [deleteLibraryFile] 的区别只在「删什么」；结果模型相同（message 在信封上）。
+     */
+    @DELETE("libraries/{libraryId}/items/{mediaItemId}")
+    suspend fun deleteLibraryItem(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.ItemDeleteResultView>
+
+    /**
+     * 条目级刷新元数据（后台作业，202）。源是 NFO 的视频库走「重读 NFO 与封面」，
+     * 刮削库走「重新获取简介/评分/演职员 + 重下海报背景」——文案由调用方按库与来源选。
+     */
+    @POST("libraries/{libraryId}/items/{mediaItemId}/metadata/refresh")
+    suspend fun refreshItemMetadata(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.ItemJobView>
+
+    /** 条目级重新生成章节场景图（后台作业，202）；库没开「生成章节」时菜单不摆这项 */
+    @POST("libraries/{libraryId}/items/{mediaItemId}/chapter-images")
+    suspend fun regenerateItemChapters(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.ItemJobView>
+
+    /** 重新识别预览（只读，不落库）：机器给出的结论 + 按作品分好的文件组 */
+    @POST("libraries/{libraryId}/items/{mediaItemId}/reidentification-preview")
+    suspend fun reidentifyPreview(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.ReidentifyPreviewView>
+
+    /** 按预览结论重走识别链并落库（改挂会记为人工身份，扫描不再翻案） */
+    @POST("libraries/{libraryId}/items/{mediaItemId}/reidentifications")
+    suspend fun reidentify(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.ReidentifyResultView>
+
+    /**
+     * 把多个文件一次关联到同一个 Discover 影视条目（识别面板的「改挂到这里」/「自己搜」）。
+     * 路径**不带库 id**（服务端按 file_id 自己找库），与 iOS `libraryIdentificationAssignFilesToTitle` 同一条。
+     */
+    @POST("libraries/identification/file-title-assignments")
+    suspend fun assignFilesToTitle(
+        @Body body: io.movieclaw.android.core.model.ClaimBatchPayload,
+    ): McEnvelope<JsonElement>
+
+    /** 标为「非独立作品」：摘掉身份锚并忽略，不动磁盘（iOS `libraryIdentificationMarkFilesAsExtras`） */
+    @POST("libraries/identification/files/mark-as-extras")
+    suspend fun markFilesAsExtras(
+        @Body body: io.movieclaw.android.core.model.DetachPayload,
+    ): McEnvelope<JsonElement>
+
+    /** 换图的候选图（海报 / 背景 / 片名 Logo 三组，含当前是哪张） */
+    @GET("libraries/{libraryId}/items/{mediaItemId}/artwork/candidates")
+    suspend fun artworkCandidates(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.ArtworkCandidatesView>
+
+    /** 选定一张图（`filePath = null` = 解锁、恢复自动选图） */
+    @POST("libraries/{libraryId}/items/{mediaItemId}/artwork/select")
+    suspend fun selectArtwork(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+        @Body body: io.movieclaw.android.core.model.ArtworkSelectPayload,
+    ): McEnvelope<io.movieclaw.android.core.model.ArtworkLockView>
+
+    /** 转移预览（只读）：要搬哪些路径、多少字节、跨不跨盘、有没有被挡 */
+    @GET("libraries/{libraryId}/items/{mediaItemId}/transfer-preview")
+    suspend fun transferPreview(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+        @Query("target_library_id") targetLibraryId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.TransferPreviewView>
+
+    /** 提交转移（后台作业，202）。状态用 [transferStatus] 轮询（口径与批量转移共用） */
+    @POST("libraries/{libraryId}/items/{mediaItemId}/transfers")
+    suspend fun transferItem(
+        @Path("libraryId") libraryId: Long,
+        @Path("mediaItemId") mediaItemId: Long,
+        @Body body: io.movieclaw.android.core.model.TransferPayload,
+    ): McEnvelope<io.movieclaw.android.core.model.TransferStartView>
+
+    /** 转移状态（源库一份，目标库查同一份）：进行中、已搬多少、上次结果与错误 */
+    @GET("libraries/{libraryId}/item-transfer-status")
+    suspend fun transferStatus(
+        @Path("libraryId") libraryId: Long,
+    ): McEnvelope<io.movieclaw.android.core.model.TransferStatusView>
+
+    /**
+     * 清除观看记录（续播进度、已看标记、播放次数）。
+     * `scope = item` 时必带 `media_item_id`；给人看的结论在信封 `message` 上。
+     */
+    @DELETE("playback/history")
+    suspend fun clearPlaybackHistory(
+        @Query("scope") scope: String,
+        @Query("media_item_id") mediaItemId: Long? = null,
+        @Query("library_id") libraryId: Long? = null,
+    ): McEnvelope<io.movieclaw.android.core.model.HistoryClearView>
 
     /* ---------------- 条目状态：已看 / 收藏 ---------------- */
 
@@ -802,8 +951,14 @@ interface McApi {
 
     /* ---------------- 订阅(M2b) ---------------- */
 
+    /**
+     * 订阅列表。`kind`（movie / tv）可收窄：详情页「洗版…」按条目类型找有没有现成的订阅
+     * （iOS `subscriptionsList(kind:)` 同款）。
+     */
     @GET("subscriptions")
-    suspend fun subscriptions(): McEnvelope<List<SubscriptionView>>
+    suspend fun subscriptions(
+        @Query("kind") kind: String? = null,
+    ): McEnvelope<List<SubscriptionView>>
 
     @GET("subscriptions/today-arrivals")
     suspend fun todayArrivalsFull(
