@@ -163,7 +163,9 @@ class NetworkIdentityProtocolTest {
     @Test fun `explicit reverse proxy path is used for anonymous login negotiation`() = runBlocking {
         val context = RuntimeEnvironment.getApplication()
         val cleaners = SessionCacheCleaner(context, ImageLoaders(context, vault, client, ShareCookieJar()), LibraryHomeSnapshotStore(context, json))
-        val repository = SessionRepository(context, json, vault, factory, client, cleaners)
+        val repository = SessionRepository(context, json, vault, factory, client, cleaners, dagger.Lazy {
+                throw UnsupportedOperationException("测试不触发选路")
+            })
         server.enqueue(MockResponse().setBody("""{"service":"movieclaw","spec_hash":"test"}"""))
         server.enqueue(envelope("""{"initialized":true}"""))
         server.enqueue(envelope("""{"token":"new-token","session":{"username":"alice"}}"""))
@@ -185,7 +187,9 @@ class NetworkIdentityProtocolTest {
     @Test fun `server older than the minimum version is rejected before login`() = runBlocking {
         val context = RuntimeEnvironment.getApplication()
         val cleaners = SessionCacheCleaner(context, ImageLoaders(context, vault, client, ShareCookieJar()), LibraryHomeSnapshotStore(context, json))
-        val repository = SessionRepository(context, json, vault, factory, client, cleaners)
+        val repository = SessionRepository(context, json, vault, factory, client, cleaners, dagger.Lazy {
+                throw UnsupportedOperationException("测试不触发选路")
+            })
         server.enqueue(MockResponse().setBody("""{"service":"movieclaw","spec_hash":"test","version":"0.32.0"}"""))
         val error = runCatching { repository.login(server.url("/").toString(), "alice", "password") }.exceptionOrNull()
         assertEquals("SERVER_TOO_OLD", (error as ApiException).code)
@@ -203,7 +207,9 @@ class NetworkIdentityProtocolTest {
     private suspend fun staleRevalidation(response: MockResponse) {
         val context = RuntimeEnvironment.getApplication()
         val cleaners = SessionCacheCleaner(context, ImageLoaders(context, vault, client, ShareCookieJar()), LibraryHomeSnapshotStore(context, json))
-        val repository = SessionRepository(context, json, vault, factory, client, cleaners)
+        val repository = SessionRepository(context, json, vault, factory, client, cleaners, dagger.Lazy {
+                throw UnsupportedOperationException("测试不触发选路")
+            })
         vault.activate(origin(), "alice", "alice-token")
         val requested = CountDownLatch(1)
         val release = CountDownLatch(1)
@@ -262,13 +268,17 @@ class NetworkIdentityProtocolTest {
     private fun events(): EventStream {
         val context = RuntimeEnvironment.getApplication()
         val cleaners = SessionCacheCleaner(context, ImageLoaders(context, vault, client, ShareCookieJar()), LibraryHomeSnapshotStore(context, json))
-        return EventStream(client, SessionRepository(context, json, vault, factory, client, cleaners), factory)
+        return EventStream(client, SessionRepository(context, json, vault, factory, client, cleaners, dagger.Lazy {
+                throw UnsupportedOperationException("测试不触发选路")
+            }), factory)
     }
 
     @Test fun `already connected sse cannot publish old account events after switch`() = runBlocking {
         val context = RuntimeEnvironment.getApplication()
         val cleaners = SessionCacheCleaner(context, ImageLoaders(context, vault, client, ShareCookieJar()), LibraryHomeSnapshotStore(context, json))
-        val repository = SessionRepository(context, json, vault, factory, client, cleaners)
+        val repository = SessionRepository(context, json, vault, factory, client, cleaners, dagger.Lazy {
+                throw UnsupportedOperationException("测试不触发选路")
+            })
         val field = SessionRepository::class.java.getDeclaredField("_ui").apply { isAccessible = true }
         @Suppress("UNCHECKED_CAST")
         val state = field.get(repository) as kotlinx.coroutines.flow.MutableStateFlow<io.movieclaw.android.core.session.SessionUi>
@@ -333,7 +343,9 @@ class NetworkIdentityProtocolTest {
         bus.publish(link)
         val context = RuntimeEnvironment.getApplication()
         val cleaners = SessionCacheCleaner(context, ImageLoaders(context, vault, client, ShareCookieJar()), LibraryHomeSnapshotStore(context, json))
-        val repository = SessionRepository(context, json, vault, factory, client, cleaners)
+        val repository = SessionRepository(context, json, vault, factory, client, cleaners, dagger.Lazy {
+                throw UnsupportedOperationException("测试不触发选路")
+            })
         val field = SessionRepository::class.java.getDeclaredField("_ui").apply { isAccessible = true }
         @Suppress("UNCHECKED_CAST")
         val state = field.get(repository) as kotlinx.coroutines.flow.MutableStateFlow<io.movieclaw.android.core.session.SessionUi>

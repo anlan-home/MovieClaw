@@ -60,6 +60,10 @@ import io.movieclaw.android.core.session.Permissions
  * - 刮削中：`⋯` 右上角点一颗蓝点，且「刷新元数据」禁用（文案换成「正在刷新元数据…」这类进行时）。
  */
 enum class ItemActionId {
+    /** 离线下载（iOS `actionsMenu` 的「下载」）：电影选画质、剧集选范围 */
+    DOWNLOAD,
+    /** 取消这部剧 / 这部电影正在进行的下载（iOS 的「取消下载 / 取消下载选中的集 / 取消全部下载」） */
+    CANCEL_DOWNLOADS,
     SEARCH,
     ADD_TO_COLLECTION,
     SHARE,
@@ -94,6 +98,10 @@ fun itemMenuEntries(
     library: LibraryView?,
     permissions: Permissions,
     scraping: Boolean,
+    /** 离线下载：能不能下（权限 + 本机是否已有；iOS `canDownload`） */
+    canDownload: Boolean = false,
+    /** 这部剧 / 这部电影还在下的单元数（iOS `active.count`） */
+    activeDownloads: Int = 0,
 ): List<ItemMenuEntry> {
     val manage = permissions.canManageLibraries
     val scraped = detail.source == "tmdb"
@@ -106,6 +114,17 @@ fun itemMenuEntries(
     val canShare = permissions.isAdmin && detail.kind != "photo"
 
     val out = mutableListOf<ItemMenuEntry>()
+    // 离线下载（iOS：在下时先给「取消下载」；能下时与「加入合集 / 分享」同排）
+    if (activeDownloads > 0) {
+        out += ItemMenuEntry.Action(
+            ItemActionId.CANCEL_DOWNLOADS,
+            if (detail.kind == "tv") "取消全部下载（$activeDownloads 集）" else "取消下载",
+            danger = detail.kind != "tv",
+        )
+    }
+    if (canDownload) {
+        out += ItemMenuEntry.Action(ItemActionId.DOWNLOAD, "下载")
+    }
     if (permissions.canSearch) {
         out += ItemMenuEntry.Action(ItemActionId.SEARCH, "搜索资源")
     }

@@ -57,7 +57,6 @@ import io.movieclaw.android.core.designsystem.Info
 import io.movieclaw.android.core.designsystem.LineSoft
 import io.movieclaw.android.core.designsystem.LocalFeedback
 import io.movieclaw.android.core.designsystem.McFormat
-import io.movieclaw.android.core.designsystem.McMetrics
 import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.RemoteImage
 import io.movieclaw.android.core.designsystem.TextFaint
@@ -77,6 +76,7 @@ import io.movieclaw.android.core.model.TransferStatusView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Calendar
+import io.movieclaw.android.core.designsystem.mcCards
 
 /*
  * 详情页「⋯」菜单各动作的面板（iOS 同名弹层的安卓版）。
@@ -1422,7 +1422,7 @@ private fun SheetScaffold(
             Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = McMetrics.pagePadding, vertical = 4.dp),
+                .padding(horizontal = mcCards.pagePadding, vertical = 4.dp),
             content = content,
         )
     }
