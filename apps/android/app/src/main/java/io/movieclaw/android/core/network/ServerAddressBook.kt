@@ -89,8 +89,14 @@ class ServerAddressBook @Inject constructor(
         if (origin.isNullOrBlank() || selecting) return
         selecting = true
         scope.launch {
-            runCatching { select(origin) }
-            selecting = false
+            // finally 复位：任何异常/超时都不能把「正在选路」永久卡住
+            // （否则网络变化与设置页「重新选择」会被永久忽略，见 PR #1001 评审）
+            try {
+                runCatching { select(origin) }
+            } finally {
+                selecting = false
+                registerNetworkCallback()
+            }
         }
     }
 
@@ -126,31 +132,40 @@ class ServerAddressBook @Inject constructor(
         val wanCandidates = entries.filter { it.kind == "wan" }.map { it.url }
         val loginUrl = origin.trimEnd('/')
 
-        // 先不发请求就能定一个（预选）：记忆 > 同网段内网 > 登录地址（非纯蜂窝）> 第一个外网
+        // 候选排序：记忆 > 同网段内网 > 登录地址（非纯蜂窝）> 外网。
+        // **不预切**：以前先切到未验证的入口再竞速，会把 Bearer 发到尚未证明身份的地址（评审问题 1 的安全侧）；
+        // 现在只有通过 /health（instance_id + proof）的入口才真正切换。
         val inSubnet = lanCandidates.firstOrNull { inSameSubnet(it) }
-        val prePicked = rememberedValid
-            ?: inSubnet
-            ?: loginUrl.takeIf { !cellular || loginUrl.startsWith("https") }
-            ?: wanCandidates.firstOrNull()
+        fun ordered(list: List<String>): List<String> {
+            val rememberedOne = rememberedValid?.takeIf { it in list }
+            val inSubnetOne = inSubnet?.takeIf { it in list }
+            return listOfNotNull(rememberedOne, inSubnetOne) + list.filter { it != rememberedOne && it != inSubnetOne }
+        }
 
-        prePicked?.let { apply(origin, it, kindOf(entries, it), verified = false) }
-
-        // 竞速核实：内网全发（1.5s），外网晚 250ms（5s）；先过身份校验的先用
+        // 竞速核实：内网全发（1.5s），外网晚 250ms（5s）；先过身份校验的先用。
+        // 6.5 秒封顶——全部探测失败时要能结束（评审问题 2）。
         val nonce = newNonce()
         val winner = race(
-            lan = lanCandidates.ifEmpty { listOfNotNull(loginUrl.takeIf { isPrivateLiteral(it) }) },
-            wan = (wanCandidates + listOfNotNull(loginUrl.takeIf { wanCandidates.isEmpty() }))
-                .filter { it !in lanCandidates }
-                .distinct(),
+            lan = ordered(lanCandidates.ifEmpty { listOfNotNull(loginUrl.takeIf { isPrivateLiteral(it) }) }),
+            wan = ordered(
+                (wanCandidates + listOfNotNull(loginUrl.takeIf { wanCandidates.isEmpty() && !cellular }))
+                    .filter { it !in lanCandidates }
+                    .distinct(),
+            ),
             nonce = nonce,
             instanceId = book.instanceId,
             hostKey = book.hostKey,
         )
-        if (winner != null && winner.url != _selection.value?.url) {
+        if (winner != null) {
+            // 已验证：登记可信地址集合（鉴权拦截器与图片加载器据此放行），再切基址
+            ServerTrust.allow(origin, listOf(origin.trimEnd('/'), winner.url))
             apply(origin, winner.url, kindOf(entries, winner.url), verified = true)
             context.addressStore.edit { prefs -> prefs[stringPreferencesKey(key(fp))] = winner.url }
+        } else {
+            // 一个都验不过（不出门、服务器不可达、接口 404…）：回到登录地址本身，不留在未验证的入口上
+            ServerTrust.allow(origin, listOf(origin.trimEnd('/')))
+            apply(origin, origin.trimEnd('/'), "login", verified = false)
         }
-        registerNetworkCallback()
     }
 
     private fun apply(origin: String, url: String, kind: String, verified: Boolean) {
@@ -161,7 +176,7 @@ class ServerAddressBook @Inject constructor(
             apiFactory.setRoutedBase(origin, apiBase)
         }
         // 图片等按 origin 拼 URL 的地方跟着换入口
-        ServerRoutes.provider = { o -> if (o == origin) url.trimEnd('/') else null }
+        ServerRoutes.provider = { o -> if (o == null || o == origin) url.trimEnd('/') else null }
         _selection.value = Selection(origin, url, kind, fingerprint(), verified)
     }
 
@@ -169,39 +184,19 @@ class ServerAddressBook @Inject constructor(
         entries.firstOrNull { it.url == url }?.kind
             ?: if (isPrivateLiteral(url)) "lan" else "wan"
 
-    /** 竞速：返回第一个通过身份校验的地址；内网在超时前后来也算升级成功 */
+    /** 竞速：返回第一个通过身份校验的地址；全部失败/超时返回 null（不会永远挂着） */
     private suspend fun race(
         lan: List<String>,
         wan: List<String>,
         nonce: String,
         instanceId: String,
         hostKey: String,
-    ): Entry? = kotlinx.coroutines.coroutineScope {
-        val result = MutableStateFlow<Entry?>(null)
-        fun probe(url: String, timeoutMs: Long) = launch {
-            val ok = verifyHealth(url, nonce, instanceId, hostKey, timeoutMs)
-            if (ok && result.value == null) result.value = Entry(url, "", "")
-        }
-        lan.forEach { probe(it, 1_500) }
-        val wanJobs = wan.map { url ->
-            launch {
-                kotlinx.coroutines.delay(250)
-                probe(url, 5_000)
-            }
-        }
-        suspendCancellableCoroutine { cont ->
-            val job = launch {
-                while (result.value == null) {
-                    if (!cont.isActive) return@launch
-                    kotlinx.coroutines.delay(100)
-                }
-                cont.resume(result.value)
-            }
-            cont.invokeOnCancellation { job.cancel() }
-        }.also {
-            wanJobs.forEach { it.cancel() }
-        }
-    }
+    ): Entry? = raceFirst(
+        lan = lan,
+        wan = wan,
+        timeoutMs = RACE_TIMEOUT_MS,
+        probe = { url, timeoutMs -> verifyHealth(url, nonce, instanceId, hostKey, timeoutMs) },
+    )?.let { Entry(it, "", "") }
 
     /** GET /health?nonce= → 校验 spec 头、instance_id、proof（host_key 在时） */
     private fun verifyHealth(url: String, nonce: String, instanceId: String, hostKey: String, timeoutMs: Long): Boolean {
@@ -315,4 +310,41 @@ class ServerAddressBook @Inject constructor(
             })
         }
     }
+}
+
+/** 竞速总超时：内网 1.5s、外网 5s，再留 1.5s 余量；到点没赢家就回登录地址。 */
+private const val RACE_TIMEOUT_MS = 6_500L
+
+/**
+ * 「先通先用」竞速（评审问题 2 的修复）：内网候选立即探测、外网晚 [wanDelayMs] 发（Happy Eyeballs 思路），
+ * 任何一路先回 true 即返回；全部失败或到 [timeoutMs] 仍未成功就返回 null，调用方据此回落到登录地址。
+ *
+ * 独立成函数是为了可单测：不需要真实网络即可验证「全部失败会返回」「先成功者胜」。
+ */
+internal suspend fun <T> raceFirst(
+    lan: List<T>,
+    wan: List<T>,
+    timeoutMs: Long,
+    probe: suspend (candidate: T, timeoutMs: Long) -> Boolean,
+    lanTimeoutMs: Long = 1_500L,
+    wanTimeoutMs: Long = 5_000L,
+    wanDelayMs: Long = 250L,
+): T? = kotlinx.coroutines.coroutineScope {
+    val winner = java.util.concurrent.atomic.AtomicReference<T?>(null)
+
+    suspend fun run(candidate: T, timeout: Long) {
+        if (probe(candidate, timeout)) winner.compareAndSet(null, candidate)
+    }
+
+    lan.forEach { candidate -> launch { run(candidate, lanTimeoutMs) } }
+    wan.forEach { candidate ->
+        launch {
+            kotlinx.coroutines.delay(wanDelayMs)
+            run(candidate, wanTimeoutMs)
+        }
+    }
+    kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+        while (winner.get() == null) kotlinx.coroutines.delay(50)
+    }
+    winner.get()
 }

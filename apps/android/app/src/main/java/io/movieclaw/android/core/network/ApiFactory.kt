@@ -75,7 +75,7 @@ class ApiFactory @Inject constructor(
     fun corePlaybackForIdentity(origin: String, identity: TokenVault.Identity?): CorePlayback {
         val normalized = ServerAddress.normalize(origin)
             ?: throw ApiException("INVALID_ORIGIN", "无效的服务器地址:$origin")
-        val http = identityClient(playbackClient, identity?.takeIf { sameOrigin(normalized.origin.toHttpUrlOrNull()!!, it.origin) })
+        val http = identityClient(playbackClient, identity?.takeIf { ServerTrust.matches(normalized.origin.toHttpUrlOrNull()!!, it.origin) })
         return corePlayback(normalized, http)
     }
 

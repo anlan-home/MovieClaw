@@ -265,6 +265,8 @@ class SessionRepository @Inject constructor(
         _servers.value = emptyList()
         persistServers(emptyList())
         vault.deactivateActive()
+        // 账号切换/退出：路由可信地址不能跨账号沿用（否则新账号的令牌会发到上一个账号验证过的入口）
+        io.movieclaw.android.core.network.ServerTrust.clear()
         cacheCleaner.clear()
         _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN)
     }
@@ -308,6 +310,7 @@ class SessionRepository @Inject constructor(
             clearActiveFlag(origin)
         }
         vault.deactivateActive()
+        io.movieclaw.android.core.network.ServerTrust.clear()
         cacheCleaner.clear()
         _ui.value = SessionUi(phase = SessionPhase.NEEDS_LOGIN, presetUsername = preset)
     }

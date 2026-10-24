@@ -68,12 +68,13 @@ private fun userAgentInterceptor() = Interceptor { chain ->
     )
 }
 
-/** 仅对显式绑定身份且同 origin 的请求附带 Bearer；原始探测与分享保持匿名。 */
+/** 仅对显式绑定身份且属于同一服务器的请求附带 Bearer；原始探测与分享保持匿名。 */
 internal fun authInterceptor(@Suppress("UNUSED_PARAMETER") vault: TokenVault) = Interceptor { chain ->
     val request = chain.request()
     val binding = request.tag(RequestIdentity::class.java)
     val identity = binding?.identity
-    val authorized = identity != null && sameOrigin(request.url, identity.origin) && !isShareUrl(request.url)
+    // 「同一服务器」= 登录地址 + 已验证的地址簿入口（内网/外网两个主机名都算），见 ServerTrust
+    val authorized = identity != null && ServerTrust.matches(request.url, identity.origin) && !isShareUrl(request.url)
     val builder = request.newBuilder()
     if (authorized) builder.header("Authorization", "Bearer ${identity!!.token}")
     else builder.removeHeader("Authorization")

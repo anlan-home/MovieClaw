@@ -9,6 +9,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.ensureActive
+import io.movieclaw.android.core.network.ServerRoutes
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,6 +50,9 @@ class OfflineDownloader @Inject constructor(
     val tasks: StateFlow<Map<Long, TaskState>> = _tasks.asStateFlow()
 
     private val jobs = mutableMapOf<Long, Job>()
+
+    /** 当前在跑的下载请求：取消/暂停时直接 cancel()，否则阻塞在 socket 读上停不下来（评审问题 3） */
+    private val calls = java.util.concurrent.ConcurrentHashMap<Long, okhttp3.Call>()
     @Volatile private var pausedIds = setOf<Long>()
 
     /** 已经开始过（含暂停/失败）的单元：详情页的下载状态条据此出现，不用回下载页找 */
@@ -71,6 +76,7 @@ class OfflineDownloader @Inject constructor(
 
     fun pause(fileId: Long) {
         pausedIds = pausedIds + fileId
+        calls.remove(fileId)?.cancel()
         jobs.remove(fileId)?.cancel()
         _tasks.update { it + (fileId to TaskState.Paused) }
     }
@@ -84,7 +90,7 @@ class OfflineDownloader @Inject constructor(
     /** 继续 / 重试（详情页状态条用）：清单有缓存就用缓存，没缓存现取一份 */
     fun resumePack(origin: String, pack: OfflineStore.Pack) {
         pausedIds = pausedIds - pack.fileId
-        _tasks.update { it + (pack.fileId to TaskState.Queued) }
+        _tasks.update { it - pack.fileId }   // 清掉上一次的失败/暂停态，交给 start 置 Queued
         scope.launch {
             val manifest = manifests[pack.fileId] ?: runCatching {
                 apiFactory.forOrigin(origin).offlineManifest(pack.fileId).dataOrThrow()
@@ -106,6 +112,7 @@ class OfflineDownloader @Inject constructor(
 
     fun cancel(origin: String, pack: OfflineStore.Pack, exportId: String?) {
         pausedIds = pausedIds - pack.fileId
+        calls.remove(pack.fileId)?.cancel()
         jobs.remove(pack.fileId)?.cancel()
         _tasks.update { it - pack.fileId }
         exportId?.let { id ->
@@ -119,13 +126,19 @@ class OfflineDownloader @Inject constructor(
         manifests[pack.fileId] = manifest
         _known.update { it + (pack.fileId to pack) }
         _tasks.update { it + (pack.fileId to TaskState.Queued) }
-        jobs[pack.fileId] = scope.launch {
+        val job = scope.launch {
             runCatching { run(origin, pack, manifest, profile) }
                 .onFailure { e ->
-                    if (e is CancellationException) return@onFailure // 暂停：保留已落盘字节
+                    if (e is CancellationException) return@onFailure // 暂停/取消：保留已落盘字节
                     android.util.Log.w("OfflineDownload", "下载失败 fileId=${pack.fileId}: ${e.message}", e)
                     _tasks.update { it + (pack.fileId to TaskState.Failed(e.message ?: "下载失败")) }
                 }
+        }
+        jobs[pack.fileId] = job
+        // 无论成功、失败还是取消，任务结束都要把 jobs 里的记录摘掉——
+        // 否则「重试/继续」会被 start() 的 containsKey 判断直接挡回，界面永远停在排队（评审问题 3）
+        job.invokeOnCompletion {
+            synchronized(jobs) { if (jobs[pack.fileId] === job) jobs.remove(pack.fileId) }
         }
     }
 
@@ -133,13 +146,16 @@ class OfflineDownloader @Inject constructor(
         val api = apiFactory.forOrigin(origin)
         val client = apiFactory.downloadClient(origin)
 
+        // 所有下载请求都走当前选中的入口（内网/外网自动选连；登录地址出门可能不可达）
+        val base = ServerRoutes.baseFor(origin) ?: origin.trimEnd('/')
+
         // 1) pack.json + 海报先落盘（文件夹即事实来源）
         store.savePack(pack)
         manifest.posterUrl()?.let { poster ->
             runCatching {
                 val url = poster.let { raw ->
                     if (raw.startsWith("http")) raw
-                    else origin.trimEnd('/') + "/api/v1/images/proxy?url=" + java.net.URLEncoder.encode(raw, "UTF-8") + "&w=600"
+                    else base + "/api/v1/images/proxy?url=" + java.net.URLEncoder.encode(raw, "UTF-8") + "&w=600"
                 }
                 client.newCall(okhttp3.Request.Builder().url(url).build()).execute().use { resp ->
                     if (resp.isSuccessful) store.posterFile(pack.mediaItemId, pack.fileId).outputStream().use { out ->
@@ -153,14 +169,14 @@ class OfflineDownloader @Inject constructor(
         val video = when (profile) {
             null -> {
                 store.videoFile(pack.mediaItemId, pack.fileId, manifest.container)
-                downloadWithResume(client, origin, "/api/v1/offline/files/${pack.fileId}/content", pack)
+                downloadWithResume(client, base, "/api/v1/offline/files/${pack.fileId}/content", pack)
             }
             else -> {
                 val created = api.offlineExportCreate(io.movieclaw.android.core.model.OfflineExportRequest(pack.fileId, profile)).dataOrThrow()
                 val video = store.videoFile(pack.mediaItemId, pack.fileId, "mp4")
                 waitExport(client, origin, created.exportId, pack)
                 // contentUrl 已含 /api/v1 前缀（服务端原样给），不要再拼
-                downloadWithResume(client, origin, created.contentUrl, pack)
+                downloadWithResume(client, base, created.contentUrl, pack)
                 // 下载完成：通知服务端回收这份导出（只摘本设备，别的设备还要时留着）
                 runCatching { api.offlineExportRelease(created.exportId) }
                 video
@@ -193,8 +209,13 @@ class OfflineDownloader @Inject constructor(
         }
     }
 
-    /** 流式落盘 + Range 续传 + 速度/进度发布；暂停 = cancel（保留半成品），下次 Range 续 */
-    private fun downloadWithResume(client: okhttp3.OkHttpClient, origin: String, path: String, pack: OfflineStore.Pack): File {
+    /** 流式落盘 + Range 续传 + 速度/进度发布；暂停/取消会 cancel OkHttp 的 Call，阻塞读立刻结束 */
+    private suspend fun downloadWithResume(
+        client: okhttp3.OkHttpClient,
+        base: String,
+        path: String,
+        pack: OfflineStore.Pack,
+    ): File {
         val target = store.videoFile(pack.mediaItemId, pack.fileId, null).let { f ->
             if (f.name == "video.") File(f.parentFile, "video.mp4") else f
         }
@@ -205,43 +226,47 @@ class OfflineDownloader @Inject constructor(
         var lastBytes = downloaded
 
         val request = okhttp3.Request.Builder()
-            .url(origin.trimEnd('/') + path)
+            .url(base.trimEnd('/') + path)
             .apply { if (downloaded > 0) header("Range", "bytes=$downloaded-") }
             .build()
-        client.newCall(request).execute().use { resp ->
-            if (resp.code != 200 && resp.code != 206) {
-                throw IllegalStateException("下载失败(HTTP ${resp.code})")
-            }
-            val body = resp.body ?: throw IllegalStateException("下载失败：空响应")
-            val total = if (resp.code == 206) {
-                val range = resp.header("content-range") ?: ""
-                range.substringAfter('/', "").substringBefore('/').toLongOrNull()?.plus(1) ?: (downloaded + body.contentLength())
-            } else body.contentLength()
-            target.outputStream().apply { if (downloaded > 0 && resp.code == 206) {} }.let { }
-            java.io.FileOutputStream(target, resp.code == 206).use { out ->
-                if (resp.code == 200) out.channel.truncate(0) // 服务端不支持 Range：从头重下
-                val buf = ByteArray(256 * 1024)
-                body.byteStream().let { input ->
-                    while (true) {
-                        if (Thread.currentThread().isInterrupted || pausedIds.contains(pack.fileId)) {
-                            // 暂停：取消协程会到这里（CancellationException 在外层接住），字节留在盘上
-                            throw CancellationException("paused")
-                        }
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        out.write(buf, 0, n)
-                        downloaded += n
-                        val now = System.currentTimeMillis()
-                        if (now - lastTick >= 800) {
-                            val speed = ((downloaded - lastBytes) * 1000 / (now - lastTick)).coerceAtLeast(0)
-                            lastTick = now; lastBytes = downloaded
-                            _tasks.update {
-                                it + (pack.fileId to TaskState.Downloading(downloaded, total, speed))
+        val call = client.newCall(request)
+        calls[pack.fileId] = call
+        try {
+            call.execute().use { resp ->
+                if (resp.code != 200 && resp.code != 206) {
+                    throw IllegalStateException("下载失败(HTTP ${resp.code})")
+                }
+                val body = resp.body ?: throw IllegalStateException("下载失败：空响应")
+                val total = if (resp.code == 206) {
+                    // Content-Range: bytes a-b/total → total（以前多 +1，进度到不了 100%）
+                    parseContentRangeTotal(resp.header("content-range")) ?: (downloaded + body.contentLength())
+                } else body.contentLength()
+                java.io.FileOutputStream(target, resp.code == 206).use { out ->
+                    if (resp.code == 200) out.channel.truncate(0) // 服务端不支持 Range：从头重下
+                    val buf = ByteArray(256 * 1024)
+                    body.byteStream().let { input ->
+                        while (true) {
+                            // 暂停/取消：calls.cancel() 会让阻塞读抛 IOException；协程取消走 ensureActive
+                            if (pausedIds.contains(pack.fileId)) throw CancellationException("paused")
+                            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            downloaded += n
+                            val now = System.currentTimeMillis()
+                            if (now - lastTick >= 800) {
+                                val speed = ((downloaded - lastBytes) * 1000 / (now - lastTick)).coerceAtLeast(0)
+                                lastTick = now; lastBytes = downloaded
+                                _tasks.update {
+                                    it + (pack.fileId to TaskState.Downloading(downloaded, total, speed))
+                                }
                             }
                         }
                     }
                 }
             }
+        } finally {
+            calls.remove(pack.fileId)
         }
         return target
     }
@@ -254,4 +279,15 @@ private fun io.movieclaw.android.core.model.OfflineManifest.posterUrl(): String?
     return (obj["poster_url"] ?: obj["backdrop_url"])
         ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
         ?: (obj["poster_url"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+}
+
+/**
+ * `Content-Range: bytes 0-99/1000` → 1000；总长为 `*`（未知）或格式不对 → null。
+ * 以前是 substringAfter('/') 再 +1，总大小多一字节、进度永远差 1（评审问题 3 的小项）。
+ */
+internal fun parseContentRangeTotal(header: String?): Long? {
+    val raw = header?.trim().orEmpty()
+    if (!raw.startsWith("bytes ", ignoreCase = true)) return null
+    val totalPart = raw.substringAfter('/', "").trim()
+    return totalPart.toLongOrNull()
 }
