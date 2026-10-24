@@ -134,6 +134,7 @@ fun PairingScannerScreen(
 }
 
 /** 相机 + ML Kit 二维码识别；扫到 MovieClaw 配对码回调一次，别的码节流提示 */
+@androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
 @Composable
 private fun CameraScanner(onCode: (code: String, host: String?) -> Unit) {
     val context = LocalContext.current
