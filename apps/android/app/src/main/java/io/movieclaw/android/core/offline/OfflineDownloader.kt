@@ -110,6 +110,15 @@ class OfflineDownloader @Inject constructor(
         val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return
         runCatching {
             cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    syncNetworkPolicy()
+                }
+
+                override fun onLost(network: android.net.Network) {
+                    // Wi-Fi 直接断掉、没有蜂窝可切时也要把任务停进等待态，而不是让 socket 报错收场
+                    syncNetworkPolicy()
+                }
+
                 override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
                     syncNetworkPolicy()
                 }
@@ -117,36 +126,46 @@ class OfflineDownloader @Inject constructor(
         }
     }
 
-    private fun isCellularOnly(): Boolean {
-        val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return false
+    /** 当前网络能不能下载：允许蜂窝时任何网络都行；否则要有 Wi-Fi / 有线 / VPN 通路 */
+    private fun networkAllowsDownload(): Boolean {
+        if (allowCellular) return true
+        val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return true
         val network = cm.activeNetwork ?: return false
         val caps = cm.getNetworkCapabilities(network) ?: return false
-        return caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) &&
-            !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) &&
-            !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)
+        return caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) ||
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
     }
 
     private fun syncNetworkPolicy() {
-        if (!allowCellular && isCellularOnly()) parkAllForWifi() else resumeWaiting()
+        if (!networkAllowsDownload()) parkAllForWifi() else resumeWaiting()
     }
 
     private fun parkAllForWifi() {
-        if (jobs.isEmpty()) return
+        // 已经在等待的也保持「等待 Wi-Fi」，不要因为后续网络事件又变回排队
+        waiting.keys.forEach { id ->
+            if (_tasks.value[id] != TaskState.WaitingForWifi) {
+                _tasks.update { it + (id to TaskState.WaitingForWifi) }
+            }
+        }
         jobs.keys.toList().forEach { id ->
             val pending = activeArgs[id] ?: return@forEach
-            calls.remove(id)?.cancel()
-            jobs.remove(id)?.cancel()
+            // 先登记再 cancel：cancel 出来的 IOException 会走 onFailure，看到 waiting 就不再标失败
             waiting[id] = pending
             _tasks.update { it + (id to TaskState.WaitingForWifi) }
+            calls.remove(id)?.cancel()
+            jobs.remove(id)?.cancel()
         }
     }
 
     private fun resumeWaiting() {
-        if (!allowCellular && isCellularOnly()) return
+        if (!networkAllowsDownload()) return
         val pending = waiting.entries.toList()
         pending.forEach { (id, p) ->
+            // 旧 job 还在收尾时先留在等待队列；它的 invokeOnCompletion 会再触发一次
+            if (jobs.containsKey(id)) return@forEach
             waiting.remove(id)
-            if (!jobs.containsKey(id)) start(p.origin, p.pack, p.manifest, p.profile)
+            start(p.origin, p.pack, p.manifest, p.profile)
         }
     }
 
@@ -217,7 +236,7 @@ class OfflineDownloader @Inject constructor(
         if (jobs.containsKey(pack.fileId)) return
         manifests[pack.fileId] = manifest
         _known.update { it + (pack.fileId to pack) }
-        if (!allowCellular && isCellularOnly()) {
+        if (!networkAllowsDownload()) {
             waiting[pack.fileId] = PendingStart(origin, pack, manifest, profile)
             _tasks.update { it + (pack.fileId to TaskState.WaitingForWifi) }
             return
@@ -229,6 +248,15 @@ class OfflineDownloader @Inject constructor(
             runCatching { run(origin, pack, manifest, profile) }
                 .onFailure { e ->
                     if (e is CancellationException) return@onFailure // 暂停/取消：保留已落盘字节
+                    // 已被网络策略停进等待队列：cancel() 带来的 IOException 不能把它改写成失败
+                    if (waiting.containsKey(pack.fileId)) return@onFailure
+                    if (!networkAllowsDownload()) {
+                        // 下载途中 Wi-Fi 掉线、蜂窝又不可用：回等待队列，网络恢复后从已落盘字节续传
+                        waiting[pack.fileId] = PendingStart(origin, pack, manifest, profile)
+                        _tasks.update { it + (pack.fileId to TaskState.WaitingForWifi) }
+                        android.util.Log.i("OfflineDownload", "网络断开，等待 Wi-Fi 后继续 fileId=${pack.fileId}")
+                        return@onFailure
+                    }
                     android.util.Log.w("OfflineDownload", "下载失败 fileId=${pack.fileId}: ${e.message}", e)
                     _tasks.update { it + (pack.fileId to TaskState.Failed(e.message ?: "下载失败")) }
                 }
@@ -239,6 +267,8 @@ class OfflineDownloader @Inject constructor(
         job.invokeOnCompletion {
             synchronized(jobs) { if (jobs[pack.fileId] === job) jobs.remove(pack.fileId) }
             activeArgs.remove(pack.fileId)
+            // 网络在 job 收尾前就恢复了：任务还在 waiting，补一次续传
+            if (waiting.containsKey(pack.fileId) && networkAllowsDownload()) resumeWaiting()
         }
     }
 
@@ -266,20 +296,19 @@ class OfflineDownloader @Inject constructor(
         }
 
         // 2) 正片
-        val video = when (profile) {
+        when (profile) {
             null -> {
-                store.videoFile(pack.mediaItemId, pack.fileId, manifest.container)
-                downloadWithResume(client, base, "/api/v1/offline/files/${pack.fileId}/content", pack)
+                val target = store.videoFile(pack.mediaItemId, pack.fileId, manifest.container)
+                downloadWithResume(client, base, "/api/v1/offline/files/${pack.fileId}/content", pack, target)
             }
             else -> {
                 val created = api.offlineExportCreate(io.movieclaw.android.core.model.OfflineExportRequest(pack.fileId, profile)).dataOrThrow()
-                val video = store.videoFile(pack.mediaItemId, pack.fileId, "mp4")
+                val target = store.videoFile(pack.mediaItemId, pack.fileId, "mp4")
                 waitExport(client, origin, created.exportId, pack)
                 // contentUrl 已含 /api/v1 前缀（服务端原样给），不要再拼
-                downloadWithResume(client, base, created.contentUrl, pack)
+                downloadWithResume(client, base, created.contentUrl, pack, target)
                 // 下载完成：通知服务端回收这份导出（只摘本设备，别的设备还要时留着）
                 runCatching { api.offlineExportRelease(created.exportId) }
-                video
             }
         }
 
@@ -309,18 +338,23 @@ class OfflineDownloader @Inject constructor(
         }
     }
 
-    /** 流式落盘 + Range 续传 + 速度/进度发布；暂停/取消会 cancel OkHttp 的 Call，阻塞读立刻结束 */
+    /**
+     * 流式落盘 + Range 续传 + 速度/进度发布；暂停/取消会 cancel OkHttp 的 Call，阻塞读立刻结束。
+     *
+     * 下载中的字节写在 `download.part`，完整收下才改名成 `video.*`：否则 OfflineStore.scan()
+     * 见到未下完的 video 文件就当成本机副本，下载页会把「下载中」误算成「已下载」，
+     * 断 Wi-Fi 续传时也找不到真正的进度。
+     */
     private suspend fun downloadWithResume(
         client: okhttp3.OkHttpClient,
         base: String,
         path: String,
         pack: OfflineStore.Pack,
+        target: File,
     ): File {
-        val target = store.videoFile(pack.mediaItemId, pack.fileId, null).let { f ->
-            if (f.name == "video.") File(f.parentFile, "video.mp4") else f
-        }
         target.parentFile?.mkdirs()
-        var downloaded = if (target.isFile) target.length() else 0L
+        val part = File(target.parentFile, "download.part")
+        var downloaded = if (part.isFile) part.length() else 0L
         val startedAt = System.currentTimeMillis()
         var lastTick = startedAt
         var lastBytes = downloaded
@@ -341,8 +375,12 @@ class OfflineDownloader @Inject constructor(
                     // Content-Range: bytes a-b/total → total（以前多 +1，进度到不了 100%）
                     parseContentRangeTotal(resp.header("content-range")) ?: (downloaded + body.contentLength())
                 } else body.contentLength()
-                java.io.FileOutputStream(target, resp.code == 206).use { out ->
-                    if (resp.code == 200) out.channel.truncate(0) // 服务端不支持 Range：从头重下
+                java.io.FileOutputStream(part, resp.code == 206).use { out ->
+                    if (resp.code == 200) {
+                        out.channel.truncate(0) // 服务端不支持 Range：从头重下
+                        downloaded = 0L
+                        lastBytes = 0L
+                    }
                     val buf = ByteArray(256 * 1024)
                     body.byteStream().let { input ->
                         while (true) {
@@ -368,6 +406,8 @@ class OfflineDownloader @Inject constructor(
         } finally {
             calls.remove(pack.fileId)
         }
+        if (target.exists()) target.delete()
+        if (!part.renameTo(target)) throw IllegalStateException("下载完成但保存失败")
         return target
     }
 }
