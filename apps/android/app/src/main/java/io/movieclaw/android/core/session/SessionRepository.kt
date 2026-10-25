@@ -226,6 +226,8 @@ class SessionRepository @Inject constructor(
             setActive = true,
         )
         _ui.value = SessionUi(phase = SessionPhase.READY, origin = origin, session = view.session, cached = false)
+        // 首次登录也立刻拿一次地址簿（§1）：之后在家/出门由网络回调与久别回前台事件驱动
+        addressBook.get().selectAndApply(origin)
         view.session
     }
 

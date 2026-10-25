@@ -87,7 +87,9 @@ class ApiFactory @Inject constructor(
     }
 
     private fun corePlayback(normalized: ServerAddress.Normalized, http: OkHttpClient): CorePlayback {
-        val base = (apiBaseOverrides[normalized.origin] ?: normalized.apiBase).toHttpUrlOrNull()
+        // 播放会话/进度跟着当前选中的入口（§4.7）：起播时按当前地址拼，不写死登录地址
+        val base = (routedBases[normalized.origin]?.toString()
+            ?: apiBaseOverrides[normalized.origin] ?: normalized.apiBase).toHttpUrlOrNull()
             ?: throw ApiException("INVALID_ORIGIN", "无效的服务器地址:${normalized.origin}")
         return CorePlayback(io.movieclaw.core.network.generated.McApi(io.movieclaw.core.network.OkHttpTransport(base, http)), http)
     }

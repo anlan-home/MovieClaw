@@ -15,6 +15,7 @@ import kotlinx.serialization.json.JsonNamingStrategy
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.ConnectionPool
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * 客户端版本信息：从构建产物读（`version.properties` → Gradle versionName/versionCode），
@@ -89,8 +90,75 @@ private fun baseClient(vault: TokenVault): OkHttpClient.Builder =
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .addInterceptor(userAgentInterceptor())
+        .addInterceptor(routeHeaderInterceptor())
+        .addInterceptor(failoverInterceptor())
         .addInterceptor(loggingInterceptor())
         .addInterceptor(authInterceptor(vault))
+
+/** 每条服务端请求声明自己走的路线（docs/design/server-addresses.md §5.2）。 */
+private fun routeHeaderInterceptor(): Interceptor = Interceptor { chain ->
+    val route = ServerRoutes.route
+    chain.proceed(chain.request().newBuilder().header("X-MovieClaw-Route", route.header).build())
+}
+
+/** 换地址重试用过的标记，避免连环重试 */
+private const val FAILOVER_TRY = "X-MovieClaw-Retried"
+
+/**
+ * 请求级故障转移（§4.6）：当前入口出硬错误（拒绝连接 / 主机不可达 / TLS）时，
+ * 幂等请求（GET / HEAD）换到另一个**已验证**的入口重试一次；软错误（超时、DNS）不换。
+ * 无论能不能重试，都顺手触发一次重新选路（地址簿里有防抖）。
+ */
+private fun failoverInterceptor(): Interceptor = Interceptor { chain ->
+    val request = chain.request()
+    try {
+        chain.proceed(request)
+    } catch (e: java.io.IOException) {
+        val hard = isHardNetworkFailure(e)
+        if (hard) ServerRoutes.onHardError?.invoke()
+        val current = ServerRoutes.baseFor(null)?.toHttpUrlOrNull()
+        val onCurrentEntry = current != null && current.scheme == request.url.scheme &&
+            current.host == request.url.host && current.port == request.url.port
+        if (!hard || !onCurrentEntry || (request.method != "GET" && request.method != "HEAD") ||
+            request.header(FAILOVER_TRY) != null
+        ) {
+            throw e
+        }
+        val alternate = ServerRoutes.alternates.asSequence()
+            .mapNotNull { it.toHttpUrlOrNull() }
+            .firstOrNull {
+                it.scheme != request.url.scheme || it.host != request.url.host || it.port != request.url.port
+            } ?: throw e
+        val retried = request.newBuilder()
+            .url(
+                request.url.newBuilder()
+                    .scheme(alternate.scheme)
+                    .host(alternate.host)
+                    .port(alternate.port)
+                    .build(),
+            )
+            .header(FAILOVER_TRY, "1")
+            .build()
+        android.util.Log.w("McRoutes", "硬错误 ${request.method} ${request.url.host} → ${alternate.host}，重试一次")
+        chain.proceed(retried)
+    }
+}
+
+/** 硬错误 = 换地址可能有用；超时 / DNS 失败算软错误，只累计不切换 */
+internal fun isHardNetworkFailure(error: java.io.IOException): Boolean {
+    var cause: Throwable? = error
+    while (cause != null) {
+        when (cause) {
+            is java.net.SocketTimeoutException, is java.net.UnknownHostException -> return false
+            is java.net.ConnectException,
+            is java.net.NoRouteToHostException,
+            is javax.net.ssl.SSLException,
+            -> return true
+        }
+        cause = cause.cause
+    }
+    return false
+}
 
 /** 非 2xx 仅记录状态、方法和路径；查询参数、用户信息和响应体可能含凭据。 */
 private fun loggingInterceptor(): Interceptor = Interceptor { chain ->
