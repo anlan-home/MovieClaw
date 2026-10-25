@@ -116,32 +116,52 @@ private fun failoverInterceptor(): Interceptor = Interceptor { chain ->
     } catch (e: java.io.IOException) {
         val hard = isHardNetworkFailure(e)
         if (hard) ServerRoutes.onHardError?.invoke()
-        val current = ServerRoutes.baseFor(null)?.toHttpUrlOrNull()
-        val onCurrentEntry = current != null && current.scheme == request.url.scheme &&
-            current.host == request.url.host && current.port == request.url.port
-        if (!hard || !onCurrentEntry || (request.method != "GET" && request.method != "HEAD") ||
+        if (!hard || (request.method != "GET" && request.method != "HEAD") ||
             request.header(FAILOVER_TRY) != null
         ) {
             throw e
         }
+        val current = ServerRoutes.baseFor(null)?.toHttpUrlOrNull() ?: throw e
+        val onCurrentEntry = current.scheme == request.url.scheme &&
+            current.host == request.url.host && current.port == request.url.port
+        if (!onCurrentEntry) throw e
         val alternate = ServerRoutes.alternates.asSequence()
             .mapNotNull { it.toHttpUrlOrNull() }
             .firstOrNull {
-                it.scheme != request.url.scheme || it.host != request.url.host || it.port != request.url.port
+                it.scheme != request.url.scheme || it.host != request.url.host || it.port != request.url.port ||
+                    it.encodedPath.trimEnd('/') != current.encodedPath.trimEnd('/')
             } ?: throw e
         val retried = request.newBuilder()
-            .url(
-                request.url.newBuilder()
-                    .scheme(alternate.scheme)
-                    .host(alternate.host)
-                    .port(alternate.port)
-                    .build(),
-            )
+            .url(failoverUrl(request.url, current, alternate))
             .header(FAILOVER_TRY, "1")
             .build()
         android.util.Log.w("McRoutes", "硬错误 ${request.method} ${request.url.host} → ${alternate.host}，重试一次")
         chain.proceed(retried)
     }
+}
+
+/**
+ * 换入口时把「当前入口路径前缀」换成「备选入口路径前缀」，查询串原样保留。
+ *
+ * 除了 scheme/host/port，子路径反代（`https://example.com/movieclaw`）也要一起换：
+ * 只改 host 会把 `/movieclaw/api/v1/...` 原样带到内网地址，或从内网切回域名时丢掉
+ * `/movieclaw` 前缀，两种都会 404。
+ */
+internal fun failoverUrl(request: okhttp3.HttpUrl, currentOrigin: okhttp3.HttpUrl, alternate: okhttp3.HttpUrl): okhttp3.HttpUrl {
+    val currentPrefix = currentOrigin.encodedPath.trimEnd('/')
+    val suffix = when {
+        currentPrefix.isEmpty() -> request.encodedPath
+        request.encodedPath == currentPrefix -> "/"
+        request.encodedPath.startsWith("$currentPrefix/") -> request.encodedPath.removePrefix(currentPrefix)
+        else -> request.encodedPath
+    }
+    val alternatePrefix = alternate.encodedPath.trimEnd('/')
+    return request.newBuilder()
+        .scheme(alternate.scheme)
+        .host(alternate.host)
+        .port(alternate.port)
+        .encodedPath((alternatePrefix + suffix).ifEmpty { "/" })
+        .build()
 }
 
 /** 硬错误 = 换地址可能有用；超时 / DNS 失败算软错误，只累计不切换 */
