@@ -35,12 +35,15 @@ class OfflineDownloader @Inject constructor(
     @ApplicationContext private val context: Context,
     private val apiFactory: ApiFactory,
     private val store: OfflineStore,
+    private val prefs: OfflinePrefs,
 ) {
     sealed interface TaskState {
         data object Queued : TaskState
         data class Downloading(val downloadedBytes: Long, val totalBytes: Long, val speedBps: Long) : TaskState
         data object Paused : TaskState
         data class Failed(val message: String) : TaskState
+        /** 只在 Wi-Fi 下下载（iOS 默认）：当前是蜂窝且没允许蜂窝，等网络 */
+        data object WaitingForWifi : TaskState
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -49,7 +52,7 @@ class OfflineDownloader @Inject constructor(
     private val _tasks = MutableStateFlow<Map<Long, TaskState>>(emptyMap())
     val tasks: StateFlow<Map<Long, TaskState>> = _tasks.asStateFlow()
 
-    private val jobs = mutableMapOf<Long, Job>()
+    private val jobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
 
     /** 当前在跑的下载请求：取消/暂停时直接 cancel()，否则阻塞在 socket 读上停不下来（评审问题 3） */
     private val calls = java.util.concurrent.ConcurrentHashMap<Long, okhttp3.Call>()
@@ -61,6 +64,91 @@ class OfflineDownloader @Inject constructor(
 
     /** 清单缓存：暂停后「继续」「重试」不必重新问服务端 */
     private val manifests = java.util.concurrent.ConcurrentHashMap<Long, io.movieclaw.android.core.model.OfflineManifest>()
+
+    private data class PendingStart(
+        val origin: String,
+        val pack: OfflineStore.Pack,
+        val manifest: io.movieclaw.android.core.model.OfflineManifest,
+        val profile: String?,
+    )
+
+    /** 因为「只在 Wi-Fi 下下载」而停下的任务：等网络条件满足后从已落盘字节续传 */
+    private val waiting = java.util.concurrent.ConcurrentHashMap<Long, PendingStart>()
+    private val activeArgs = java.util.concurrent.ConcurrentHashMap<Long, PendingStart>()
+    @Volatile private var allowCellular = false
+
+    init {
+        scope.launch {
+            prefs.allowCellular.collect { allowed ->
+                val changed = allowed != allowCellular
+                allowCellular = allowed
+                if (changed) syncNetworkPolicy()
+            }
+        }
+        scope.launch { syncNetworkPolicy() }
+        registerNetworkCallback()
+        // 切账号：旧账号的任务不能在别人的目录里继续写
+        scope.launch {
+            var lastOwner = store.ownerKey.value
+            store.ownerKey.collect { key ->
+                if (lastOwner != null && key != lastOwner) {
+                    jobs.values.toList().forEach { runCatching { it.cancel() } }
+                    synchronized(jobs) { jobs.clear() }
+                    calls.values.forEach { runCatching { it.cancel() } }
+                    calls.clear()
+                    waiting.clear()
+                    activeArgs.clear()
+                    _tasks.value = emptyMap()
+                    _known.value = emptyMap()
+                }
+                lastOwner = key
+            }
+        }
+    }
+
+    private fun registerNetworkCallback() {
+        val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return
+        runCatching {
+            cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
+                    syncNetworkPolicy()
+                }
+            })
+        }
+    }
+
+    private fun isCellularOnly(): Boolean {
+        val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return false
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) &&
+            !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) &&
+            !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)
+    }
+
+    private fun syncNetworkPolicy() {
+        if (!allowCellular && isCellularOnly()) parkAllForWifi() else resumeWaiting()
+    }
+
+    private fun parkAllForWifi() {
+        if (jobs.isEmpty()) return
+        jobs.keys.toList().forEach { id ->
+            val pending = activeArgs[id] ?: return@forEach
+            calls.remove(id)?.cancel()
+            jobs.remove(id)?.cancel()
+            waiting[id] = pending
+            _tasks.update { it + (id to TaskState.WaitingForWifi) }
+        }
+    }
+
+    private fun resumeWaiting() {
+        if (!allowCellular && isCellularOnly()) return
+        val pending = waiting.entries.toList()
+        pending.forEach { (id, p) ->
+            waiting.remove(id)
+            if (!jobs.containsKey(id)) start(p.origin, p.pack, p.manifest, p.profile)
+        }
+    }
 
     fun isBusy(fileId: Long): Boolean = jobs.containsKey(fileId)
 
@@ -76,6 +164,8 @@ class OfflineDownloader @Inject constructor(
 
     fun pause(fileId: Long) {
         pausedIds = pausedIds + fileId
+        waiting.remove(fileId)
+        activeArgs.remove(fileId)
         calls.remove(fileId)?.cancel()
         jobs.remove(fileId)?.cancel()
         _tasks.update { it + (fileId to TaskState.Paused) }
@@ -112,6 +202,8 @@ class OfflineDownloader @Inject constructor(
 
     fun cancel(origin: String, pack: OfflineStore.Pack, exportId: String?) {
         pausedIds = pausedIds - pack.fileId
+        waiting.remove(pack.fileId)
+        activeArgs.remove(pack.fileId)
         calls.remove(pack.fileId)?.cancel()
         jobs.remove(pack.fileId)?.cancel()
         _tasks.update { it - pack.fileId }
@@ -125,6 +217,13 @@ class OfflineDownloader @Inject constructor(
         if (jobs.containsKey(pack.fileId)) return
         manifests[pack.fileId] = manifest
         _known.update { it + (pack.fileId to pack) }
+        if (!allowCellular && isCellularOnly()) {
+            waiting[pack.fileId] = PendingStart(origin, pack, manifest, profile)
+            _tasks.update { it + (pack.fileId to TaskState.WaitingForWifi) }
+            return
+        }
+        waiting.remove(pack.fileId)
+        activeArgs[pack.fileId] = PendingStart(origin, pack, manifest, profile)
         _tasks.update { it + (pack.fileId to TaskState.Queued) }
         val job = scope.launch {
             runCatching { run(origin, pack, manifest, profile) }
@@ -139,6 +238,7 @@ class OfflineDownloader @Inject constructor(
         // 否则「重试/继续」会被 start() 的 containsKey 判断直接挡回，界面永远停在排队（评审问题 3）
         job.invokeOnCompletion {
             synchronized(jobs) { if (jobs[pack.fileId] === job) jobs.remove(pack.fileId) }
+            activeArgs.remove(pack.fileId)
         }
     }
 

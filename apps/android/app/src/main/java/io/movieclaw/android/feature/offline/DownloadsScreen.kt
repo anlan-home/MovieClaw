@@ -21,6 +21,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.AlertDialog
@@ -48,6 +51,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import io.movieclaw.android.core.designsystem.Accent
 import io.movieclaw.android.core.designsystem.Bg
 import io.movieclaw.android.core.designsystem.Danger
 import io.movieclaw.android.core.designsystem.GlassCard
@@ -88,12 +92,15 @@ class DownloadsViewModel @Inject constructor(
     private val downloader: OfflineDownloader,
     private val repository: SessionRepository,
     private val apiFactory: io.movieclaw.android.core.network.ApiFactory,
+    private val prefs: io.movieclaw.android.core.offline.OfflinePrefs,
 ) : ViewModel() {
     data class Ui(
         val packs: List<OfflineStore.Pack> = emptyList(),
         val known: Map<Long, OfflineStore.Pack> = emptyMap(),
         val tasks: Map<Long, OfflineDownloader.TaskState> = emptyMap(),
         val totalBytes: Long = 0,
+        val otherOwners: List<OfflineStore.OtherOwner> = emptyList(),
+        val allowCellular: Boolean = false,
     )
 
     private val _ui = MutableStateFlow(Ui())
@@ -108,8 +115,14 @@ class DownloadsViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            combine(store.packs, downloader.known, downloader.tasks) { packs, known, tasks ->
-                Ui(packs, known, tasks, packs.sumOf { it.sizeBytes })
+            combine(
+                store.packs,
+                downloader.known,
+                downloader.tasks,
+                store.otherOwners,
+                prefs.allowCellular,
+            ) { packs, known, tasks, others, allowCellular ->
+                Ui(packs, known, tasks, packs.sumOf { it.sizeBytes }, others, allowCellular)
             }.collect { _ui.value = it }
         }
         viewModelScope.launch {
@@ -119,6 +132,15 @@ class DownloadsViewModel @Inject constructor(
 
     fun readCapacity() {
         _capacity.value = store.freeBytes() to store.totalCapacityBytes()
+    }
+
+    fun setAllowCellular(on: Boolean) {
+        viewModelScope.launch { prefs.setAllowCellular(on) }
+    }
+
+    fun deleteOtherOwner(owner: OfflineStore.OtherOwner) {
+        store.deleteOwner(owner.owner)
+        readCapacity()
     }
 
     fun pause(fileId: Long) = downloader.pause(fileId)
@@ -175,6 +197,7 @@ fun DownloadsScreen(
     val capacity by vm.capacity.collectAsStateWithLifecycle()
     var menuFor by remember { mutableStateOf<OfflineStore.Pack?>(null) }
     var confirmDelete by remember { mutableStateOf<DeleteTarget?>(null) }
+    var settingsOpen by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { vm.syncViewings(); vm.readCapacity() }
 
     // 下载中：本机还没有副本、但在下（排队/下载中/暂停/失败）的单元
@@ -201,7 +224,35 @@ fun DownloadsScreen(
     val watched = ui.packs.filter { it.played }
 
     Column(Modifier.fillMaxSize().background(Bg)) {
-        McTopBar(variant = McTopBarVariant.Sub, title = "下载", onBack = onBack)
+        McTopBar(
+            variant = McTopBarVariant.Sub,
+            title = "下载",
+            onBack = onBack,
+            actions = {
+                Box {
+                    androidx.compose.material3.IconButton(onClick = { settingsOpen = true }) {
+                        Icon(Icons.Rounded.Settings, contentDescription = "下载设置", tint = TextPrimary, modifier = Modifier.size(20.dp))
+                    }
+                    DropdownMenu(expanded = settingsOpen, onDismissRequest = { settingsOpen = false }) {
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text("使用蜂窝网络下载", style = McType.sub, color = TextPrimary)
+                                    Text("关闭时只在 Wi-Fi 下下载", style = McType.caption2, color = TextMuted)
+                                }
+                            },
+                            trailingIcon = {
+                                if (ui.allowCellular) Icon(Icons.Rounded.Check, contentDescription = null, tint = Accent)
+                            },
+                            onClick = {
+                                vm.setAllowCellular(!ui.allowCellular)
+                                settingsOpen = false
+                            },
+                        )
+                    }
+                }
+            },
+        )
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             if (activePacks.isNotEmpty()) {
                 item {
@@ -279,6 +330,23 @@ fun DownloadsScreen(
                 Spacer(Modifier.height(8.dp))
             }
 
+            if (ui.otherOwners.isNotEmpty()) {
+                item {
+                    Spacer(Modifier.height(14.dp))
+                    SectionTitle("其他账号")
+                }
+                items(ui.otherOwners, key = { "owner-${it.owner.key}" }) { other ->
+                    OtherOwnerRow(other = other, onDelete = { confirmDelete = DeleteTarget.OtherOwner(other) })
+                }
+                item {
+                    Text(
+                        "这台 ${vm.deviceName} 上其他账号的下载，重新登录那个账号就能看。",
+                        style = McType.caption2, color = TextFaint,
+                        modifier = Modifier.padding(top = 4.dp, bottom = 4.dp),
+                    )
+                }
+            }
+
             item {
                 Spacer(Modifier.height(16.dp))
                 StorageCard(used = ui.totalBytes, free = capacity?.first, total = capacity?.second)
@@ -295,7 +363,8 @@ fun DownloadsScreen(
                     is OfflineDownloader.TaskState.Paused,
                     is OfflineDownloader.TaskState.Failed ->
                         DropdownMenuItem(text = { Text("继续下载") }, onClick = { menuFor = null; vm.resume(pack) })
-                    OfflineDownloader.TaskState.Queued -> Unit
+                    OfflineDownloader.TaskState.Queued,
+                    OfflineDownloader.TaskState.WaitingForWifi -> Unit
                     else -> DropdownMenuItem(text = { Text("暂停") }, onClick = { menuFor = null; vm.pause(pack.fileId) })
                 }
                 DropdownMenuItem(
@@ -331,6 +400,14 @@ fun DownloadsScreen(
             onDismiss = { confirmDelete = null },
             onConfirm = { vm.cancel(target.pack) },
         )
+        is DeleteTarget.OtherOwner -> ConfirmDeleteDialog(
+            title = "删除「${target.owner.owner.username}」在这台设备上的下载？",
+            bytes = target.owner.bytes,
+            actionLabel = "删除（释放 ${McFormat.bytes(target.owner.bytes)}）",
+            deviceName = vm.deviceName,
+            onDismiss = { confirmDelete = null },
+            onConfirm = { vm.deleteOtherOwner(target.owner) },
+        )
         null -> Unit
     }
 }
@@ -339,6 +416,27 @@ private sealed interface DeleteTarget {
     data class Item(val item: ItemSummary) : DeleteTarget
     data class Watched(val packs: List<OfflineStore.Pack>) : DeleteTarget
     data class Pack(val pack: OfflineStore.Pack) : DeleteTarget
+    data class OtherOwner(val owner: OfflineStore.OtherOwner) : DeleteTarget
+}
+
+@Composable
+private fun OtherOwnerRow(other: OfflineStore.OtherOwner, onDelete: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(other.owner.username, style = McType.sub, color = TextPrimary)
+            Text(
+                "${other.owner.host} · ${other.items} 部",
+                style = McType.caption2, color = TextMuted,
+            )
+        }
+        Text(McFormat.bytes(other.bytes), style = McType.caption2, color = TextMuted)
+        androidx.compose.material3.IconButton(onClick = onDelete) {
+            Icon(Icons.Rounded.Delete, contentDescription = "删除其他账号的下载", tint = Danger, modifier = Modifier.size(18.dp))
+        }
+    }
 }
 
 @Composable
@@ -359,7 +457,7 @@ private fun DownloadingRow(
 ) {
     val tint = when (task) {
         is OfflineDownloader.TaskState.Failed -> Danger
-        OfflineDownloader.TaskState.Paused -> Warning
+        OfflineDownloader.TaskState.Paused, OfflineDownloader.TaskState.WaitingForWifi -> Warning
         else -> Info
     }
     val fraction = (task as? OfflineDownloader.TaskState.Downloading)?.let {
@@ -391,6 +489,7 @@ private fun DownloadingRow(
                     when (task) {
                         is OfflineDownloader.TaskState.Failed -> "下载失败"
                         OfflineDownloader.TaskState.Paused -> "已暂停"
+                        OfflineDownloader.TaskState.WaitingForWifi -> "等待 Wi-Fi"
                         OfflineDownloader.TaskState.Queued -> if (pack.profile == "original") "准备下载" else "等待转码"
                         is OfflineDownloader.TaskState.Downloading -> "下载中 ${((fraction ?: 0f) * 100).toInt()}%"
                         null -> "准备下载"

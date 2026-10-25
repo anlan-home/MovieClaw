@@ -1,6 +1,8 @@
 package io.movieclaw.android.feature.detail
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.movieclaw.android.core.model.LibraryItemDetailView
 import io.movieclaw.android.core.model.LibraryItemDetailView as DetailView
 import io.movieclaw.android.core.model.EpisodeView
@@ -75,11 +77,13 @@ fun AndroidDownloadScopeHost(
 
     if (choices == null || choices.scopes.isEmpty()) return
 
+    val defaultProfile by vm.lastDownloadProfile.collectAsStateWithLifecycle()
     DownloadScopeSheet(
         title = detail.title,
         scopes = choices.scopes,
         note = choices.note,
         deviceName = vm.deviceName,
+        defaultProfile = defaultProfile,
         freeBytes = vm.freeBytes(),
         loadProfiles = { ids -> vm.offlineProfiles(ids) },
         onDismiss = onDismiss,

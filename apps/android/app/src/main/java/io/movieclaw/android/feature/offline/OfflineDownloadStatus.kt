@@ -59,9 +59,10 @@ fun OfflineDownloadStatusBar(
 ) {
     val paused = task is OfflineDownloader.TaskState.Paused
     val failed = task is OfflineDownloader.TaskState.Failed
+    val waitingWifi = task is OfflineDownloader.TaskState.WaitingForWifi
     val tint = when {
         failed -> Danger
-        paused -> Warning
+        paused || waitingWifi -> Warning
         else -> Info
     }
     val fraction = (task as? OfflineDownloader.TaskState.Downloading)?.let {
@@ -73,6 +74,7 @@ fun OfflineDownloadStatusBar(
             "下载中 ${(fraction?.times(100) ?: 0f).toInt()}%"
         OfflineDownloader.TaskState.Queued -> if (pack.profile == "original") "准备下载" else "等待转码"
         OfflineDownloader.TaskState.Paused -> "已暂停"
+        OfflineDownloader.TaskState.WaitingForWifi -> "等待 Wi-Fi"
         is OfflineDownloader.TaskState.Failed -> "${task.message}，点按重试"
         null -> "准备下载"
     }
@@ -159,6 +161,8 @@ fun OfflineDownloadActionsMenu(
                 DropdownMenuItem(text = { Text("继续下载") }, onClick = { onDismiss(); onResume() })
             is OfflineDownloader.TaskState.Failed ->
                 DropdownMenuItem(text = { Text("重试") }, onClick = { onDismiss(); onResume() })
+            OfflineDownloader.TaskState.WaitingForWifi ->
+                DropdownMenuItem(text = { Text("等待 Wi-Fi（连接后自动继续）") }, onClick = { onDismiss() })
             null -> Unit
         }
         if (canChangeQuality) {
@@ -247,7 +251,7 @@ fun OfflineEpisodeStrip(
 ) {
     val tint = when (task) {
         is OfflineDownloader.TaskState.Failed -> Danger
-        OfflineDownloader.TaskState.Paused -> Warning
+        OfflineDownloader.TaskState.Paused, OfflineDownloader.TaskState.WaitingForWifi -> Warning
         else -> Info
     }
     val fraction = (task as? OfflineDownloader.TaskState.Downloading)?.let {
@@ -266,6 +270,7 @@ fun OfflineEpisodeStrip(
             when (task) {
                 is OfflineDownloader.TaskState.Failed -> "失败"
                 OfflineDownloader.TaskState.Paused -> "已暂停"
+                OfflineDownloader.TaskState.WaitingForWifi -> "等 Wi-Fi"
                 is OfflineDownloader.TaskState.Downloading -> "${((fraction ?: 0f) * 100).toInt()}%"
                 else -> "准备中"
             },

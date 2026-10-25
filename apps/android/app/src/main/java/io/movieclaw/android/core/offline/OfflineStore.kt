@@ -31,6 +31,7 @@ import java.io.File
 @Singleton
 class OfflineStore @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val repository: io.movieclaw.android.core.session.SessionRepository,
 ) {
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = false }
 
@@ -66,16 +67,148 @@ class OfflineStore @Inject constructor(
         val phase: String? = null,
     )
 
-    private val root: File
+    /** 这台设备上的一个下载归属（origin + 账号）：iOS `OfflineOwner` 的对应物 */
+    data class Owner(val key: String, val origin: String, val username: String) {
+        val host: String get() = runCatching { java.net.URI(origin).host }.getOrNull() ?: origin
+    }
+
+    /** 其他账号在这台设备上的下载（只读汇总；点进去/删除见下载页） */
+    data class OtherOwner(val owner: Owner, val items: Int, val bytes: Long)
+
+    @Serializable
+    private data class OwnerMeta(val origin: String = "", val username: String = "")
+
+    private val baseRoot: File
         get() = File(context.filesDir, "offline").apply { mkdirs() }
+
+    @Volatile private var activeOwner: Owner? = null
+
+    private fun ownerDir(owner: Owner) = File(baseRoot, "owner_${owner.key}")
+
+    /** 当前账号的目录；没登录时用一个空目录，绝不去动别人的副本 */
+    private val root: File
+        get() {
+            val owner = activeOwner ?: ensureOwner()
+            return owner?.let(::ownerDir) ?: File(baseRoot, "_none").apply { mkdirs() }
+        }
+
+    /**
+     * 会话刚 READY、collect 还没跑到时下载就可能开始：这里同步从 SessionRepository 取一次归属，
+     * 保证第一份副本不会写进 `_none`。
+     */
+    @Synchronized
+    private fun ensureOwner(): Owner? {
+        val ui = repository.ui.value
+        val origin = ui.origin?.trimEnd('/') ?: return null
+        val username = ui.session?.username ?: return null
+        val owner = Owner(ownerKey(origin, username), origin, username)
+        activeOwner = owner
+        _ownerKey.value = owner.key
+        ownerDir(owner).mkdirs()
+        writeOwnerMeta(owner)
+        migrateLegacy(owner)
+        refreshOtherOwners()
+        return owner
+    }
 
     private val _packs = MutableStateFlow<List<Pack>>(emptyList())
     val packs: StateFlow<List<Pack>> = _packs.asStateFlow()
 
+    private val _ownerKey = MutableStateFlow<String?>(null)
+
+    /** 当前下载归属的键；下载器据此在切账号时停掉旧账号的任务 */
+    val ownerKey: StateFlow<String?> = _ownerKey.asStateFlow()
+
+    private val _otherOwners = MutableStateFlow<List<OtherOwner>>(emptyList())
+    val otherOwners: StateFlow<List<OtherOwner>> = _otherOwners.asStateFlow()
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     init {
-        scope.launch { scan() }
+        scope.launch {
+            repository.ui.collect { ui ->
+                val owner = ui.origin?.trimEnd('/')?.let { origin ->
+                    ui.session?.username?.let { username ->
+                        Owner(ownerKey(origin, username), origin, username)
+                    }
+                }
+                if (owner?.key != activeOwner?.key) {
+                    activeOwner = owner
+                    _ownerKey.value = owner?.key
+                    if (owner != null) {
+                        ownerDir(owner).mkdirs()
+                        writeOwnerMeta(owner)
+                        migrateLegacy(owner)
+                        scan()
+                    } else {
+                        _packs.value = emptyList()
+                    }
+                    refreshOtherOwners()
+                }
+            }
+        }
+    }
+
+    private fun ownerKey(origin: String, username: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest((origin.trimEnd('/') + "\n" + username).toByteArray())
+        return digest.joinToString("") { "%02x".format(it) }.take(16)
+    }
+
+    private fun writeOwnerMeta(owner: Owner) {
+        runCatching {
+            File(ownerDir(owner), "owner.json").writeText(
+                json.encodeToString(OwnerMeta(origin = owner.origin, username = owner.username)),
+            )
+        }
+    }
+
+    /** 旧版本把副本直接放在 filesDir/offline/<itemId>：归属确定后挪进当前账号目录一次 */
+    private fun migrateLegacy(owner: Owner) {
+        val target = ownerDir(owner)
+        baseRoot.listFiles()?.filter { it.isDirectory && !it.name.startsWith("owner_") }.orEmpty().forEach { legacy ->
+            if (legacy.name == "_none") return@forEach
+            val dest = File(target, legacy.name)
+            if (!dest.exists()) legacy.renameTo(dest) else legacy.deleteRecursively()
+        }
+    }
+
+    private fun refreshOtherOwners() {
+        val active = activeOwner?.key
+        val list = baseRoot.listFiles()
+            ?.filter { it.isDirectory && it.name.startsWith("owner_") }
+            ?.mapNotNull { dir ->
+                val key = dir.name.removePrefix("owner_")
+                if (key == active) return@mapNotNull null
+                val meta = runCatching {
+                    json.decodeFromString<OwnerMeta>(File(dir, "owner.json").readText())
+                }.getOrNull() ?: return@mapNotNull null
+                if (meta.username.isBlank()) return@mapNotNull null
+                var items = 0
+                var bytes = 0L
+                dir.listFiles()?.filter(File::isDirectory)?.forEach { itemDir ->
+                    itemDir.listFiles()?.filter(File::isDirectory)?.forEach { fileDir ->
+                        val pack = File(fileDir, "pack.json")
+                        val video = fileDir.listFiles()?.firstOrNull { it.name.startsWith("video.") }
+                        if (pack.isFile && video != null && video.length() > 0) {
+                            items += 1
+                            bytes += video.length()
+                        }
+                    }
+                }
+                OtherOwner(Owner(key, meta.origin, meta.username), items, bytes)
+            }
+            .orEmpty()
+            .filter { it.items > 0 }
+            .sortedBy { it.owner.username }
+        _otherOwners.value = list
+    }
+
+    /** 删除其他账号在这台设备上的下载（只动副本，不动服务端） */
+    fun deleteOwner(owner: Owner) {
+        if (owner.key == activeOwner?.key) return
+        File(baseRoot, "owner_${owner.key}").deleteRecursively()
+        refreshOtherOwners()
     }
 
     fun unitDir(mediaItemId: Long, fileId: Long): File =

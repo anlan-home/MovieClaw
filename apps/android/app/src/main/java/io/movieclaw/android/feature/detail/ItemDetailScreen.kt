@@ -173,6 +173,7 @@ class ItemDetailViewModel @Inject constructor(
     /** 离线下载（iOS `OfflineDownloadControl` 的数据源） */
     private val offlineStore: io.movieclaw.android.core.offline.OfflineStore,
     private val offlineDownloader: io.movieclaw.android.core.offline.OfflineDownloader,
+    private val offlinePrefs: io.movieclaw.android.core.offline.OfflinePrefs,
 ) : ViewModel() {
 
     /** 本机副本（下完的） */
@@ -186,6 +187,9 @@ class ItemDetailViewModel @Inject constructor(
     /** 开始过（含暂停/失败）的单元：文件 id → 副本记录 */
     val offlineKnown: kotlinx.coroutines.flow.StateFlow<Map<Long, io.movieclaw.android.core.offline.OfflineStore.Pack>> =
         offlineDownloader.known
+
+    /** 上次选的下载档位：选档面板默认带出（iOS `OfflineSettings.lastProfile`） */
+    val lastDownloadProfile = offlinePrefs.lastProfile
 
     /** 机器名（「下载到 <设备名>」「只删 <设备名> 上的副本」） */
     val deviceName: String = android.os.Build.MODEL ?: "本机"
@@ -212,6 +216,7 @@ class ItemDetailViewModel @Inject constructor(
         profile: String,
     ) {
         val origin = repository.ui.value.origin ?: return
+        viewModelScope.launch { offlinePrefs.setLastProfile(profile) }
         viewModelScope.launch {
             val api = apiFactory.forOrigin(origin)
             fileIds.forEach { fileId ->

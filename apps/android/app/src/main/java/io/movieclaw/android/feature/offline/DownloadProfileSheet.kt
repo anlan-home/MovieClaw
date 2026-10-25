@@ -52,6 +52,7 @@ import io.movieclaw.android.core.designsystem.Warning
 import io.movieclaw.android.core.model.OfflineFileProfiles
 import io.movieclaw.android.core.model.OfflineProfile
 import io.movieclaw.android.core.offline.OfflineDownloadChoices
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 /**
  * 下载选档（iOS `OfflineProfileSheet` 的对应物，docs/design/offline-download.md §5、§8）：
@@ -74,6 +75,8 @@ fun DownloadScopeSheet(
     singleFileId: Long? = null,
     deviceName: String,
     freeBytes: Long,
+    /** 上次选的档位（iOS `OfflineSettings.lastProfile`）：有就默认选它 */
+    defaultProfile: String? = null,
     /** 打开时把所有范围的文件一次问完：文件 id → 档位 */
     loadProfiles: suspend (List<Long>) -> Map<Long, OfflineFileProfiles>,
     onDismiss: () -> Unit,
@@ -113,8 +116,10 @@ fun DownloadScopeSheet(
         runCatching { loadProfiles(all) }
             .onSuccess { map ->
                 entries = map
-                // 默认选第一档（原画在服务端清单里排第一）
-                choice = map[all.firstOrNull()]?.profiles?.firstOrNull()?.profile
+                // 默认带上次选的档位；没有/已下架才落到第一档（原画在服务端清单里排第一）
+                val profiles = map[all.firstOrNull()]?.profiles.orEmpty()
+                choice = profiles.firstOrNull { it.profile == defaultProfile }?.profile
+                    ?: profiles.firstOrNull()?.profile
                 loading = false
             }
             .onFailure {
@@ -176,7 +181,7 @@ fun DownloadScopeSheet(
                 }
                 error != null -> Text(error!!, style = McType.footnote, color = TextMuted, lineHeight = 20.sp)
                 effectiveScopes.isEmpty() -> Text("都已下载", style = McType.footnote, color = TextMuted)
-                else -> Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 520.dp)) {
+                else -> Column(Modifier.formSheetScroll().verticalScroll(rememberScrollState()).heightIn(max = 520.dp)) {
                     // 范围分段（剧集）：选中的集 / 未看 / 剩余
                     if (effectiveScopes.size > 1) {
                         Text("下载范围", style = McType.caption, color = TextFaint)
