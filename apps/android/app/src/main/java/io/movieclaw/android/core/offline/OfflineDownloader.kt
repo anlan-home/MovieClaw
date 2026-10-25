@@ -22,6 +22,11 @@ import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
+private const val BATCH_MANIFEST_RETRY_MS = 5_000L
+
+/** 断网时最多等约 5 分钟；服务器真没有这个文件时不要无限重试 */
+private const val BATCH_MANIFEST_ATTEMPTS = 60
+
 /**
  * 离线下载器：一个单元一个 Job（串行队列），OkHttp 流式落盘 + Range 续传。
  *
@@ -179,6 +184,43 @@ class OfflineDownloader @Inject constructor(
     /** 转码档：建导出 → 轮询 → 下载导出文件 */
     fun enqueueExport(origin: String, pack: OfflineStore.Pack, manifest: io.movieclaw.android.core.model.OfflineManifest, profile: String) {
         start(origin, pack, manifest, profile = profile)
+    }
+
+    /**
+     * 批量下载（剧集范围）：清单在应用级 scope 里逐集取，断网时等网络恢复再继续，
+     * 不把「范围里还没轮到的集」静默跳过。切账号后旧批次的后续集不再启动。
+     */
+    fun enqueueBatch(
+        origin: String,
+        fileIds: List<Long>,
+        profile: String,
+        packOf: (io.movieclaw.android.core.model.OfflineManifest) -> OfflineStore.Pack,
+    ) {
+        val owner = store.ownerKey.value
+        scope.launch {
+            val api = apiFactory.forOrigin(origin)
+            for (fileId in fileIds) {
+                if (owner != null && store.ownerKey.value != owner) return@launch
+                if (store.packFor(fileId) != null) continue
+                var manifest = manifests[fileId]
+                var attempts = 0
+                while (manifest == null && attempts < BATCH_MANIFEST_ATTEMPTS) {
+                    if (owner != null && store.ownerKey.value != owner) return@launch
+                    attempts++
+                    manifest = runCatching { api.offlineManifest(fileId).dataOrThrow() }.getOrNull()
+                    if (manifest == null && attempts < BATCH_MANIFEST_ATTEMPTS) {
+                        kotlinx.coroutines.delay(BATCH_MANIFEST_RETRY_MS)
+                    }
+                }
+                val ready = manifest
+                if (ready == null) {
+                    android.util.Log.w("OfflineDownload", "批量下载取清单失败，跳过 fileId=$fileId")
+                    continue
+                }
+                start(origin, packOf(ready), ready, profile.takeIf { it != "original" })
+            }
+            store.scan()
+        }
     }
 
     fun pause(fileId: Long) {

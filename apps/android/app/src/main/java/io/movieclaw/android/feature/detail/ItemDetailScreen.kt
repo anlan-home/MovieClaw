@@ -207,8 +207,8 @@ class ItemDetailViewModel @Inject constructor(
     }
 
     /**
-     * 按范围 + 档位开始下载（iOS `OfflineDownloader.start`）：先取第一集的完整清单把展示数据存下，
-     * 其余集由下载器逐集取清单；同一条目下的集共用 mediaItemId / 标题。
+     * 按范围 + 档位开始下载（iOS `OfflineDownloader.start`）：清单在下载器的应用级 scope 里逐集取，
+     * 断网时等网络恢复再继续，不会把范围里还没轮到的集静默跳过。
      */
     fun startOfflineDownload(
         detail: LibraryItemDetailView,
@@ -217,41 +217,30 @@ class ItemDetailViewModel @Inject constructor(
     ) {
         val origin = repository.ui.value.origin ?: return
         viewModelScope.launch { offlinePrefs.setLastProfile(profile) }
-        viewModelScope.launch {
-            val api = apiFactory.forOrigin(origin)
-            fileIds.forEach { fileId ->
-                if (offlineStore.packFor(fileId) != null) return@forEach
-                val manifest = runCatching { api.offlineManifest(fileId).dataOrThrow() }.getOrNull() ?: return@forEach
-                val epLabel = manifest.seasonNumber.takeIf { it > 0 }?.let {
-                    "S%02dE%02d".format(it, manifest.episodeNumber)
-                }
-                val itemObj = manifest.item as? kotlinx.serialization.json.JsonObject
-                val libObj = manifest.library as? kotlinx.serialization.json.JsonObject
-                fun jsonStr(obj: kotlinx.serialization.json.JsonObject?, key: String): String? =
-                    obj?.get(key)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
-                fun jsonLong(obj: kotlinx.serialization.json.JsonObject?, key: String): Long? =
-                    obj?.get(key)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() }
-                val pack = io.movieclaw.android.core.offline.OfflineStore.Pack(
-                    mediaItemId = manifest.mediaItemId,
-                    fileId = manifest.fileId,
-                    seasonNumber = manifest.seasonNumber,
-                    episodeNumber = manifest.episodeNumber,
-                    title = detail.title,
-                    subtitle = epLabel,
-                    libraryName = jsonStr(libObj, "name").orEmpty(),
-                    posterUrl = jsonStr(itemObj, "poster_url"),
-                    container = if (profile == "original") manifest.container else "mp4",
-                    profile = profile,
-                    durationMs = manifest.durationMs,
-                    libraryId = jsonLong(libObj, "id") ?: 0L,
-                )
-                if (profile == "original") {
-                    offlineDownloader.enqueueOriginal(origin, pack, manifest)
-                } else {
-                    offlineDownloader.enqueueExport(origin, pack, manifest, profile)
-                }
+        offlineDownloader.enqueueBatch(origin, fileIds, profile) { manifest ->
+            val epLabel = manifest.seasonNumber.takeIf { it > 0 }?.let {
+                "S%02dE%02d".format(it, manifest.episodeNumber)
             }
-            offlineStore.scan()
+            val itemObj = manifest.item as? kotlinx.serialization.json.JsonObject
+            val libObj = manifest.library as? kotlinx.serialization.json.JsonObject
+            fun jsonStr(obj: kotlinx.serialization.json.JsonObject?, key: String): String? =
+                obj?.get(key)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+            fun jsonLong(obj: kotlinx.serialization.json.JsonObject?, key: String): Long? =
+                obj?.get(key)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() }
+            io.movieclaw.android.core.offline.OfflineStore.Pack(
+                mediaItemId = manifest.mediaItemId,
+                fileId = manifest.fileId,
+                seasonNumber = manifest.seasonNumber,
+                episodeNumber = manifest.episodeNumber,
+                title = detail.title,
+                subtitle = epLabel,
+                libraryName = jsonStr(libObj, "name").orEmpty(),
+                posterUrl = jsonStr(itemObj, "poster_url"),
+                container = if (profile == "original") manifest.container else "mp4",
+                profile = profile,
+                durationMs = manifest.durationMs,
+                libraryId = jsonLong(libObj, "id") ?: 0L,
+            )
         }
     }
 
