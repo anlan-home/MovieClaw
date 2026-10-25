@@ -435,8 +435,8 @@ interface McApi {
         @Query("seed") seed: Long? = null,
         @Query("offset") offset: Int = 0,
         @Query("limit") limit: Int = 10,
-        /** App 会放的方式；一期只有 seek（为将来预剪的 clip 留口子） */
-        @Query("modes") modes: String = "seek",
+        /** App 会放的方式：原片起播 + 服务端预切片段（服务端开了「片段预切」就只出切好的） */
+        @Query("modes") modes: String = "seek,clip",
         @Query("kind") kind: String? = null,
         @Query("g") genres: String? = null,
         @Query("c") countries: String? = null,
