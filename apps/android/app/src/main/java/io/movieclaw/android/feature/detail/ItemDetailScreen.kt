@@ -161,6 +161,7 @@ import io.movieclaw.android.core.designsystem.mcCards
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.graphicsLayer
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 @HiltViewModel
 class ItemDetailViewModel @Inject constructor(
@@ -1538,9 +1539,11 @@ fun ItemDetailScreen(
     LaunchedEffect(readyDetail?.mediaItemId) {
         if (readyDetail != null) vm.loadLibrary()
     }
-    // 菜单本体独立成一层（Popup）：11 行比 hero 高，摆在 hero 里会被正文盖住
-    if (menuOpen && readyDetail != null) {
+    // 菜单本体独立成一层（Popup）：11 行比 hero 高，摆在 hero 里会被正文盖住。
+    // 一直组合、只切 visible——收起时 Popup 多留 150ms 播完缩回动画。
+    if (readyDetail != null) {
         ItemActionsMenuPopup(
+            visible = menuOpen,
             entries = itemMenuEntries(
                 detail = readyDetail,
                 library = library,
@@ -3534,7 +3537,7 @@ private fun DeleteFileSheet(
         // 附加选项是别的模块登记的、条数不定：内容超出一屏时可滚，删除按钮不会被挤出屏幕
         Column(
             Modifier.fillMaxWidth()
-                .verticalScroll(rememberScrollState())
+                .formSheetScroll().verticalScroll(rememberScrollState())
                 .padding(horizontal = mcCards.pagePadding, vertical = 4.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

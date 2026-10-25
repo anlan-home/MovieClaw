@@ -71,6 +71,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 /**
  * 刮削与整理 —— 严格照**网页移动端真实页面**实现（用户截图核对）：
@@ -544,7 +545,7 @@ private fun EditorSheet(
         contentColor = TextPrimary,
     ) {
         Column(
-            Modifier.fillMaxWidth().heightIn(max = 620.dp).verticalScroll(rememberScrollState()).padding(16.dp),
+            Modifier.fillMaxWidth().heightIn(max = 620.dp).formSheetScroll().verticalScroll(rememberScrollState()).padding(16.dp),
         ) {
             when (sheet) {
                 Sheet.MetaLang -> {

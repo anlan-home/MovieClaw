@@ -80,6 +80,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 /*
  * 设置 → 资源站点（原生页，参照移动网页端 `site-config-section.tsx`）：
@@ -857,7 +858,7 @@ private fun AddSiteSheet(
         containerColor = Color(0xFF15161A),
         contentColor = TextPrimary,
     ) {
-        Column(Modifier.fillMaxWidth().heightIn(max = 640.dp).verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
+        Column(Modifier.fillMaxWidth().heightIn(max = 640.dp).formSheetScroll().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
             Text(if (picked == null) "添加站点" else picked!!.displayName, style = McType.title3, color = TextPrimary)
             Spacer(Modifier.height(6.dp))
             if (picked == null) {
@@ -933,7 +934,7 @@ private fun SiteAuthSheet(
         containerColor = Color(0xFF15161A),
         contentColor = TextPrimary,
     ) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
+        Column(Modifier.fillMaxWidth().formSheetScroll().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
             Text("编辑「$displayName」的授权", style = McType.title3, color = TextPrimary)
             Spacer(Modifier.height(8.dp))
             SiteAuthForm(
@@ -1143,7 +1144,7 @@ private fun BoostSheet(
         containerColor = Color(0xFF15161A),
         contentColor = TextPrimary,
     ) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
+        Column(Modifier.fillMaxWidth().formSheetScroll().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
             Text(
                 if (item.boostEnabled) "刷流设置 · " + item.siteId else "开启自动刷分享率",
                 style = McType.title3, color = TextPrimary,

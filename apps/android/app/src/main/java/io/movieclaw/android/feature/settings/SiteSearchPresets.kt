@@ -66,6 +66,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import java.util.UUID
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 /*
  * 资源站点 → 搜索分类（同 Web `search-settings.tsx`）：
@@ -396,7 +397,7 @@ private fun PresetEditorSheet(
         contentColor = TextPrimary,
     ) {
         Column(
-            Modifier.fillMaxWidth().heightIn(max = 720.dp).verticalScroll(rememberScrollState())
+            Modifier.fillMaxWidth().heightIn(max = 720.dp).formSheetScroll().verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(9.dp),
         ) {

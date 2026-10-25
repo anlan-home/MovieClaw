@@ -100,6 +100,7 @@ import io.movieclaw.android.core.designsystem.TextMuted
 import io.movieclaw.android.core.designsystem.Warning
 import io.movieclaw.android.core.model.SubscriptionView
 import io.movieclaw.android.core.designsystem.mcCards
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 /**
  * 下一集英雄 —— 实测：高 500、整幅剧照铺满，图片带遮罩
@@ -612,7 +613,7 @@ fun SubscribeScreen(
                     Modifier
                         .fillMaxWidth()
                         .weight(1f, fill = false)
-                        .verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                        .formSheetScroll().verticalScroll(androidx.compose.foundation.rememberScrollState()),
                 ) {
                 Column(Modifier.padding(horizontal = 16.dp)) {
                     Row {

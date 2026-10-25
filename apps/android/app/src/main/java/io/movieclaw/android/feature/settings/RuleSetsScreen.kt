@@ -54,6 +54,7 @@ import io.movieclaw.android.core.designsystem.McType
 import io.movieclaw.android.core.designsystem.TextFaint
 import io.movieclaw.android.core.designsystem.TextMuted
 import io.movieclaw.android.core.designsystem.TextPrimary
+import io.movieclaw.android.core.designsystem.formSheetScroll
 import io.movieclaw.android.core.model.RoutingOptionsView
 import io.movieclaw.android.core.model.RuleSetPayload
 import io.movieclaw.android.core.model.RuleSetView
@@ -77,6 +78,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import javax.inject.Inject
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 /*
  * 设置 → 订阅规则（规则组；原生页，参照移动网页端 `rule-sets-panel.tsx`）：
@@ -713,11 +715,13 @@ private fun SmartProfileSheet(
 
     ModalBottomSheet(
         onDismissRequest = { if (!busy) onDismiss() },
+        // 面板拖动与内部滚动抢手势：拉满后滑到底再滑回顶部会来回跳（用户反馈）。
+        // formSheetScroll 吃掉内容滚到底后的剩余手势，面板仍可拖，但不再和列表互相带。
         containerColor = Color(0xFF15161A),
         contentColor = TextPrimary,
     ) {
         Column(
-            Modifier.fillMaxWidth().heightIn(max = 680.dp).verticalScroll(rememberScrollState())
+            Modifier.fillMaxWidth().heightIn(max = 680.dp).formSheetScroll().verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(9.dp),
         ) {
@@ -859,11 +863,13 @@ private fun RuleSetEditor(
 
     ModalBottomSheet(
         onDismissRequest = { if (!busy) onDismiss() },
+        // 面板拖动与内部滚动抢手势：拉满后滑到底再滑回顶部会来回跳（用户反馈）。
+        // formSheetScroll 吃掉内容滚到底后的剩余手势，面板仍可拖，但不再和列表互相带。
         containerColor = Color(0xFF15161A),
         contentColor = TextPrimary,
     ) {
         Column(
-            Modifier.fillMaxWidth().heightIn(max = 760.dp).verticalScroll(rememberScrollState())
+            Modifier.fillMaxWidth().heightIn(max = 760.dp).formSheetScroll().verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(9.dp),
         ) {

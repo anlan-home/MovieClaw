@@ -441,6 +441,9 @@ fun DiscoverScreen(
     var showFilterMenu by remember { mutableStateOf(false) }
     /** 结果页条件胶囊点开的那一维（null = 没开；浮层挂在胶囊行正下方） */
     var chipDim by remember { mutableStateOf<String?>(null) }
+    // 收起时 chipDim 立刻变 null，面板还要缩回；留住最后一次的维度
+    var lastChipDim by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(chipDim) { if (chipDim != null) lastChipDim = chipDim }
 
     // 展开层宿主：同一时刻只展开一张海报卡（网页 hover 层在触摸端的等价物）
     val posterReveal = remember { mutableStateOf<String?>(null) }
@@ -728,53 +731,53 @@ fun DiscoverScreen(
         )
     }
 
-    if (showSourceMenu) {
-        // 与「全部」菜单同一套弹出（iOS 两处菜单都是同一个出现动画）：这里是**左上锚点**，
-        // 所以原点取左下对称值 0.15；之前漏了这层，TMDB 面板是硬闪出来的（用户反馈）
-        io.movieclaw.android.core.designsystem.MenuAppear(
-            originX = 0.15f,
-            originY = 0.1f,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .statusBarsPadding()
-                .padding(start = McMetrics.topBarInsetRoot, top = McMetrics.topBarHeight),
-        ) {
-            SourceMenu(
-                mediaType = state.mediaType,
-                source = state.source,
-                onPickMediaType = { vm.switchMediaType(it); showSourceMenu = false },
-                onPickSource = { vm.switchSource(it); showSourceMenu = false },
-            )
-        }
+    // 三个菜单都一直组合、只切 visible：收起时缩回原点再移除（弹入/缩回同一套节奏）
+    // 与「全部」菜单同一套弹出（iOS 两处菜单都是同一个出现动画）：这里是**左上锚点**，
+    // 所以原点取左下对称值 0.15；之前漏了这层，TMDB 面板是硬闪出来的（用户反馈）
+    io.movieclaw.android.core.designsystem.MenuAppear(
+        visible = showSourceMenu,
+        originX = 0.15f,
+        originY = 0.1f,
+        modifier = Modifier
+            .align(Alignment.TopStart)
+            .statusBarsPadding()
+            .padding(start = McMetrics.topBarInsetRoot, top = McMetrics.topBarHeight),
+    ) {
+        SourceMenu(
+            mediaType = state.mediaType,
+            source = state.source,
+            onPickMediaType = { vm.switchMediaType(it); showSourceMenu = false },
+            onPickSource = { vm.switchSource(it); showSourceMenu = false },
+        )
     }
-    if (showFilterMenu) {
-        // 与另两处菜单同一套弹出（菜单内部不再自带一层，避免 0.82² 的叠放）
-        io.movieclaw.android.core.designsystem.MenuAppear(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .statusBarsPadding()
-                .padding(end = McMetrics.topBarInsetRoot, top = McMetrics.topBarHeight),
-        ) {
-            DiscoveryFilterMenu(
-                filter = state.filters,
-                // 选一项即生效并收起（同 iOS）；条件被清空后正文本就回到首页板块
-                onApply = { vm.applyFilters(it); showFilterMenu = false },
-            )
-        }
+    // 与另两处菜单同一套弹出（菜单内部不再自带一层，避免 0.82² 的叠放）
+    io.movieclaw.android.core.designsystem.MenuAppear(
+        visible = showFilterMenu,
+        modifier = Modifier
+            .align(Alignment.TopEnd)
+            .statusBarsPadding()
+            .padding(end = McMetrics.topBarInsetRoot, top = McMetrics.topBarHeight),
+    ) {
+        DiscoveryFilterMenu(
+            filter = state.filters,
+            // 选一项即生效并收起（同 iOS）；条件被清空后正文本就回到首页板块
+            onApply = { vm.applyFilters(it); showFilterMenu = false },
+        )
     }
     // 结果页条件胶囊点开的那一维：浮层挂在顶栏右下（与「全部」菜单同一处）。
     // iOS 是把菜单锚在胶囊本身上；安卓这边胶囊在滚动容器里，锚点跟着滚会跑偏，
     // 统一挂在固定的右上角——同一个取值菜单、同一份文案，只是位置固定可预期。
-    chipDim?.let { dim ->
-        // 与另两处菜单同一套弹出（原来这层也漏了，硬闪出来）
-        io.movieclaw.android.core.designsystem.MenuAppear(
-            originX = 0.85f,
-            originY = 0.1f,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .statusBarsPadding()
-                .padding(end = McMetrics.topBarInsetRoot, top = topBarTotal),
-        ) {
+    val dimPanelKey = chipDim ?: lastChipDim
+    io.movieclaw.android.core.designsystem.MenuAppear(
+        visible = chipDim != null,
+        originX = 0.85f,
+        originY = 0.1f,
+        modifier = Modifier
+            .align(Alignment.TopEnd)
+            .statusBarsPadding()
+            .padding(end = McMetrics.topBarInsetRoot, top = topBarTotal),
+    ) {
+        dimPanelKey?.let { dim ->
             DiscoveryFilterDimPanel(
                 dimKey = dim,
                 filters = state.filters,

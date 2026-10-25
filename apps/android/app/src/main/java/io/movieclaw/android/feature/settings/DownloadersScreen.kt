@@ -76,6 +76,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 /*
  * 设置 → 下载器（原生页，参照移动网页端 `downloader-config-section.tsx`）：
@@ -538,7 +539,7 @@ private fun DownloaderFormSheet(
         contentColor = TextPrimary,
     ) {
         Column(
-            Modifier.fillMaxWidth().heightIn(max = 700.dp).verticalScroll(rememberScrollState())
+            Modifier.fillMaxWidth().heightIn(max = 700.dp).formSheetScroll().verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -775,7 +776,7 @@ private fun LimitsSheet(
         contentColor = TextPrimary,
     ) {
         Column(
-            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp),
+            Modifier.fillMaxWidth().formSheetScroll().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text("限速与队列 · ${item.name}", style = McType.title3, color = TextPrimary)

@@ -258,10 +258,10 @@ private fun ItemMenuRow(
     }
 }
 
-/** 面板出现动画的包装（与发现页菜单同一个 spring 参数；菜单在右上角，原点也就是右上） */
+/** 面板出现/缩回动画的包装（与发现页菜单同一个 spring 参数；菜单在右上角，原点也就是右上） */
 @Composable
-fun ItemActionsMenuAppear(content: @Composable () -> Unit) {
-    MenuAppear(originX = 0.9f, originY = 0.06f) { content() }
+fun ItemActionsMenuAppear(visible: Boolean = true, content: @Composable () -> Unit) {
+    MenuAppear(visible = visible, originX = 0.9f, originY = 0.06f) { content() }
 }
 
 /**
@@ -270,13 +270,17 @@ fun ItemActionsMenuAppear(content: @Composable () -> Unit) {
  * 不能直接摆在 hero 里——菜单有 11 行，比 hero 还高，溢出部分会被后画的正文盖住
  * （实测「转移到其他库」往下就看不见了）。Popup 是单独的窗口，多高都压在所有内容之上，
  * 顺带白拿「点空白 / 返回键关掉」（`focusable = true`）。
+ *
+ * [visible] 切 false 时 Popup 不立刻销毁：多留一帧动画的时间，面板缩回右上再关窗。
  */
 @Composable
 fun ItemActionsMenuPopup(
     entries: List<ItemMenuEntry>,
     onPick: (ItemActionId) -> Unit,
     onDismiss: () -> Unit,
+    visible: Boolean = true,
 ) {
+    if (!io.movieclaw.android.core.designsystem.rememberMenuRetained(visible)) return
     val density = LocalDensity.current
     // 与 ⋯ 钮的右边缘对齐（顶栏横向内距 8dp），纵向落在钮下方一点点
     val edgePx = with(density) { 8.dp.roundToPx() }
@@ -287,6 +291,8 @@ fun ItemActionsMenuPopup(
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true),
     ) {
-        ItemActionsMenuAppear { ItemActionsMenuPanel(entries = entries, onPick = onPick) }
+        ItemActionsMenuAppear(visible = visible) {
+            ItemActionsMenuPanel(entries = entries, onPick = onPick)
+        }
     }
 }

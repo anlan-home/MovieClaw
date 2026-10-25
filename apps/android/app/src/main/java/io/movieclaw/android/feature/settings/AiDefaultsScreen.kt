@@ -56,6 +56,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 /**
  * AI 设定（iOS `AIDefaultsSettingsView` 的对应物）：两个用途的默认模型。
@@ -340,7 +341,7 @@ private fun ModelPickSheet(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(start = 20.dp, bottom = 8.dp),
             )
-            LazyColumn(Modifier.fillMaxWidth()) {
+            LazyColumn(Modifier.fillMaxWidth().formSheetScroll()) {
                 items(models, key = { it.ref }) { m ->
                     Row(
                         Modifier.fillMaxWidth().clickable { onPick(m.ref) }

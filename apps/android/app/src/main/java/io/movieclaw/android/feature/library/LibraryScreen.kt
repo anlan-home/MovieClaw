@@ -1043,17 +1043,26 @@ fun LibraryScreen(
         }
 
         // ⋯ 菜单：自定义首页 / 全部合集 / 管理媒体库（iOS library-more 三项）
+        // 一直组合、只切 visible：收起时缩回右上再移除
         if (moreOpen) {
             Box(Modifier.fillMaxSize().clickable { moreOpen = false })
-            io.movieclaw.android.core.designsystem.MenuAppear(
-                modifier = Modifier.align(Alignment.TopEnd),
-                originX = 0.85f,
-                originY = 0.1f,
-            ) {
+        }
+        io.movieclaw.android.core.designsystem.MenuAppear(
+            visible = moreOpen,
+            modifier = Modifier.align(Alignment.TopEnd),
+            originX = 0.85f,
+            originY = 0.1f,
+        ) {
             Column(
                 Modifier
                     .statusBarsPadding()
-                    .padding(end = mcCards.pagePadding, top = 44.dp)
+                    // 落在「▶ ⋯」玻璃胶囊下方：胶囊高 44、比 52 的顶栏上下各留 4，
+                    // 再加 12 的视觉补偿 → 底边约在状态栏下 60dp；菜单从 72dp 起，
+                    // 不再压住片段 / ⋯ 胶囊（用户反馈）
+                    .padding(
+                        end = mcCards.pagePadding,
+                        top = McMetrics.topBarHeight + McMetrics.topBarActionsOffset + 8.dp,
+                    )
                     .width(190.dp)
                     .clip(RoundedCornerShape(McMetrics.menuRadius))
                     .background(MenuSurface)
@@ -1071,7 +1080,6 @@ fun LibraryScreen(
                 if (io.movieclaw.android.core.session.LocalPermissions.current.canManageLibraries) {
                     MenuItem("管理媒体库") { moreOpen = false; onOpenManage() }
                 }
-            }
             }
         }
     }

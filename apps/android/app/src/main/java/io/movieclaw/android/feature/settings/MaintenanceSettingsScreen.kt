@@ -104,6 +104,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 /* ---------------- 更新与维护 ---------------- */
 
@@ -1113,7 +1114,7 @@ private fun RollbackDialog(
                 Column(
                     Modifier
                         .heightIn(max = 420.dp)
-                        .verticalScroll(rememberScrollState()),
+                        .formSheetScroll().verticalScroll(rememberScrollState()),
                 ) {
                     targets.forEachIndexed { index, target ->
                         val isSel = selected == index

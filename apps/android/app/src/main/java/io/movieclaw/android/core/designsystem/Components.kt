@@ -43,7 +43,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -51,6 +53,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -892,27 +895,61 @@ fun LibraryItemCard(
     }
 }
 
+/** 收起动画时长：与出现用的弹簧收尾接近，不留“啪”一下消失的空档 */
+private const val MENU_EXIT_MS = 150
+
+/**
+ * 把「显示中 → 收起」的这几帧留住：调用方可以一直组合菜单、只切 [visible]，
+ * 收起时内容还能再活 [exitMs] 把缩回动画播完。
+ */
+@Composable
+fun rememberMenuRetained(visible: Boolean, exitMs: Long = MENU_EXIT_MS.toLong()): Boolean {
+    var retained by remember { mutableStateOf(visible) }
+    LaunchedEffect(visible) {
+        if (visible) {
+            retained = true
+        } else if (retained) {
+            kotlinx.coroutines.delay(exitMs)
+            retained = false
+        }
+    }
+    return retained
+}
+
 /**
  * 菜单弹出动画：从触发按钮的原点（默认右上）弹簧缩放长出 + 淡入。
- * 用法：把菜单面板包进 MenuAppear { ... }——面板本身照旧定位，动画只管「出现」。
+ * 用法：把菜单面板包进 MenuAppear(visible = open) { ... }，并把调用处的 if(open) 去掉——
+ * 面板本身照旧定位，动画管「出现」也管「缩回」（visible 变 false 时缩回原点并淡出）。
  * 与活动页正在播放卡长按菜单（Popup 原点弹出）同一套弹簧参数，观感一致。
  */
 @Composable
 fun MenuAppear(
     modifier: Modifier = Modifier,
+    visible: Boolean = true,
     originX: Float = 0.85f,
     originY: Float = 0.1f,
     content: @Composable () -> Unit,
 ) {
+    if (!rememberMenuRetained(visible)) return
     val appear = remember { androidx.compose.animation.core.Animatable(0f) }
-    LaunchedEffect(Unit) {
-        appear.animateTo(
-            1f,
-            androidx.compose.animation.core.spring(
-                dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
-                stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow,
-            ),
-        )
+    LaunchedEffect(visible) {
+        if (visible) {
+            appear.animateTo(
+                1f,
+                androidx.compose.animation.core.spring(
+                    dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+                    stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow,
+                ),
+            )
+        } else {
+            appear.animateTo(
+                0f,
+                androidx.compose.animation.core.tween(
+                    durationMillis = MENU_EXIT_MS,
+                    easing = androidx.compose.animation.core.FastOutLinearInEasing,
+                ),
+            )
+        }
     }
     androidx.compose.foundation.layout.Box(
         modifier.graphicsLayer {
@@ -924,3 +961,16 @@ fun MenuAppear(
         },
     ) { content() }
 }
+
+/**
+ * 表单面板里的滚动层：内容滚到边界后**不要再把剩余手势交给 ModalBottomSheet**。
+ * 交给面板会在「拉到全屏、滑到底再滑回顶部」时形成高度/滚动位置互相修正的回弹
+ * （用户反馈的上下不停跳动）。拦截后内容自己滚，面板仍可用顶部的短条拖动收起/展开。
+ */
+fun Modifier.formSheetScroll(): Modifier = this.nestedScroll(object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+    override fun onPostScroll(
+        consumed: androidx.compose.ui.geometry.Offset,
+        available: androidx.compose.ui.geometry.Offset,
+        source: androidx.compose.ui.input.nestedscroll.NestedScrollSource,
+    ): androidx.compose.ui.geometry.Offset = available
+})

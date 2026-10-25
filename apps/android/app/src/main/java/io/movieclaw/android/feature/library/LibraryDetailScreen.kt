@@ -104,6 +104,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import io.movieclaw.android.core.designsystem.mcGridCells
 import io.movieclaw.android.core.designsystem.mcCards
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 private const val PAGE_SIZE = 60
 
@@ -600,7 +601,7 @@ private fun FilterSheetContent(
                     Modifier
                         .fillMaxWidth()
                         .heightIn(max = 460.dp)
-                        .verticalScroll(rememberScrollState()),
+                        .formSheetScroll().verticalScroll(rememberScrollState()),
                 ) {
                     FacetGroup("类型", data.genres, draft.genres) { draft = draft.copy(genres = it) }
                     FacetGroup("年代", data.decades, draft.decades) { draft = draft.copy(decades = it) }

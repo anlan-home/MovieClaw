@@ -81,6 +81,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import io.movieclaw.android.core.designsystem.formSheetScroll
 
 /*
  * 设置 → 自动入库（原生页，参照移动网页端 `import-watch-section.tsx`，服务端 routes/import_watch.py）：
@@ -812,7 +813,7 @@ private fun RuleSheet(
         contentColor = TextPrimary,
     ) {
         Column(
-            Modifier.fillMaxWidth().heightIn(max = 740.dp).verticalScroll(rememberScrollState())
+            Modifier.fillMaxWidth().heightIn(max = 740.dp).formSheetScroll().verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(9.dp),
         ) {
