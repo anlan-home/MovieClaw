@@ -136,10 +136,12 @@ internal fun resolveImageUrl(raw: String?, base: String?, px: Int?): String? {
     // 自家服务器的绝对地址（服务端有些字段带域名，如库封面 `/{origin}/api/v1/libraries/1/cover`）
     // 剥掉域名按相对路径直连：包一层 `/images/proxy` 既绕远，又会被服务端的域名白名单打回 400
     // （实机日志抓到过：媒体库封面整批 400）。真正的远程图（TMDB 等）才走代理。
+    // 注意 origin 可能是**另一个入口**的域名（内网 IP 连访时服务端回外网域名），
+    // 所以只要路径是站内 `/api/v1/…`，就按当前入口重写，不能只认当前 base 前缀。
     val path = when {
         !absolute -> raw
         base != null && raw.startsWith(base) -> raw.removePrefix(base)
-        else -> null
+        else -> serverRelativePath(raw)
     }
     if (path != null) {
         if (base == null) return raw
@@ -158,6 +160,15 @@ internal fun resolveImageUrl(raw: String?, base: String?, px: Int?): String? {
         append(java.net.URLEncoder.encode(raw, "UTF-8"))
         if (width != null) append("&w=").append(width)
     }
+}
+
+/** 站内绝对地址 → 站内路径（保留查询）；不是 `/api/v1/…` 的第三方图返回 null，继续走代理 */
+private fun serverRelativePath(raw: String): String? {
+    val afterScheme = raw.substringAfter("://", "")
+    val slash = afterScheme.indexOf('/')
+    if (slash < 0) return null
+    val path = afterScheme.substring(slash)
+    return path.takeIf { it.startsWith("/api/v1/") }
 }
 
 /** 地址补/换 `w=`（同 iOS `URL.imageWidth`：已有的 `w` 换掉，不重复堆参数） */
